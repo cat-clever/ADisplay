@@ -990,7 +990,7 @@ void AD_CALL ad_engine_stop(AdEngine* engine) {
         if (engine->dlna_renderer) {
             engine->dlna_renderer->set_listener(nullptr);
             engine->dlna_renderer->stop();
-            engine->dlna_renderer->reset();
+            engine->dlna_renderer.reset();
         }
     }
     if (engine->dlna_bridge) {
