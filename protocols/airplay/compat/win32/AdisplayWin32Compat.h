@@ -57,6 +57,23 @@ typedef int adisplay_clockid_t;
 #    define clock_gettime adisplay_clock_gettime
 #  endif
 
+// SOL_TCP 是 Linux 的名字（在 TCP 层级上设 socket 选项时用）。
+//
+// UxPlay 自己有一段兜底：
+//     #if !defined(SOL_TCP) && defined(IPPROTO_TCP)
+//     #define SOL_TCP IPPROTO_TCP
+//     #endif
+// 但 WinSock 的 IPPROTO_TCP 是**枚举常量**而不是宏，defined() 为假，
+// 那段兜底在 Windows 上不生效，于是 raop_rtp_mirror.c 里设置 TCP keepalive
+// 的地方直接编不过。这里补上同名映射。
+//
+// 补上之后那几处 setsockopt 在 Windows 上多半会返回「不支持该选项」——
+// 上游给的那组 keepalive 选项号是照 Linux 抄的。那没关系：代码对失败只记
+// 一条警告，退回系统默认的 keepalive 参数，不影响镜像本身。
+#  ifndef SOL_TCP
+#    define SOL_TCP IPPROTO_TCP
+#  endif
+
 // 微秒级睡眠。
 //
 // 同样换成自己的名字而不是直接定义 usleep 符号：万一将来换回某个自带
