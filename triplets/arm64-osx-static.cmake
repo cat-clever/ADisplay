@@ -17,6 +17,12 @@
 set(VCPKG_TARGET_ARCHITECTURE arm64)
 
 # 动态链接 CRT 与 C++ 运行库。
+# 必须显式声明目标架构。只设 VCPKG_TARGET_ARCHITECTURE 是不够的 ——
+# vcpkg 不会据此给编译器传 -arch，而 runner 主机是 arm64，编译器默认就编
+# arm64。后果是 FFmpeg 按 x86_64 生成了 x86 汇编、却交给一个 arm64 的
+# clang 去编，报一堆 "invalid input constraint 'c' in asm"。
+set(VCPKG_OSX_ARCHITECTURES arm64)
+
 set(VCPKG_CRT_LINKAGE dynamic)
 
 # 静态链接第三方库：自用项目，省得用户机器上还要装一堆依赖，
