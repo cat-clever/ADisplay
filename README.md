@@ -73,6 +73,11 @@ ADisplay/
 
 批次 0 的界面可以启动、显示设备信息与日志，但**还收不到投屏** —— 协议服务从批次 1 开始接入。
 
+## 安装
+
+各平台安装包见 [Releases](https://github.com/cat-clever/ADisplay/releases)。
+详细的安装步骤、系统拦截怎么放行、以及搜不到设备时该查什么，见 **[安装说明](docs/安装说明.md)**。
+
 ## 构建
 
 本项目**不使用本机编译发布**，所有安装包由 GitHub Actions 构建并发布到 Release。

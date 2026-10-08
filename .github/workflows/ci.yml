@@ -6,8 +6,16 @@ name: 构建与测试
 on:
   push:
     branches: [main]
+    # 纯文档改动不影响构建产物，没必要占一轮 CI。
+    # 注意 .github/ 下的文件不在此列，改 workflow 本身仍会触发。
+    paths-ignore: &docs_only
+      - 'docs/**'
+      - '**.md'
+      - 'LICENSE'
+      - '.gitignore'
   pull_request:
     branches: [main]
+    paths-ignore: *docs_only
   workflow_dispatch:
   workflow_call:
 
