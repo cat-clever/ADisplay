@@ -28,7 +28,11 @@
 
 namespace {
 
+// AdEngine 结构体与各 C 接口函数都定义在全局作用域，所以这两个别名
+// 必须放在这个匿名命名空间里 —— 匿名命名空间的名字在全局可见，
+// 漏掉哪一个，全局那边就会报 "use of undeclared identifier"。
 namespace common = adisplay::common;
+namespace discovery = adisplay::discovery;
 
 constexpr uint16_t kDefaultAirplayPort = 7000;
 constexpr uint16_t kDefaultDlnaPort    = 49152;
