@@ -101,7 +101,23 @@ FetchResult fetch_url(const std::string& url, int timeout_seconds) {
     // 远端代理偶尔会跳一次（例如带签名的地址先 302 到真实分片）。
     client.set_follow_location(true);
 
-    const httplib::Result response = client.Get(target.path.c_str());
+    // 请求头里有两处是刻意压掉的，都是为了迁就手机上的本地代理：
+    //
+    //   Connection: close —— 那类代理多是极简实现，应答不带 Content-Length 又
+    //                       不关连接时，客户端会一直等，最后报成「读失败」。
+    //   Accept-Encoding: identity —— 不去谈压缩。这份 httplib 编了 brotli，
+    //                       默认会带 Accept-Encoding: br，而有些代理对 br/gzip
+    //                       处理不当会直接掐断连接。
+    //
+    // 判据来自一次对照：同一台手机同一个地址，macOS 上的 AVPlayer 是能取到数据的
+    // （当时表现为有声音没画面），所以代理确实对外服务 —— 差别只可能在请求头。
+    const httplib::Headers headers = {
+        {"Connection", "close"},
+        {"Accept-Encoding", "identity"},
+        {"Accept", "*/*"},
+    };
+
+    const httplib::Result response = client.Get(target.path.c_str(), headers);
     if (!response) {
         result.error = "请求失败：" + std::string(httplib::to_string(response.error()));
         return result;
@@ -109,7 +125,9 @@ FetchResult fetch_url(const std::string& url, int timeout_seconds) {
 
     result.status = response->status;
     if (response->status != 200) {
-        result.error = "远端返回 HTTP " + std::to_string(response->status);
+        // 把内容类型一并带上：302 到别处、还是回了个错误页，从这里能看出来。
+        result.error = "远端返回 HTTP " + std::to_string(response->status) + "（" +
+                       response->get_header_value("Content-Type") + "）";
         return result;
     }
 
