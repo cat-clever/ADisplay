@@ -76,6 +76,12 @@ const ServiceSpec kAvTransportSpec = {
           <argument><name>InstanceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_InstanceID</relatedStateVariable></argument>
         </argumentList>
       </action>
+      <action><name>GetCurrentTransportActions</name>
+        <argumentList>
+          <argument><name>InstanceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_InstanceID</relatedStateVariable></argument>
+          <argument><name>Actions</name><direction>out</direction><relatedStateVariable>CurrentTransportActions</relatedStateVariable></argument>
+        </argumentList>
+      </action>
       <action><name>Seek</name>
         <argumentList>
           <argument><name>InstanceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_InstanceID</relatedStateVariable></argument>
@@ -113,6 +119,7 @@ const ServiceSpec kAvTransportSpec = {
       <stateVariable sendEvents="no"><name>CurrentTrackURI</name><dataType>string</dataType></stateVariable>
       <stateVariable sendEvents="no"><name>RelativeTimePosition</name><dataType>string</dataType></stateVariable>
       <stateVariable sendEvents="no"><name>AbsoluteTimePosition</name><dataType>string</dataType></stateVariable>
+      <stateVariable sendEvents="no"><name>CurrentTransportActions</name><dataType>string</dataType></stateVariable>
       <stateVariable sendEvents="no"><name>RelativeCounterPosition</name><dataType>i4</dataType></stateVariable>
       <stateVariable sendEvents="no"><name>AbsoluteCounterPosition</name><dataType>i4</dataType></stateVariable>
       <stateVariable sendEvents="no"><name>NumberOfTracks</name><dataType>ui4</dataType></stateVariable>
@@ -157,6 +164,18 @@ const ServiceSpec kRenderingControlSpec = {
           <argument><name>DesiredVolume</name><direction>in</direction><relatedStateVariable>Volume</relatedStateVariable></argument>
         </argumentList>
       </action>
+      <action><name>ListPresets</name>
+        <argumentList>
+          <argument><name>InstanceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_InstanceID</relatedStateVariable></argument>
+          <argument><name>CurrentPresetNameList</name><direction>out</direction><relatedStateVariable>PresetNameList</relatedStateVariable></argument>
+        </argumentList>
+      </action>
+      <action><name>SelectPreset</name>
+        <argumentList>
+          <argument><name>InstanceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_InstanceID</relatedStateVariable></argument>
+          <argument><name>PresetName</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_PresetName</relatedStateVariable></argument>
+        </argumentList>
+      </action>
       <action><name>GetMute</name>
         <argumentList>
           <argument><name>InstanceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_InstanceID</relatedStateVariable></argument>
@@ -179,6 +198,10 @@ const ServiceSpec kRenderingControlSpec = {
       <stateVariable sendEvents="no"><name>A_ARG_TYPE_InstanceID</name><dataType>ui4</dataType></stateVariable>
       <stateVariable sendEvents="no"><name>A_ARG_TYPE_Channel</name><dataType>string</dataType>
         <allowedValueList><allowedValue>Master</allowedValue></allowedValueList>
+      </stateVariable>
+      <stateVariable sendEvents="yes"><name>PresetNameList</name><dataType>string</dataType></stateVariable>
+      <stateVariable sendEvents="no"><name>A_ARG_TYPE_PresetName</name><dataType>string</dataType>
+        <allowedValueList><allowedValue>FactoryDefaults</allowedValue></allowedValueList>
       </stateVariable>)",
 };
 

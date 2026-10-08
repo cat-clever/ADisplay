@@ -153,6 +153,46 @@ AD_TEST(AVTransport的SCPD含全部动作, "AVTransport 的 SCPD 含各必需动
     check_contains(scpd, "<allowedValue>PAUSED_PLAYBACK</allowedValue>");
 }
 
+AD_TEST(三个服务的必需动作都在, "UPnP 规范的必需动作一个都不少") {
+    // 缺了必需动作，严格的客户端会判定整个服务不可用 —— 表现是「列表里
+    // 能看到设备，但点投屏直接失败」，而且它不会再发任何后续请求，
+    // 日志里连一条 POST /control 都看不到，很难往这个方向想。
+    //
+    // GetCurrentTransportActions 就是这么漏掉的：它是 AVTransport 的必需
+    // 动作，客户端拿它判断设备支持哪些播放操作。
+
+    struct Expectation {
+        const char* service_type;
+        const char* actions[10];
+    };
+
+    const Expectation expectations[] = {
+        {kAvTransportType,
+         {"SetAVTransportURI", "GetMediaInfo", "GetTransportInfo", "GetPositionInfo",
+          "GetCurrentTransportActions", "GetTransportSettings", "GetDeviceCapabilities",
+          "Play", "Pause", "Stop"}},
+        {kRenderingControlType,
+         {"GetVolume", "SetVolume", "GetMute", "SetMute", "ListPresets", "SelectPreset"}},
+        {kConnectionManagerType,
+         {"GetProtocolInfo", "GetCurrentConnectionIDs", "GetCurrentConnectionInfo"}},
+    };
+
+    for (const Expectation& expectation : expectations) {
+        const std::string scpd = build_service_description(expectation.service_type);
+        AD_CHECK(!scpd.empty());
+        for (const char* action : expectation.actions) {
+            if (action == nullptr) {
+                break;
+            }
+            const std::string needle = std::string("<name>") + action + "</name>";
+            if (scpd.find(needle) == std::string::npos) {
+                AD_CHECK_EQ(std::string("SCPD 缺少动作 ") + action, std::string("（应存在）"));
+                return;
+            }
+        }
+    }
+}
+
 AD_TEST(RenderingControl的SCPD, "RenderingControl 的 SCPD 含音量动作与范围") {
     const std::string scpd = build_service_description(kRenderingControlType);
     AD_CHECK(!scpd.empty());

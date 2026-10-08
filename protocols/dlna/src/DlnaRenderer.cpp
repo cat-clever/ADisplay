@@ -283,6 +283,27 @@ struct DlnaRenderer::Impl {
             return true;
         }
 
+        if (action == "GetCurrentTransportActions") {
+            // AVTransport 的必需动作。客户端拿它判断「这台设备支持哪些播放
+            // 操作」，拿到结果才决定要不要投屏 —— 缺了它，很多客户端会直接
+            // 判定设备不可用于投屏，而且不会再发任何后续请求。
+            //
+            // 实测：某个用 Cling 的 App 拉完描述和三个 SCPD 就停了，
+            // 点投屏直接报失败，日志里一个 POST /control 都没有。
+            const std::string state = listener != nullptr
+                                          ? listener->current_transport_state()
+                                          : std::string(transport_state::kStopped);
+
+            std::string actions = "Play,Stop,Seek";
+            if (state == transport_state::kPlaying) {
+                actions = "Pause,Stop,Seek";
+            } else if (state == transport_state::kNoMedia) {
+                actions = "Stop";
+            }
+            results->emplace_back("Actions", actions);
+            return true;
+        }
+
         if (action == "GetTransportSettings") {
             results->emplace_back("PlayMode", "NORMAL");
             results->emplace_back("RecQualityMode", "NOT_IMPLEMENTED");
@@ -327,6 +348,19 @@ struct DlnaRenderer::Impl {
             if (listener != nullptr) {
                 listener->on_set_volume(volume);
             }
+            return true;
+        }
+
+        if (action == "ListPresets") {
+            // RenderingControl 的必需动作。我们没有多种音效预设，
+            // 报一个 FactoryDefaults 即可 —— 但必须应答，缺了会让严格的
+            // 客户端认为服务不完整。
+            results->emplace_back("CurrentPresetNameList", "FactoryDefaults");
+            return true;
+        }
+
+        if (action == "SelectPreset") {
+            // 只有一个预设，接受任何请求。
             return true;
         }
 
