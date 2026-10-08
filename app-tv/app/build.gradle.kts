@@ -20,9 +20,19 @@ android {
         versionCode = 404
         versionName = "0.4.4"
 
-        // 自用项目，全 ABI 打进一个 APK 即可（文档 2.5）。
+        // 只打 arm64-v8a。
+        //
+        // 这不是「能少打就少打」的优化，而是必须的：核心库只在 CI 里针对
+        // arm64-v8a 交叉编译一次，jniLibs 下也只有这一份 .so。abiFilters 里
+        // 每多列一个 ABI，就等于承诺这个 ABI 也有自己的 .so —— 列了却没有，
+        // Android 装的时候不报错，装上跑起来才在加载库时抛
+        // UnsatisfiedLinkError，表现是「一装上就闪退」。
+        //
+        // 电视盒子（Fire TV、Chromecast、主流国产盒子）都是 arm64。真要覆盖
+        // 32 位的老板子，得先在 CI 里补出 armeabi-v7a 的 libcastcore.so，
+        // 再把那个 ABI 加回这一行 —— 只改这里是不行的。
         ndk {
-            abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64", "x86")
+            abiFilters += "arm64-v8a"
         }
     }
 
@@ -56,9 +66,19 @@ android {
         kotlinCompilerExtensionVersion = "1.5.14"
     }
 
-    // 批次 0 尚未接入 C++ 核心（JNI 随批次 5），先不开 externalNativeBuild。
-    // 接入时需要：
-    //   externalNativeBuild { cmake { path = file("src/main/cpp/CMakeLists.txt") } }
+    // 刻意【不】开 externalNativeBuild。
+    //
+    // Gradle 自己编 C++ 就得再搭一遍 vcpkg + NDK 工具链，等于把主构建里
+    // 已经验证过的那套东西复制成两份维护（app/src/main/cpp/CMakeLists.txt
+    // 开头也写了同样的理由）。
+    //
+    // 实际做法是：CI 用 NDK 编出 libcastcore.so 与 libadisplay_jni.so，
+    // 拷到 src/main/jniLibs/arm64-v8a/ 下。src/main/jniLibs 是 Gradle 的
+    // 约定目录，默认就会打进 APK 的 lib/<ABI>/，这里不需要任何额外配置 ——
+    // 两个 .so 缺一个的话构建照样成功，所以 CI 里额外拆包断言了一次。
+    //
+    // 注意 native 方法的类名 com.adisplay.tv.AdDisplayNative 必须与包名一致，
+    // 否则 JVM 找不到 Java_com_adisplay_tv_ 开头的那些符号。
 
     packaging {
         resources {

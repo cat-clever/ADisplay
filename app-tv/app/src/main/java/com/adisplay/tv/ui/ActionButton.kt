@@ -15,6 +15,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -43,6 +44,10 @@ import androidx.tv.material3.Text
  *   * 有焦点时加一圈边框并提亮底色 —— 电视上不加的话用户不知道选中了哪个，
  *     按确定键全靠猜。
  *   * 触屏上没有焦点概念，边框不出现，看起来就是个普通按钮。
+ *
+ * enabled = false 用在「核心库没加载起来」这类整块功能都不可用的时候：
+ * 按钮留在原地、文字还看得见，只是压暗且按不动 —— 比把按钮藏掉好，
+ * 用户看得出是这一块坏了，而不是满屏找一个不存在的按钮。
  */
 @Composable
 fun ActionButton(
@@ -51,6 +56,7 @@ fun ActionButton(
     minWidth: Dp,
     focusRequester: FocusRequester,
     onClick: () -> Unit,
+    enabled: Boolean = true,
     modifier: Modifier = Modifier,
 ) {
     var focused by remember { mutableStateOf(false) }
@@ -62,6 +68,9 @@ fun ActionButton(
     Box(
         modifier = modifier
             .defaultMinSize(minWidth = minWidth)
+            // 压暗整块（底色 + 文字），而不是逐个颜色去算 —— 少一处颜色就少
+            // 一处「改了深色主题之后看不见」的风险。
+            .alpha(if (enabled) 1f else 0.45f)
             .clip(RoundedCornerShape(10.dp))
             .background(if (focused) focusedBackground else restingBackground)
             // 边框宽度固定，只切颜色。
@@ -73,8 +82,9 @@ fun ActionButton(
             )
             // clickable 在前、focusable 在后：触摸点击走前者，
             // 遥控器的方向键走后者，两边都能触发 onClick。
-            .clickable(onClick = onClick)
-            .focusable()
+            .clickable(enabled = enabled, onClick = onClick)
+            // 禁用时连焦点都不要给：能聚焦却按不动，用户会先怀疑遥控器坏了。
+            .focusable(enabled = enabled)
             .focusRequester(focusRequester)
             .onFocusChanged { focused = it.isFocused }
             .padding(horizontal = 28.dp, vertical = 14.dp),

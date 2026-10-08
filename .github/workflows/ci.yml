@@ -448,7 +448,15 @@ jobs:
 
   # =========================================================================
   # Android TV：文档 2.3 与 4.5 的电视端要求。
-  # 批次 0 只出界面骨架（尚未接 JNI），先把 Gradle 构建链路打通。
+  #
+  # 分成两个任务：
+  #   android-core  只编核心库，验证 castcore 能被 NDK 交叉编译出来。
+  #                 报错干净，编不过时一眼看得出是 C++ 那边的事。
+  #   android-tv    先把同一套核心库（含 JNI 薄壳）编出来摆进 jniLibs，
+  #                 再用 Gradle 打 APK，最后拆包断言 .so 真的进去了。
+  #
+  # 两边共用同一份 vcpkg 二进制缓存，所以第二轮基本是解压缓存，
+  # 不会真的把 FFmpeg 编两遍。
   # =========================================================================
   # 电视端要的核心库。APK 由 Gradle 那边构建，这里只验证 castcore 能被
   # NDK 交叉编译出来 —— 这一环不通，后面接 JNI、接播放器都无从谈起。
@@ -527,6 +535,56 @@ jobs:
           echo "build-tools："
           ls "${SDK_DIR}/build-tools" || true
 
+      # ---- 先把两个 .so 编出来 ------------------------------------------
+      #
+      # APK 里的 libcastcore.so 与 libadisplay_jni.so 只能由 NDK 交叉编译
+      # 出来，Gradle 那边刻意不碰 vcpkg（理由写在 app/build.gradle.kts 里，
+      # 简单说就是不想把同一套 C++ 构建维护两遍）。所以这里重复一遍
+      # android-core 的做法：起 vcpkg、定位 NDK、cmake 构建。
+      - uses: ./.github/actions/setup-vcpkg
+        with:
+          triplet: arm64-android
+
+      # vcpkg 的 android 三元组要知道 NDK 在哪，runner 上可能装了不止一个
+      # 版本，取版本号最大的那个（与 android-core 任务同一套取法）。
+      - name: 定位 NDK
+        run: |
+          set -euo pipefail
+          NDK_DIR="$(ls -d "${ANDROID_HOME}"/ndk/* 2>/dev/null | sort -V | tail -1 || true)"
+          if [ -z "${NDK_DIR}" ]; then
+            echo "runner 上没有 NDK" >&2
+            exit 1
+          fi
+          echo "用 NDK：${NDK_DIR}"
+          echo "ANDROID_NDK_HOME=${NDK_DIR}" >> "$GITHUB_ENV"
+
+      - name: 构建核心库与 JNI 薄壳
+        run: |
+          set -euo pipefail
+          cmake --preset android-arm64
+          cmake --build --preset android-arm64
+
+      # jniLibs 是 Gradle 的约定目录：src/main/jniLibs/<ABI>/ 下的 .so 会被
+      # 自动打进 APK 的 lib/<ABI>/，build.gradle.kts 里一行配置都不用写。
+      # 目录名必须和 ABI 名逐字对上 —— 写成 arm64 而不是 arm64-v8a 的话，
+      # Gradle 只会安静地忽略掉它们，产出一个没有 .so 的 APK。
+      - name: 摆好 jniLibs
+        run: |
+          set -euo pipefail
+          DEST="app-tv/app/src/main/jniLibs/arm64-v8a"
+          mkdir -p "${DEST}"
+          for NAME in libcastcore.so libadisplay_jni.so; do
+            SRC="$(find build/android-arm64 -name "${NAME}" | head -1)"
+            if [ -z "${SRC}" ]; then
+              echo "构建产物里没有 ${NAME}" >&2
+              find build/android-arm64 -name '*.so' >&2 || true
+              exit 1
+            fi
+            cp "${SRC}" "${DEST}/${NAME}"
+            echo "${NAME}  <-  ${SRC}"
+          done
+          ls -la "${DEST}"
+
       # setup-gradle 只做缓存，Gradle 本体要显式指定版本装。
       # AGP 8.5 要求 Gradle 8.7 以上。
       - uses: gradle/actions/setup-gradle@v4
@@ -547,6 +605,34 @@ jobs:
           fi
           cp "${APK}" adisplay-android-tv.apk
           ls -lh adisplay-android-tv.apk
+
+      # Gradle 不会因为 .so 缺失而失败：它只是少打一个文件，产出的 APK
+      # 装上跑起来才在 System.loadLibrary 处抛 UnsatisfiedLinkError。
+      # 那种包发出去只能靠用户反馈发现，所以在这里当面把包拆开看。
+      - name: 校验 APK 里的 .so
+        run: |
+          set -euo pipefail
+
+          # 先整份列出来（只列一次，后面都在字符串上判断）：这样的写法不会
+          # 因为 grep 提前退出而让 unzip 吃到 SIGPIPE，配着 set -o pipefail
+          # 变成一个看不懂的失败。
+          LISTING="$(unzip -l adisplay-android-tv.apk)"
+          echo "${LISTING}" | grep -E 'lib/' || true
+
+          for NAME in libcastcore.so libadisplay_jni.so; do
+            if ! echo "${LISTING}" | grep -E "lib/arm64-v8a/${NAME}" > /dev/null; then
+              echo "APK 里没有 lib/arm64-v8a/${NAME}" >&2
+              exit 1
+            fi
+          done
+
+          # 反着也要断言：abiFilters 只留了 arm64-v8a，包里多出别的 ABI
+          # 说明那段配置被改回去了，而那几个 ABI 没有对应的 .so。
+          if echo "${LISTING}" | grep -E 'lib/(armeabi-v7a|x86|x86_64)/' > /dev/null; then
+            echo "APK 里出现了非 arm64-v8a 的库" >&2
+            echo "${LISTING}" | grep -E 'lib/' >&2
+            exit 1
+          fi
 
       - uses: actions/upload-artifact@v4
         with:

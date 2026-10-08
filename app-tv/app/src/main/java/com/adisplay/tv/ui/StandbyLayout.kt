@@ -8,6 +8,7 @@ import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.tv.material3.MaterialTheme
@@ -41,6 +42,16 @@ data class StandbyLayout(
     val spacingLoose: Dp,
     /** 按钮最小宽度。给个下限免得窄屏上文字被挤成两行。 */
     val buttonMinWidth: Dp,
+    /**
+     * 日志区的固定高度。
+     *
+     * 给死高度而不是让它按内容撑：日志区钉在待机页底部，内容再长也只占
+     * 这一块 —— 否则日志一多会把上面的设备名和按钮整个顶出屏幕，而那两样
+     * 是用户唯一要按的东西。
+     */
+    val logHeight: Dp,
+    /** 日志文字。等宽字体，时间戳与级别能按列对齐，扫一眼就能找到 ERROR。 */
+    val logStyle: TextStyle,
 )
 
 /** 屏幕宽度的分档阈值。 */
@@ -71,6 +82,8 @@ fun resolveStandbyLayout(screenWidthDp: Int): StandbyLayout {
             spacingMedium = 14.dp,
             spacingLoose = 16.dp,
             buttonMinWidth = 160.dp,
+            logHeight = 84.dp,
+            logStyle = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
         )
 
         screenWidthDp < EXPANDED_MIN_WIDTH -> StandbyLayout(
@@ -84,6 +97,8 @@ fun resolveStandbyLayout(screenWidthDp: Int): StandbyLayout {
             spacingMedium = 20.dp,
             spacingLoose = 24.dp,
             buttonMinWidth = 220.dp,
+            logHeight = 132.dp,
+            logStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
         )
 
         else -> StandbyLayout(
@@ -97,6 +112,8 @@ fun resolveStandbyLayout(screenWidthDp: Int): StandbyLayout {
             spacingMedium = 40.dp,
             spacingLoose = 48.dp,
             buttonMinWidth = 320.dp,
+            logHeight = 190.dp,
+            logStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
         )
     }
 }
