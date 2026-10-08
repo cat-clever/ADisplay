@@ -30,6 +30,12 @@ chmod +x "${MACOS_DIR}/ADisplay"
 
 # 核心库放进 Frameworks 并改写安装名，让可执行文件按 @rpath 找它。
 # 不这么做的话，用户机器上必须把 dylib 装到固定路径才能启动。
+if [ ! -f "${CORE_LIBRARY_PATH}" ]; then
+    echo "找不到核心库：${CORE_LIBRARY_PATH}" >&2
+    echo "构建目录内容：" >&2
+    ls -l "$(dirname "${CORE_LIBRARY_PATH}")" >&2 || true
+    exit 1
+fi
 cp "${CORE_LIBRARY_PATH}" "${FRAMEWORKS_DIR}/libcastcore.dylib"
 chmod +w "${FRAMEWORKS_DIR}/libcastcore.dylib"
 
@@ -50,6 +56,23 @@ install_name_tool -add_rpath "@executable_path/../Frameworks" "${MACOS_DIR}/ADis
 
 # Info.plist
 cp "${SCRIPT_DIR}/Info.plist" "${CONTENTS_DIR}/Info.plist"
+
+# 自检：可执行文件引用的 castcore 名字，必须和包里实际存在的文件对得上。
+#
+# 这个检查是为了挡住 libcastcore.0.dylib 与 libcastcore.dylib 那种
+# 「链接时的名字和拷进去的名字不一致」—— 它不会让构建失败，
+# 但 App 一启动就崩，而且用户看到的是一份很难读懂的 dyld 报告。
+REFERENCED="$(otool -L "${MACOS_DIR}/ADisplay" | grep -o '@rpath/libcastcore[^ ]*' | head -n 1)"
+if [ -n "${REFERENCED}" ]; then
+    EXPECTED="${FRAMEWORKS_DIR}/$(basename "${REFERENCED}")"
+    if [ ! -f "${EXPECTED}" ]; then
+        echo "包内缺少可执行文件引用的核心库：${REFERENCED}" >&2
+        echo "Frameworks 目录内容：" >&2
+        ls -l "${FRAMEWORKS_DIR}" >&2
+        exit 1
+    fi
+    echo "核心库引用一致：${REFERENCED}"
+fi
 
 # ad-hoc 签名。文档 4.5：自用无需开发者账号与公证，拷到自己的其他 Mac 时
 # 在「隐私与安全性」里放行即可。

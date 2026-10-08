@@ -30,12 +30,17 @@ target_link_libraries(castcore
 target_compile_definitions(castcore PRIVATE ADISPLAY_CORE_BUILD)
 
 # 非 Windows 平台把符号默认藏起来，只有 AD_API 标注的才导出。
+#
+# 刻意不设 VERSION / SOVERSION：那会让 macOS 上的 dylib 变成
+# libcastcore.0.dylib，可执行文件按这个名字去引用，而打包脚本拷进去的是
+# 不带后缀的那个 —— 两边对不上，App 一启动就报
+# "Library not loaded: @rpath/libcastcore.0.dylib" 然后崩掉。
+#
+# 版本化的 dylib 是给系统库做多版本 ABI 共存用的。我们是自用项目，
+# 界面与核心永远一起发布，不需要这个，保持 libcastcore.dylib 最简单。
 set_target_properties(castcore PROPERTIES
-    VERSION   ${PROJECT_VERSION}
-    SOVERSION ${PROJECT_VERSION_MAJOR}
     CXX_VISIBILITY_PRESET hidden
     VISIBILITY_INLINES_HIDDEN ON
-    # 界面层拿到的名字不该带版本后缀，方便打包脚本直接拷贝。
     OUTPUT_NAME castcore
 )
 
