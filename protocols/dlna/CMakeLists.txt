@@ -2,6 +2,7 @@
 add_library(adisplay_dlna STATIC
     # 设备描述与 SCPD 的 XML 生成。纯函数，单独成文件便于单元测试。
     src/DlnaDescription.cpp
+    src/DlnaIcon.h
     # SOAP 请求解析与应答构建。同样是纯逻辑，必须能被测试覆盖 ——
     # 应答格式错一个元素名，手机端就表现为「点了没反应」。
     src/DlnaSoap.cpp

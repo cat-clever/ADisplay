@@ -8,6 +8,7 @@
 #include <adisplay/common/Random.h>
 
 #include "DlnaDescription.h"
+#include "DlnaIcon.h"
 #include "DlnaSoap.h"
 
 #include <httplib.h>
@@ -573,6 +574,26 @@ struct DlnaRenderer::Impl {
 
         server.Get("/description.xml", [this](const httplib::Request&, httplib::Response& response) {
             handle_description(response);
+        });
+
+        // 设备图标。描述里的 iconList 指向这里。
+        server.Get("/icon.png", [](const httplib::Request&, httplib::Response& response) {
+            response.set_content(
+                reinterpret_cast<const char*>(description_ns::kDeviceIconPng),
+                description_ns::kDeviceIconPngSize, "image/png");
+        });
+
+        // presentationURL 指向这里。给一个极简的说明页 —— 客户端一般不
+        // 会真的去打开它，但地址必须存在，否则部分客户端会判定设备不完整。
+        server.Get("/", [this](const httplib::Request&, httplib::Response& response) {
+            std::string body;
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                body = "<!doctype html><meta charset=\"utf-8\"><title>" +
+                       config.device_name + "</title><h1>" + config.device_name +
+                       "</h1><p>ADisplay 投屏接收端</p>";
+            }
+            response.set_content(body, "text/html; charset=utf-8");
         });
 
         // SCPDURL 用的是带冒号的 serviceId，作为路径段要能匹配上。

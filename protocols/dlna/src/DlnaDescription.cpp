@@ -265,12 +265,30 @@ std::string build_device_description(const DlnaConfig& config, const std::string
         << "    <modelNumber>" << escaped_model_number << "</modelNumber>\n"
         << "    <modelURL></modelURL>\n"
         << "    <serialNumber></serialNumber>\n"
-        // DLNA 认证标记。少了它，部分国产视频 App 会认为这不是一台合格的
-        // DLNA 设备，直接不列出来 —— 表现就是「B 站能搜到、另一个 App 搜不到」。
-        // DMR-1.50 表示符合 DLNA Media Renderer 1.5 规范。
-        << "    <dlna:X_DLNADOC>DMR-1.50</dlna:X_DLNADOC>\n"
         // UDN 里的 "uuid:" 前缀不能少，少了手机端认不出这是个 UPnP 设备。
         << "    <UDN>uuid:" << escaped_uuid << "</UDN>\n"
+        // DLNA 认证标记，必须在 UDN 之后。
+        //
+        // UPnP 规范对 <device> 子元素的顺序有严格要求：
+        //   deviceType → friendlyName → manufacturer → manufacturerURL →
+        //   modelDescription → modelName → modelNumber → modelURL →
+        //   serialNumber → UDN → [X_DLNADOC] → iconList → serviceList → ...
+        //
+        // 顺序不对的话，严格的解析器（实测 libupnp 就是）会直接放弃整份
+        // 描述 —— 它会来 GET 一次 description.xml，然后什么都不做，
+        // 在客户端看来就是「搜不到设备」。
+        << "    <dlna:X_DLNADOC>DMR-1.50</dlna:X_DLNADOC>\n"
+        // iconList 在 UDN / X_DLNADOC 之后、serviceList 之前，这个顺序同样是
+        // 规范要求的。不少客户端会检查图标是否存在，缺失时不显示设备。
+        << "    <iconList>\n"
+        << "      <icon>\n"
+        << "        <mimetype>image/png</mimetype>\n"
+        << "        <width>48</width>\n"
+        << "        <height>48</height>\n"
+        << "        <depth>24</depth>\n"
+        << "        <url>/icon.png</url>\n"
+        << "      </icon>\n"
+        << "    </iconList>\n"
         << "    <serviceList>\n";
 
     append_service(out, kAvTransportSpec, base_url);
@@ -278,6 +296,9 @@ std::string build_device_description(const DlnaConfig& config, const std::string
     append_service(out, kConnectionManagerSpec, base_url);
 
     out << "    </serviceList>\n"
+        // presentationURL 是可选元素，但位置固定在 serviceList 之后。
+        // 部分客户端会用它做「设备详情」的跳转入口。
+        << "    <presentationURL>/</presentationURL>\n"
         << "  </device>\n"
         << "</root>\n";
     return out.str();

@@ -80,6 +80,48 @@ AD_TEST(设备描述含DLNA认证标记, "设备描述带 X_DLNADOC 认证标记
     check_contains(xml, "xmlns:dlna=\"urn:schemas-dlna-org:device-1-0\"");
 }
 
+AD_TEST(设备描述元素顺序, "device 子元素的顺序符合 UPnP 规范") {
+    const DlnaConfig config = make_config();
+    const std::string xml = build_device_description(config, "http://192.168.1.20:49152");
+
+    // UPnP 规范对 <device> 子元素的顺序有严格要求。顺序不对的话，
+    // 严格的解析器（实测 libupnp）会直接放弃整份描述 —— 它来 GET 一次
+    // description.xml 然后什么都不做，在客户端看来就是「搜不到设备」。
+    //
+    // 这不是理论风险：X_DLNADOC 曾被插在 UDN 前面，导致夸克浏览器
+    // 拉完描述就没了下文。所以把顺序钉住。
+    const char* kExpectedOrder[] = {
+        "<deviceType>", "<friendlyName>", "<manufacturer>", "<manufacturerURL>",
+        "<modelDescription>", "<modelName>", "<modelNumber>", "<modelURL>",
+        "<serialNumber>", "<UDN>", "<dlna:X_DLNADOC>", "<iconList>",
+        "<serviceList>", "<presentationURL>",
+    };
+
+    std::size_t previous = 0;
+    for (const char* element : kExpectedOrder) {
+        const std::size_t position = xml.find(element);
+        if (position == std::string::npos) {
+            AD_CHECK_EQ(std::string(element), std::string("（元素缺失）"));
+            return;
+        }
+        if (position < previous) {
+            AD_CHECK_EQ(std::string(element) + " 出现顺序不对", std::string("应在更靠前的位置"));
+            return;
+        }
+        previous = position;
+    }
+}
+
+AD_TEST(设备描述含图标与展示地址, "iconList 与 presentationURL 都在") {
+    const DlnaConfig config = make_config();
+    const std::string xml = build_device_description(config, "http://192.168.1.20:49152");
+
+    check_contains(xml, "<iconList>");
+    check_contains(xml, "<mimetype>image/png</mimetype>");
+    check_contains(xml, "<url>/icon.png</url>");
+    check_contains(xml, "<presentationURL>/</presentationURL>");
+}
+
 AD_TEST(设备描述声明三个必需服务, "三个 DLNA 必需服务都声明了") {
     const DlnaConfig config = make_config();
     const std::string xml = build_device_description(config, "http://192.168.1.20:49152");
