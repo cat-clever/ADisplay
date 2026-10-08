@@ -15,7 +15,8 @@
 #include <cctype>
 #include <chrono>
 #include <cstring>
-#include <ctime>   // time / tm / strftime，SSDP 的 DATE 头要 RFC 1123 格式
+#include <ctime>
+#include <functional>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -122,6 +123,9 @@ struct SsdpServer::Impl {
     struct InterfaceBinding {
         std::string name;
         std::string address;
+        // 掩码用于判断某个请求方是否与这块网卡同网段。
+        // 为空时按 /24 兜底（Windows 的枚举分支目前不填掩码）。
+        std::string netmask;
     };
     std::vector<InterfaceBinding> interfaces_;
 
@@ -180,6 +184,7 @@ struct SsdpServer::Impl {
             InterfaceBinding binding;
             binding.name = candidate.interface_name;
             binding.address = candidate.address;
+            binding.netmask = candidate.netmask;
             interfaces_.push_back(binding);
         }
 
@@ -290,18 +295,21 @@ struct SsdpServer::Impl {
                  reinterpret_cast<const sockaddr*>(&target), sizeof(target));
     }
 
-    void send_multicast(const std::string& data) {
+    // 逐块网卡发送组播。
+    //
+    // builder 接收「这块网卡的地址」，返回要发出去的报文 —— 报文内容会
+    // 因网卡而异，因为里面的 LOCATION 必须用该网卡自己的地址。
+    //
+    // 一个 socket 只能设一个组播出接口，所以要发一轮、换一次接口。
+    // 不这么做的话，只有默认路由那块网卡上的设备能收到。
+    void send_multicast_per_interface(
+        const std::function<std::string(const std::string& address)>& builder) {
         sockaddr_in target;
         std::memset(&target, 0, sizeof(target));
         target.sin_family = AF_INET;
         target.sin_addr.s_addr = ::inet_addr(kMulticastAddress);
         target.sin_port = htons(kPort);
 
-        // 每块网卡各发一次。
-        //
-        // 一个 socket 只能设一个组播出接口，所以要发一轮、换一次接口。
-        // 不这么做的话，只有默认路由那块网卡上的设备能收到，
-        // 手机如果在另一个网段就什么都看不到。
         for (const InterfaceBinding& binding : interfaces_) {
             in_addr outbound;
             outbound.s_addr = ::inet_addr(binding.address.c_str());
@@ -313,8 +321,40 @@ struct SsdpServer::Impl {
                                    "IP_MULTICAST_IF", nullptr)) {
                 continue;
             }
-            send_to(data, target);
+            send_to(builder(binding.address), target);
         }
+    }
+
+    // 判断两个 IPv4 地址是否在同一网段。
+    static bool same_subnet(const std::string& a, const std::string& b,
+                            const std::string& netmask) {
+        const in_addr addr_a = {::inet_addr(a.c_str())};
+        const in_addr addr_b = {::inet_addr(b.c_str())};
+        if (addr_a.s_addr == INADDR_NONE || addr_b.s_addr == INADDR_NONE) {
+            return false;
+        }
+        // 掩码缺失时按 /24 兜底：绝大多数家用网络是这个。
+        const in_addr mask = {netmask.empty() ? ::inet_addr("255.255.255.0")
+                                              : ::inet_addr(netmask.c_str())};
+        if (mask.s_addr == INADDR_NONE) {
+            return false;
+        }
+        return (addr_a.s_addr & mask.s_addr) == (addr_b.s_addr & mask.s_addr);
+    }
+
+    // 找出与某个对端同网段的那块网卡。
+    //
+    // 用于回复 M-SEARCH：响应里的 LOCATION 必须是「对端能访问到的我们的
+    // 地址」。用错网段的地址，手机会拿到一个连不上的 URL，
+    // 表现是搜到了设备但点不动、或者设备一闪而过。
+    const InterfaceBinding* interface_for_peer(const std::string& peer_address) const {
+        for (const InterfaceBinding& binding : interfaces_) {
+            if (same_subnet(binding.address, peer_address, binding.netmask)) {
+                return &binding;
+            }
+        }
+        // 匹配不上时用第一块 —— 总比不回复强。
+        return interfaces_.empty() ? nullptr : &interfaces_.front();
     }
 
     void announce_alive() {
@@ -326,9 +366,19 @@ struct SsdpServer::Impl {
         if (snapshot.location.empty()) {
             return;
         }
-        for (const NotificationTarget& target : build_targets(snapshot)) {
-            send_multicast(build_alive_message(snapshot, target));
-        }
+        const std::vector<NotificationTarget> targets = build_targets(snapshot);
+
+        // 逐块网卡发，且每块网卡用各自的 LOCATION —— 手机从哪个网段收到，
+        // 就用哪个网段的地址去拉设备描述。
+        send_multicast_per_interface([&snapshot, &targets](const std::string& address) {
+            std::string payload;
+            const std::string location = location_for(snapshot, address);
+            for (const NotificationTarget& target : targets) {
+                payload += build_alive_message(snapshot, target, location);
+            }
+            return payload;
+        });
+
         last_announce = std::chrono::steady_clock::now();
     }
 
@@ -341,9 +391,12 @@ struct SsdpServer::Impl {
         if (snapshot.location.empty()) {
             return;
         }
+        // byebye 不带 LOCATION，所以逐块网卡的报文是一样的。
+        std::string payload;
         for (const NotificationTarget& target : build_targets(snapshot)) {
-            send_multicast(build_byebye_message(snapshot, target));
+            payload += build_byebye_message(snapshot, target);
         }
+        send_multicast_per_interface([&payload](const std::string&) { return payload; });
     }
 
     // ---- 接收 --------------------------------------------------------------
@@ -374,7 +427,13 @@ struct SsdpServer::Impl {
         const int delay_ms = static_cast<int>(common::random_below(kMaxResponseDelayMs));
         std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
 
-        send_to(build_search_response(snapshot, st), sender);
+        // 用与请求方同网段的那块网卡的地址拼 LOCATION。
+        char peer_text[INET_ADDRSTRLEN] = {0};
+        ::inet_ntop(AF_INET, &sender.sin_addr, peer_text, sizeof(peer_text));
+        const InterfaceBinding* binding = interface_for_peer(peer_text);
+        const std::string address = (binding != nullptr) ? binding->address : std::string();
+
+        send_to(build_search_response(snapshot, st, location_for(snapshot, address)), sender);
         responded_count.fetch_add(1, std::memory_order_relaxed);
 
         AD_LOG_DEBUG("已回复 M-SEARCH（ST={}）", st);

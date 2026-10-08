@@ -76,13 +76,42 @@ std::vector<NotificationTarget> build_targets(const SsdpAdvertisement& advertise
     return targets;
 }
 
+std::string location_suffix(const std::string& location) {
+    // 跳过 "http://"，找主机名之后的第一个 '/'。
+    const std::size_t scheme = location.find("://");
+    const std::size_t host_begin = (scheme == std::string::npos) ? 0 : scheme + 3;
+    const std::size_t path_begin = location.find('/', host_begin);
+    if (path_begin == std::string::npos) {
+        return std::string();
+    }
+    // 主机名可能带端口（"192.168.1.5:49152"），要把它一起保留 ——
+    // 只取路径的话端口就丢了，默认会去访问 80 端口。
+    const std::size_t colon = location.rfind(':', path_begin);
+    const std::size_t suffix_begin =
+        (colon != std::string::npos && colon > host_begin) ? colon : path_begin;
+    return location.substr(suffix_begin);
+}
+
+std::string location_for(const SsdpAdvertisement& advertisement,
+                         const std::string& address) {
+    if (address.empty()) {
+        return advertisement.location;
+    }
+    const std::string suffix = location_suffix(advertisement.location);
+    if (suffix.empty()) {
+        return advertisement.location;
+    }
+    return "http://" + address + suffix;
+}
+
 std::string build_alive_message(const SsdpAdvertisement& advertisement,
-                                const NotificationTarget& target) {
+                                const NotificationTarget& target,
+                                const std::string& location) {
     std::ostringstream out;
     out << "NOTIFY * HTTP/1.1\r\n"
         << "HOST: " << kMulticastAddress << ":" << kPort << "\r\n"
         << "CACHE-CONTROL: max-age=" << advertisement.max_age_seconds << "\r\n"
-        << "LOCATION: " << advertisement.location << "\r\n"
+        << "LOCATION: " << location << "\r\n"
         << "NT: " << target.nt << "\r\n"
         << "NTS: ssdp:alive\r\n"
         << "SERVER: " << advertisement.server_header << "\r\n"
@@ -105,14 +134,15 @@ std::string build_byebye_message(const SsdpAdvertisement& advertisement,
 }
 
 std::string build_search_response(const SsdpAdvertisement& advertisement,
-                                  const std::string& search_target) {
+                                  const std::string& search_target,
+                                  const std::string& location) {
     std::ostringstream out;
     out << "HTTP/1.1 200 OK\r\n"
         << "CACHE-CONTROL: max-age=" << advertisement.max_age_seconds << "\r\n"
         << "DATE: " << http_date() << "\r\n"
         // EXT 头是 UPnP 规范要求的，值必须为空。
         << "EXT:\r\n"
-        << "LOCATION: " << advertisement.location << "\r\n"
+        << "LOCATION: " << location << "\r\n"
         << "SERVER: " << advertisement.server_header << "\r\n"
         << "ST: " << search_target << "\r\n"
         << "USN: " << advertisement.udn << "::" << search_target << "\r\n"

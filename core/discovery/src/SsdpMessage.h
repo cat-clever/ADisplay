@@ -45,17 +45,33 @@ std::string http_date();
 // 按通告内容展开出全部 NT/USN 组合。
 std::vector<NotificationTarget> build_targets(const SsdpAdvertisement& advertisement);
 
+// 从 LOCATION 里取出「:端口/路径」部分，丢掉主机名。
+// 形如 "http://192.168.1.5:49152/description.xml" -> ":49152/description.xml"
+std::string location_suffix(const std::string& location);
+
+// 按指定地址拼出 LOCATION。
+//
+// 多网卡时必须逐块网卡生成：手机从哪块网卡所在的网段收到通告，就要用
+// 哪块网卡的地址去拉设备描述。统一用一个地址的话，另一块网段上的手机
+// 会拿到一个跨网段访问不到的 URL —— 广播收到了、设备却不出现。
+std::string location_for(const SsdpAdvertisement& advertisement,
+                         const std::string& address);
+
 // NOTIFY ssdp:alive —— 周期性宣告自己还在。
+// location 由调用方按网卡传入，见 location_for。
 std::string build_alive_message(const SsdpAdvertisement& advertisement,
-                                const NotificationTarget& target);
+                                const NotificationTarget& target,
+                                const std::string& location);
 
 // NOTIFY ssdp:byebye —— 关闭时发，让手机立刻把设备移出列表。
 std::string build_byebye_message(const SsdpAdvertisement& advertisement,
                                  const NotificationTarget& target);
 
 // HTTP/1.1 200 OK —— 回复 M-SEARCH。必须单播回请求方。
+// location 同样要按请求方所在的网段生成。
 std::string build_search_response(const SsdpAdvertisement& advertisement,
-                                  const std::string& search_target);
+                                  const std::string& search_target,
+                                  const std::string& location);
 
 // 判断查询的 ST 是否指向我们。ssdp:all 表示「把所有设备都报一遍」。
 bool matches_search_target(const SsdpAdvertisement& advertisement,
