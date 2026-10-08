@@ -9,4 +9,5 @@
 #   api        C ABI 门面，产出 castcore 共享库
 
 add_subdirectory(common)
+add_subdirectory(discovery)
 add_subdirectory(api)
