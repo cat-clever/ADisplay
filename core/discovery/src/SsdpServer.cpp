@@ -4,6 +4,8 @@
 // 协议逻辑本身与平台无关。
 #include <adisplay/discovery/SsdpServer.h>
 
+#include "SsdpMessage.h"
+
 #include <adisplay/common/Log.h>
 #include <adisplay/common/Random.h>
 
@@ -138,7 +140,7 @@ struct SsdpServer::Impl {
         std::memset(&local, 0, sizeof(local));
         local.sin_family = AF_INET;
         local.sin_addr.s_addr = htonl(INADDR_ANY);
-        local.sin_port = htons(kSsdpPort);
+        local.sin_port = htons(kPort);
 
         if (::bind(socket_handle, reinterpret_cast<const sockaddr*>(&local), sizeof(local)) != 0) {
             const std::string message =
