@@ -12,7 +12,12 @@ android {
         // 文档 5.1：最低 Android 8.0（API 26）。
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
+        // versionCode 按 主*10000 + 次*100 + 修订 计算：
+        //   0.4.0 -> 400，0.4.1 -> 401，1.0.0 -> 10000
+        // 规则固定下来，升级时不用每次临时决定该加多少。
+        // 它必须随版本递增 —— 不变的话 Android 会认为是同一个包，
+        // 覆盖安装时不会更新。
+        versionCode = 400
         versionName = "0.4.0"
 
         // 自用项目，全 ABI 打进一个 APK 即可（文档 2.5）。

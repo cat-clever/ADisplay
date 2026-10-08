@@ -32,6 +32,77 @@ env:
 
 jobs:
   # =========================================================================
+  # 版本号一致性
+  #
+  # CMakeLists.txt 是版本号的唯一权威来源，其余各处都要跟它一致。
+  # 这个检查不构建任何东西，几秒钟就跑完，但能挡住一类很隐蔽的问题：
+  # 版本号散落在四个文件里，改一处漏一处不会报错，只是某个平台上显示的
+  # 版本对不上 —— 排查时会怀疑自己装错了包。
+  # =========================================================================
+  version-check:
+    name: 版本号一致性
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 校验各处版本号
+        run: |
+          set -euo pipefail
+
+          CORE=$(grep -oE 'VERSION [0-9]+\.[0-9]+\.[0-9]+' CMakeLists.txt | head -1 | awk '{print $2}')
+          MAJOR=$(echo "${CORE}" | cut -d. -f1)
+          MINOR=$(echo "${CORE}" | cut -d. -f2)
+          PATCH=$(echo "${CORE}" | cut -d. -f3)
+          EXPECTED_CODE=$((MAJOR * 10000 + MINOR * 100 + PATCH))
+
+          echo "CMakeLists.txt 的版本：${CORE}（构建号应为 ${EXPECTED_CODE}）"
+          echo
+
+          failures=0
+
+          check() {
+            local label="$1" actual="$2" expected="$3"
+            if [ "${actual}" != "${expected}" ]; then
+              echo "  [X] ${label}：是 ${actual}，应为 ${expected}"
+              failures=$((failures + 1))
+            else
+              echo "  [v] ${label}：${actual}"
+            fi
+          }
+
+          check "vcpkg.json" \
+            "$(grep -oE '\"version\": *\"[0-9.]+\"' vcpkg.json | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')" \
+            "${CORE}"
+
+          check "macOS Info.plist（短版本）" \
+            "$(grep -A1 CFBundleShortVersionString app-macos/Info.plist | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')" \
+            "${CORE}"
+
+          check "macOS Info.plist（构建号）" \
+            "$(grep -A1 CFBundleVersion app-macos/Info.plist | grep -oE '[0-9]+')" \
+            "${EXPECTED_CODE}"
+
+          check "Android versionName" \
+            "$(grep -oE 'versionName = \"[0-9.]+\"' app-tv/app/build.gradle.kts | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')" \
+            "${CORE}"
+
+          check "Android versionCode" \
+            "$(grep -oE 'versionCode = [0-9]+' app-tv/app/build.gradle.kts | grep -oE '[0-9]+')" \
+            "${EXPECTED_CODE}"
+
+          check "Windows csproj" \
+            "$(grep -oE '<Version>[0-9.]+</Version>' app-windows/ADisplay.Windows.csproj | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')" \
+            "${CORE}"
+
+          echo
+          if [ "${failures}" -gt 0 ]; then
+            echo "有 ${failures} 处版本号与 CMakeLists.txt 不一致。" >&2
+            echo "发版时这几处要一起改。" >&2
+            exit 1
+          fi
+          echo "各处版本号一致。"
+
+  # =========================================================================
   # Linux：文档把 Linux 桌面端标为 P2「暂缓」，所以这里只构建核心库并跑单元测试，
   # 用来及早发现跨平台的编译问题（Linux 上用的是 GCC，与 macOS 的 Clang、
   # Windows 的 MSVC 是三个不同的编译器，能覆盖大部分可移植性问题）。
