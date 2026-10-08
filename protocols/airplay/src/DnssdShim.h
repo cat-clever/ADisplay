@@ -18,6 +18,14 @@ const char* adisplay_dnssd_public_key(dnssd_t* dnssd);
 // 设备 id 的规范化形式（小写、冒号分隔），与 /info 应答里的 deviceID 相同。
 const char* adisplay_dnssd_device_id(dnssd_t* dnssd);
 
+// 协议层自己的型号与版本号（UxPlay 的 GLOBAL_MODEL / GLOBAL_VERSION）。
+//
+// 广播必须用这两个值：/info 应答里的 model 与 sourceVersion 就是它们，而
+// mDNS 的 model / srcvers 只要有一个字不同，iOS 就会当成两台设备。
+// 照着抄一份常量是不行的 —— 上游升级换了值，抄的那份不会跟着动。
+const char* adisplay_airplay_model(void);
+const char* adisplay_airplay_version(void);
+
 #ifdef __cplusplus
 }
 #endif

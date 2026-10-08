@@ -1167,6 +1167,12 @@ AdResult AD_CALL ad_engine_start(AdEngine* engine) {
         discovery_config.castpc_port = castpc_port;
         // 配对公钥：缺了它 iPhone 能看见我们却配不上对。
         discovery_config.airplay_pk = airplay_public_key;
+        // 型号与版本同样取自协议层 —— /info 应答里的 model 与 sourceVersion
+        // 就是这两个值，广播跟着用同一份才不会被当成两台设备。
+        if (airplay_ready) {
+            discovery_config.airplay_model = engine->airplay_receiver->model();
+            discovery_config.airplay_srcvers = engine->airplay_receiver->srcvers();
+        }
         // 只在接收端真的起来了才广播。这条是与「看得见、点不动」直接相关的
         // 一处：广播了却没有东西应答，用户无从判断问题出在哪一边。
         discovery_config.enable_airplay = airplay_ready;

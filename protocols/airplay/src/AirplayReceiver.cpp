@@ -100,6 +100,8 @@ struct AirplayReceiver::Impl {
 
     std::string device_id_text;
     std::string public_key_text;
+    std::string model_text;
+    std::string srcvers_text;
 
     IAirplayListener* listener = nullptr;
 
@@ -474,13 +476,6 @@ float cb_on_video_playlist_remove(void* cls) {
     return 0.0f;
 }
 
-void cb_get_custom_profile(void* cls, const char** custom_profile) {
-    (void) cls;
-    if (custom_profile != nullptr) {
-        *custom_profile = nullptr;
-    }
-}
-
 // UxPlay 的内部日志转进我们自己的日志系统。
 //
 // 这一步不是可选的：AirPlay 的失败几乎都以「iPhone 那边转圈然后放弃」的形式
@@ -564,13 +559,17 @@ bool AirplayReceiver::start(const AirplayConfig& config, std::string* out_error)
         }
     }
 
+    // 参数顺序看着别扭（error 在 pin_pw 之前），但那是上游这个版本的签名，
+    // 照它写就行 —— 自作主张调换会得到一句「冲突的声明」，而不是参数错位的警告。
+    int dnssd_error = 0;
     dnssd_t* dnssd = dnssd_init(config.device_name.c_str(),
                                 static_cast<int>(config.device_name.size()),
                                 reinterpret_cast<const char*>(hw_addr), 6,
-                                0, nullptr);
+                                &dnssd_error, 0);
     if (dnssd == nullptr) {
         if (out_error != nullptr) {
-            *out_error = "初始化 AirPlay 设备身份失败";
+            *out_error = "初始化 AirPlay 设备身份失败（错误码 " +
+                         std::to_string(dnssd_error) + "）";
         }
         return false;
     }
@@ -612,7 +611,6 @@ bool AirplayReceiver::start(const AirplayConfig& config, std::string* out_error)
     callbacks.on_video_stop = &cb_on_video_stop;
     callbacks.on_video_acquire_playback_info = &cb_on_video_acquire_playback_info;
     callbacks.on_video_playlist_remove = &cb_on_video_playlist_remove;
-    callbacks.get_custom_profile = &cb_get_custom_profile;
 
     raop_t* raop = raop_init(&callbacks);
     if (raop == nullptr) {
@@ -628,9 +626,15 @@ bool AirplayReceiver::start(const AirplayConfig& config, std::string* out_error)
     // 逐帧的数据要 DEBUG_DATA 才打，那个量级不能常开。
     raop_set_log_level(raop, LOGGER_INFO);
 
-    // nohold=0：允许新设备抢占已有连接（UxPlay 的默认行为）。
+    // nohold=1：允许新设备抢占已有连接。
+    //
+    // 取 1 而不是上游的默认 0，是因为接收端是一台公共设备（电视、客厅电脑）。
+    // nohold=0 时，上一台设备留下的连接没断开，新设备会直接收到 409
+    // 「服务器已连接另一台客户端」—— 而 iOS 的连接常常在用户以为已经退出之后
+    // 仍然挂着，表现就是「过一会儿谁都投不上了」。
+    //
     // 传 keyfile 让配对密钥持久化，否则 iPhone 每次都要重新配对。
-    if (raop_init2(raop, 0, config.device_id.c_str(), config.key_file.c_str()) != 0) {
+    if (raop_init2(raop, 1, config.device_id.c_str(), config.key_file.c_str()) != 0) {
         raop_destroy(raop);
         dnssd_destroy(dnssd);
         if (out_error != nullptr) {
@@ -638,6 +642,14 @@ bool AirplayReceiver::start(const AirplayConfig& config, std::string* out_error)
         }
         return false;
     }
+
+    // 必须打开 HLS（AirPlay 视频）支持。
+    //
+    // 这一项不是可选的：协议层在收到「不带 CSeq 头」的请求时，会用这个开关
+    // 判断它是不是来自 _airplay._tcp 的视频流 —— 关着的话那些请求会被
+    // **静默忽略**（只在它自己的日志里留一句 use option -hls to activate
+    // HLS support）。表现就是设备可见、点下去毫无反应。
+    raop_set_plist(raop, "hls", 1);
 
     if (config.display_width > 0) {
         raop_set_plist(raop, "width", config.display_width);
@@ -689,6 +701,9 @@ bool AirplayReceiver::start(const AirplayConfig& config, std::string* out_error)
         //   * 公钥由协议层生成后交给接缝，我们只是转播。
         impl_->device_id_text = adisplay_dnssd_device_id(dnssd);
         impl_->public_key_text = adisplay_dnssd_public_key(dnssd);
+        // 型号与版本也一并取走：广播要用它们，且必须与 /info 应答里的一致。
+        impl_->model_text = adisplay_airplay_model();
+        impl_->srcvers_text = adisplay_airplay_version();
         public_key = impl_->public_key_text;
     }
 
@@ -765,6 +780,24 @@ std::string AirplayReceiver::public_key() const {
 #if ADISPLAY_HAVE_AIRPLAY_RECEIVER
     std::lock_guard<std::mutex> lock(impl_->mutex);
     return impl_->public_key_text;
+#else
+    return std::string();
+#endif
+}
+
+std::string AirplayReceiver::model() const {
+#if ADISPLAY_HAVE_AIRPLAY_RECEIVER
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    return impl_->model_text;
+#else
+    return std::string();
+#endif
+}
+
+std::string AirplayReceiver::srcvers() const {
+#if ADISPLAY_HAVE_AIRPLAY_RECEIVER
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    return impl_->srcvers_text;
 #else
     return std::string();
 #endif

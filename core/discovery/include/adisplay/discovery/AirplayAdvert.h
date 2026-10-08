@@ -34,7 +34,11 @@ struct Advert {
     std::string public_key;
 
     // AirPlay 的 model 与 srcvers。
-    std::string model = "AppleTV6,2";
+    //
+    // 默认值对齐 UxPlay 这个标签版的 GLOBAL_MODEL / GLOBAL_VERSION。生产路径上
+    // 由 AdEngine 从协议层取真值填进来 —— 这里的默认值只在单测与「协议层没起来」
+    // 这类边界上用得到。
+    std::string model = "AppleTV3,2";
     std::string srcvers = "220.68";
 };
 

@@ -109,6 +109,12 @@ public:
     // iOS 能看见设备但配不上对，所以调用方必须把这件事记进日志。
     std::string public_key() const;
 
+    // 协议层的型号与版本号。广播的 model / srcvers 必须用这两个值 ——
+    // /info 应答里的 model 与 sourceVersion 就是它们，差一个字 iOS 就会
+    // 把同一台设备当成两台。照抄常量是不行的：上游升级换了值，抄的那份不会动。
+    std::string model() const;
+    std::string srcvers() const;
+
     void set_listener(IAirplayListener* listener);
 
 private:

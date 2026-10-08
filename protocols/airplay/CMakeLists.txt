@@ -95,6 +95,10 @@ if(ADISPLAY_HAVE_AIRPLAY_RECEIVER)
             PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/compat/win32")
         target_compile_options(adisplay_airplay_proto
             PRIVATE "/FI${CMAKE_CURRENT_SOURCE_DIR}/compat/win32/AdisplayWin32Compat.h")
+        # 上游的 compat.h / sockets.h 判的是 WIN32 而不是 _WIN32。CMake 给 MSVC
+        # 默认加了 /DWIN32，但那是它的默认值而不是我们的声明 —— 依赖别人的默认
+        # 值，会在某次工具链更新后变成一段只在 Windows 上走错分支的代码。
+        target_compile_definitions(adisplay_airplay_proto PRIVATE WIN32)
         # Windows 上上游用 pthreads4w 提供的 pthread.h。
         find_package(PThreads4W REQUIRED)
         target_link_libraries(adisplay_airplay_proto

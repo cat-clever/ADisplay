@@ -142,5 +142,5 @@ AD_TEST(raop_txt_wire_round_trips, "整条 RAOP 记录能从线上格式原样�
     // 协议层就是按这个格式把 TXT 交给 /info 的，所以能解回来才算构造正确。
     AD_CHECK_EQ(parsed.size(), static_cast<std::size_t>(19));
     AD_CHECK_EQ(parsed.at("pk"), std::string("abcd"));
-    AD_CHECK_EQ(parsed.at("am"), std::string("AppleTV6,2"));
+    AD_CHECK_EQ(parsed.at("am"), std::string("AppleTV3,2"));
 }

@@ -33,9 +33,13 @@ struct DiscoveryConfig {
     uint16_t dlna_port = 49152;
     uint16_t castpc_port = 8765;
 
-    // AirPlay 的 model 与 srcvers。这两个值会影响 iPhone 是否愿意把我们
-    // 当作可镜像的目标，批次 4 接 AirPlay 时会按实际协议行为再校准。
-    std::string airplay_model = "AppleTV6,2";
+    // AirPlay 的 model 与 srcvers。
+    //
+    // 这里的默认值只是为了「没有 AirPlay 协议层时也有个合法值」——
+    // 真正广播时 AdEngine 会用协议层自己的 GLOBAL_MODEL / GLOBAL_VERSION
+    // 覆盖它们。必须覆盖：/info 应答里的 model 与 sourceVersion 就是那两个
+    // 常量，广播若用别的值，iOS 会把同一台设备当成两台。
+    std::string airplay_model = "AppleTV3,2";
     std::string airplay_srcvers = "220.68";
 
     // AirPlay 接收端的 Ed25519 公钥（十六进制串），由协议层生成后交给这里。
