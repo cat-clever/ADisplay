@@ -129,7 +129,12 @@ jobs:
       - name: 安装构建工具
         run: |
           sudo apt-get update
+          # ninja：构建系统本身。
           sudo apt-get install -y ninja-build
+          # nasm：FFmpeg 的 x86/x86_64 SIMD 汇编器。vcpkg 的 ffmpeg port 在
+          # x86 目标上会去找它，找不到就直接 BUILD_FAILED —— 而 arm64 目标
+          # 不需要，所以这个依赖只在 x86 上暴露，容易漏掉。
+          sudo apt-get install -y nasm
 
       - uses: ./.github/actions/setup-vcpkg
         with:
@@ -309,12 +314,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: 确认 Ninja 可用
+      - name: 安装构建工具
         run: |
+          # ninja：构建系统本身。
           if ! command -v ninja >/dev/null 2>&1; then
             brew install ninja
           fi
           ninja --version
+
+          # nasm：FFmpeg 的 x86/x86_64 SIMD 汇编器。本项目 macOS 端要编
+          # arm64 与 x86_64 两份，x86_64 那份需要它（arm64 不需要，所以这个
+          # 依赖只在 x86 上暴露，容易漏掉）。
+          if ! command -v nasm >/dev/null 2>&1; then
+            brew install nasm
+          fi
+          nasm -v
 
       # 两个架构共用这一次缓存调用：vcpkg 的二进制缓存是把整个目录一起恢复、
       # 一起保存的（两个三元组的 VCPKG_BINARY_SOURCES 指向同一个 vcpkg-cache），
