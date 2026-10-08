@@ -26,7 +26,13 @@ let package = Package(
         .executableTarget(
             name: "ADisplayApp",
             dependencies: ["CAdDisplay"],
-            path: "Sources/ADisplayApp"
+            path: "Sources/ADisplayApp",
+            // 投屏播放交给系统播放器（AVPlayer / AVPlayerView）——
+            // 解码、硬解、音画同步、HLS 都是现成的，不用自己写管线。
+            linkerSettings: [
+                .linkedFramework("AVFoundation"),
+                .linkedFramework("AVKit")
+            ]
         )
     ]
 )

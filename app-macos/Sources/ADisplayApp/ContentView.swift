@@ -14,6 +14,20 @@ struct ContentView: View {
     @State private var isEditingName = false
 
     var body: some View {
+        Group {
+            if let media = model.activeMedia {
+                // 有投屏就把整个窗口让给画面：这是用户此刻唯一关心的事，
+                // 设置项等停止投屏后再回来。
+                PlayerPage(media: media)
+                    .environmentObject(model)
+            } else {
+                settingsPage
+            }
+        }
+    }
+
+    /// 没有投屏时的设置页。
+    private var settingsPage: some View {
         // 布局策略：前三块按内容取高，日志区吃掉剩余空间。
         //
         // 这样窗口缩小时先压日志区，而不是把某一块挤出可视区域 ——

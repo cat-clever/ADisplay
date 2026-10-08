@@ -58,6 +58,25 @@ enum LogLevel: Int32 {
     }
 }
 
+/// 与 adisplay.h 的 AdTransportState 数值一一对应。
+enum PlaybackState: Int32 {
+    case noMedia = 0
+    case stopped = 1
+    case playing = 2
+    case paused = 3
+    case transitioning = 4
+}
+
+/// 与 adisplay.h 的 AdPlaybackCommand 数值一一对应。
+enum PlaybackCommand: Int32 {
+    case play = 0
+    case pause = 1
+    case stop = 2
+    case seek = 3        // value 是目标位置（毫秒）
+    case setVolume = 4   // value 是 0..100
+    case setMute = 5     // value 是 0 或 1
+}
+
 /// 设备名称不合规，message 可以直接显示给用户。
 struct DeviceNameError: LocalizedError {
     let message: String
@@ -78,12 +97,28 @@ final class EngineModel: ObservableObject {
     /// 设备名称的编辑值。改这个不会立刻生效，要调 applyDeviceName()。
     @Published var deviceNameDraft: String = ""
 
+    /// 手机推来的媒体地址。非 nil 表示正在投屏，界面据此整窗切到播放页。
+    @Published private(set) var activeMedia: ActiveMedia?
+
+    /// 一次投屏会话。sessionId 要原样带回报给核心，核心靠它把状态
+    /// 对应回手机上那个会话。
+    struct ActiveMedia: Equatable {
+        let sessionId: UInt32
+        let url: String
+    }
+
+    /// 手机发来的播放控制意图，由播放页实现并执行。
+    private var playbackHandler: ((PlaybackCommand, Int64) -> Void)?
+
     private var engine: OpaquePointer?
     private let maxLogLines = 500
 
     // 回调闭包必须由本对象持有并保活。
     private var stateCallback: (@convention(c) (UnsafeMutableRawPointer?, Int32) -> Void)?
     private var logCallback: (@convention(c) (UnsafeMutableRawPointer?, Int32, UnsafePointer<CChar>?) -> Void)?
+    private var mediaURLCallback: (@convention(c) (UnsafeMutableRawPointer?, UInt32, UnsafePointer<CChar>?, UnsafePointer<CChar>?) -> Void)?
+    private var playbackCommandCallback: (@convention(c) (UnsafeMutableRawPointer?, UInt32, Int32, Int64) -> Void)?
+    private var sessionClosedCallback: (@convention(c) (UnsafeMutableRawPointer?, UInt32, Int32) -> Void)?
 
     deinit {
         if let handle = engine {
@@ -152,16 +187,113 @@ final class EngineModel: ObservableObject {
             }
         }
 
+        mediaURLCallback = { rawUserData, sessionId, rawURL, _ in
+            guard let rawUserData = rawUserData else { return }
+            let model = Unmanaged<EngineModel>.fromOpaque(rawUserData).takeUnretainedValue()
+            let url = rawURL.map { String(cString: $0) } ?? ""
+            DispatchQueue.main.async {
+                model.beginMedia(sessionId: sessionId, url: url)
+            }
+        }
+
+        playbackCommandCallback = { rawUserData, sessionId, command, value in
+            guard let rawUserData = rawUserData else { return }
+            let model = Unmanaged<EngineModel>.fromOpaque(rawUserData).takeUnretainedValue()
+            let parsed = PlaybackCommand(rawValue: command)
+            DispatchQueue.main.async {
+                guard let parsed = parsed else { return }
+                model.dispatch(command: parsed, value: value, sessionId: sessionId)
+            }
+        }
+
+        sessionClosedCallback = { rawUserData, sessionId, _ in
+            guard let rawUserData = rawUserData else { return }
+            let model = Unmanaged<EngineModel>.fromOpaque(rawUserData).takeUnretainedValue()
+            DispatchQueue.main.async {
+                model.endMedia(sessionId: sessionId)
+            }
+        }
+
         var callbacks = AdCallbacks()
         callbacks.struct_size = UInt32(MemoryLayout<AdCallbacks>.size)
         callbacks.on_state_changed = stateCallback
         callbacks.on_log = logCallback
+        callbacks.on_media_url = mediaURLCallback
+        callbacks.on_playback_command = playbackCommandCallback
+        callbacks.on_session_closed = sessionClosedCallback
 
         guard let handle = engine else { return }
         let installed = ad_engine_set_callbacks(handle, &callbacks, userData)
         if installed.rawValue != ResultCode.ok {
             appendLog(level: .error, text: "注册回调失败：\(describe(result: installed))")
         }
+    }
+
+    // MARK: - 投屏播放（文档 3.2、4.1）
+    //
+    // 核心不播放：DLNA 给的是一条 URL，解码渲染交给系统播放器（见 PlayerPage）。
+    // 这一节负责把两边接起来，并保存播放页的位置 —— 手机的 Get*Info 是同步
+    // 应答，答案得立刻能给出。
+
+    /// 由播放页注册。手机的控制意图会转到这里执行。
+    func setPlaybackHandler(_ handler: ((PlaybackCommand, Int64) -> Void)?) {
+        playbackHandler = handler
+    }
+
+    /// 用户点「停止接收」。只结束本地播放，核心那边下次收到推送会重新开会话。
+    func stopCasting() {
+        activeMedia = nil
+        playbackHandler = nil
+    }
+
+    /// 把播放器的真实状态回报给核心。不回报的话手机看到的永远停在「起播中」。
+    ///
+    /// volume / muted 传 -1 表示「这项没变」—— 用 -1 而不是 0，因为 0 是
+    /// 合法值（音量 0、未静音），拿 0 当不变会把真实状态冲掉。
+    func reportPlayback(sessionId: UInt32, state: PlaybackState, positionMs: Int64,
+                        durationMs: Int64, volume: Int32, muted: Int32) {
+        guard let handle = engine else { return }
+
+        var status = AdPlaybackStatus()
+        status.struct_size = UInt32(MemoryLayout<AdPlaybackStatus>.size)
+        status.abi_version = ad_abi_version()
+        status.session_id = sessionId
+        status.transport_state = state.rawValue
+        status.position_ms = positionMs
+        status.duration_ms = durationMs
+        status.volume = volume
+        status.muted = muted
+
+        _ = ad_engine_report_playback(handle, &status)
+    }
+
+    /// 核心日志之外的界面侧日志。用同一个缓冲，用户复制日志时能看到全貌。
+    func log(_ text: String, level: LogLevel = .info) {
+        appendLog(level: level, text: text)
+    }
+
+    private func beginMedia(sessionId: UInt32, url: String) {
+        activeMedia = ActiveMedia(sessionId: sessionId, url: url)
+        appendLog(level: .info, text: "手机推送媒体：\(url)")
+    }
+
+    private func endMedia(sessionId: UInt32) {
+        // 会话号对不上说明是上一个已经被抢占的会话在收尾，忽略即可。
+        guard activeMedia?.sessionId == sessionId else { return }
+        activeMedia = nil
+        playbackHandler = nil
+    }
+
+    private func dispatch(command: PlaybackCommand, value: Int64, sessionId: UInt32) {
+        guard let media = activeMedia, media.sessionId == sessionId else { return }
+
+        if command == .stop {
+            // 手机的「停止」是结束这次投屏，不只是暂停播放器。
+            activeMedia = nil
+            playbackHandler = nil
+            return
+        }
+        playbackHandler?(command, value)
     }
 
     // MARK: - 服务开关
