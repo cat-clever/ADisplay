@@ -146,9 +146,35 @@ public:
         if (status == DNS_REQUEST_PENDING || status == ERROR_SUCCESS) {
             has_cancel_handle_ = true;
         } else {
+            // 把系统对这个错误码的描述一并打出来。
+            //
+            // 原来这里写的是一句猜测（"需要 Windows 10 1703 以上、DNS Client 服务
+            // 在运行"），而实测返回的 14 在 Win32 里是 ERROR_OUTOFMEMORY，与那句话
+            // 对不上 —— 猜出来的提示会把排查方向带偏。让系统自己说，是什么就是什么。
+            LPSTR buffer = nullptr;
+            const DWORD length = ::FormatMessageA(
+                FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM |
+                    FORMAT_MESSAGE_IGNORE_INSERTS | FORMAT_MESSAGE_MAX_WIDTH_MASK,
+                nullptr, status, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+                reinterpret_cast<LPSTR>(&buffer), 0, nullptr);
+
+            std::string detail;
+            if (length > 0 && buffer != nullptr) {
+                detail.assign(buffer, length);
+                ::LocalFree(buffer);
+                while (!detail.empty() &&
+                       (detail.back() == '\n' || detail.back() == '\r' || detail.back() == ' ')) {
+                    detail.pop_back();
+                }
+            }
+            if (detail.empty()) {
+                // DNS-SD 的 DNS_ERROR_* 码在 9500 以上，未必在系统消息表里。
+                detail = "系统没有给出这个错误码的描述";
+            }
+
             const std::string message =
                 "mDNS 注册失败（错误码 " + std::to_string(static_cast<unsigned long>(status)) +
-                "）。Windows 的 DNS-SD 需要 Windows 10 1703 以上，且 DNS Client 服务在运行。";
+                "：" + detail + "）";
             AD_LOG_ERROR("{}", message);
             set_error(out_error, message);
             withdraw();
