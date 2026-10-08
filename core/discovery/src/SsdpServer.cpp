@@ -463,8 +463,28 @@ struct SsdpServer::Impl {
         const InterfaceBinding* binding = interface_for_peer(peer_text);
         const std::string address = (binding != nullptr) ? binding->address : std::string();
 
-        const bool replied = send_to(
-            build_search_response(snapshot, st, location_for(snapshot, address)), sender);
+        const std::string location = location_for(snapshot, address);
+
+        // ssdp:all 要逐条回复，每条用具体的 NT 作为 ST。
+        //
+        // 规范里 ssdp:all 是「把所有设备都报一遍」的请求，不是一种设备类型。
+        // 回一条 ST=ssdp:all 的响应在客户端看来是无效的 —— 它期望收到的 ST
+        // 必须是 upnp:rootdevice、uuid:xxx、设备类型或某个服务这类具体值。
+        //
+        // 实测：夸克用 upnp:rootdevice / MediaRenderer:1 查询，能走到拉设备
+        // 描述这一步；而另一个用 ssdp:all 的 App 收到我们那条 ST=ssdp:all 的
+        // 响应后，连描述都不来拉。
+        bool replied = false;
+        if (st == "ssdp:all") {
+            for (const NotificationTarget& target : build_targets(snapshot)) {
+                if (send_to(build_search_response(snapshot, target.nt, location), sender)) {
+                    replied = true;
+                }
+            }
+        } else {
+            replied = send_to(build_search_response(snapshot, st, location), sender);
+        }
+
         const uint64_t total = responded_count.fetch_add(1, std::memory_order_relaxed) + 1;
 
         // 收到查询就记一条，但做限流：头三条全记，之后每 20 条记一条。

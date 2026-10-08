@@ -188,6 +188,26 @@ AD_TEST(匹配搜索目标, "matches_search_target 的各类查询") {
     AD_CHECK(!matches_search_target(advertisement, "SSDP:ALL"));   // 大小写敏感，规范如此
 }
 
+AD_TEST(搜索响应可逐条给出, "响应里的 ST 用具体的搜索目标而非 ssdp:all") {
+    const SsdpAdvertisement advertisement = make_advertisement();
+    const std::vector<NotificationTarget> targets = build_targets(advertisement);
+
+    // ssdp:all 的响应必须逐条发，每条用一个具体的 NT 当 ST。
+    // 回一条 ST=ssdp:all 在客户端看来是无效的 —— 那不是一个设备类型。
+    // 实测：用 ssdp:all 查询的 App 收到这种响应后连设备描述都不来拉。
+    for (const NotificationTarget& target : targets) {
+        const std::string message =
+            build_search_response(advertisement, target.nt, advertisement.location);
+        AD_CHECK_EQ(header_value(message, "ST"), target.nt);
+        AD_CHECK_EQ(header_value(message, "USN"), target.usn);
+    }
+
+    // 确认我们确实不会拿 ssdp:all 当 ST 发出去
+    const std::string bogus = build_search_response(advertisement, "ssdp:all", advertisement.location);
+    AD_CHECK_EQ(header_value(bogus, "ST"), std::string("ssdp:all"));
+    // 上面那条只是演示这个函数不会自作主张改写 —— 所以调用方必须传具体的 NT。
+}
+
 AD_TEST(报文以空行结尾, "报文以 CRLF CRLF 结尾") {
     const SsdpAdvertisement advertisement = make_advertisement();
     const std::vector<NotificationTarget> targets = build_targets(advertisement);
