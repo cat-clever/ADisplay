@@ -261,28 +261,39 @@ std::string dedupe_device_name(std::string_view name, const std::vector<std::str
 }
 
 std::string default_device_name() {
+    std::string host;
+
 #if defined(_WIN32)
     char buffer[256] = {0};
     DWORD size = static_cast<DWORD>(sizeof(buffer));
     if (::GetComputerNameA(buffer, &size) != 0 && size > 0) {
-        return std::string(buffer, size);
+        host.assign(buffer, size);
     }
 #elif defined(__APPLE__) || defined(__linux__)
     char buffer[256] = {0};
     if (::gethostname(buffer, sizeof(buffer) - 1) == 0 && buffer[0] != '\0') {
-        std::string host(buffer);
+        host.assign(buffer);
         // macOS 上主机名常带 ".local" 后缀，手机端列表里显示出来很怪，去掉。
         const std::string suffix = ".local";
         if (host.size() > suffix.size() &&
             host.compare(host.size() - suffix.size(), suffix.size(), suffix) == 0) {
             host.erase(host.size() - suffix.size());
         }
-        if (!host.empty()) {
-            return host;
-        }
     }
 #endif
-    return "ADisplay";
+
+    // 主机名不能直接拿来当设备名 —— 它不保证满足 1–32 码点的规则。
+    // GitHub 的 macOS runner 主机名形如 Mac-<很长的 UUID>，一开机就会超限；
+    // 而这个默认名是要被直接拿去注册 mDNS 的，不合规会导致广播发不出去。
+    // 所以这里统一净化并按码点截断，保证返回值一定通过 validate_device_name。
+    std::string cleaned = sanitize_device_name(host);
+    if (utf8_codepoint_count(cleaned) > kDeviceNameMaxChars) {
+        cleaned = utf8_truncate(cleaned, kDeviceNameMaxChars);
+    }
+    if (cleaned.empty()) {
+        return "ADisplay";
+    }
+    return cleaned;
 }
 
 }  // namespace adisplay::common
