@@ -36,20 +36,24 @@
 
   <!--
     核心库 castcore.dll 由 CMake 单独构建（见 .github/workflows/ci.yml），
-    不参与 msbuild。这里用 AdDisplayCoreDir 指过去，构建后拷到输出目录。
+    不参与 msbuild。CI 通过 AdDisplayCoreDir 告诉这里去哪找。
   -->
   <PropertyGroup>
     <AdDisplayCoreDir Condition="'$(AdDisplayCoreDir)' == ''">$(MSBuildThisFileDirectory)..\build\bin</AdDisplayCoreDir>
   </PropertyGroup>
 
-  <Target Name="CopyCastCore" AfterTargets="Build">
-    <ItemGroup>
-      <CastCoreFiles Include="$(AdDisplayCoreDir)\castcore.dll" />
-    </ItemGroup>
-    <Copy SourceFiles="@(CastCoreFiles)"
-          DestinationFolder="$(OutDir)"
-          SkipUnchangedFiles="true"
-          Condition="Exists('$(AdDisplayCoreDir)\castcore.dll')" />
-  </Target>
+  <!--
+    必须作为 Content 引入，不能用 AfterTargets="Build" 手动 Copy。
+    手动拷进 bin 的文件不会被 Publish 收集 —— publish 只认已知的项集合，
+    结果就是发出去的包里少了 castcore.dll，一运行就报找不到 DLL。
+    声明成 Content 并打开 CopyToPublishDirectory，两条路径都会有它。
+  -->
+  <ItemGroup Condition="Exists('$(AdDisplayCoreDir)\castcore.dll')">
+    <Content Include="$(AdDisplayCoreDir)\castcore.dll">
+      <Link>castcore.dll</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+  </ItemGroup>
 
 </Project>

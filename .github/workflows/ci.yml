@@ -108,9 +108,17 @@ jobs:
             /p:PublishDir="${{ github.workspace }}\publish\windows-x64\" `
             /p:AdDisplayCoreDir="${{ github.workspace }}\build\windows-x64\bin"
 
-      - name: 打包
+      - name: 校验并打包
         shell: pwsh
         run: |
+          # 核心库必须在包里。少了它程序一启动就报找不到 DLL，
+          # 而这种缺失不会让构建失败，只有装上跑才会发现。
+          if (-not (Test-Path "publish/windows-x64/castcore.dll")) {
+            Write-Error "publish 目录里没有 castcore.dll"
+            Get-ChildItem -Recurse publish/windows-x64 | Select-Object -First 40 FullName
+            exit 1
+          }
+          Get-ChildItem publish/windows-x64/castcore.dll | Format-List Name, Length
           Compress-Archive -Path publish/windows-x64/* -DestinationPath adisplay-windows-x64.zip -Force
 
       - uses: actions/upload-artifact@v4
@@ -176,9 +184,15 @@ jobs:
             /p:PublishDir="${{ github.workspace }}\publish\windows-arm64\" `
             /p:AdDisplayCoreDir="${{ github.workspace }}\build\windows-arm64\bin"
 
-      - name: 打包
+      - name: 校验并打包
         shell: pwsh
         run: |
+          if (-not (Test-Path "publish/windows-arm64/castcore.dll")) {
+            Write-Error "publish 目录里没有 castcore.dll"
+            Get-ChildItem -Recurse publish/windows-arm64 | Select-Object -First 40 FullName
+            exit 1
+          }
+          Get-ChildItem publish/windows-arm64/castcore.dll | Format-List Name, Length
           Compress-Archive -Path publish/windows-arm64/* -DestinationPath adisplay-windows-arm64.zip -Force
 
       - uses: actions/upload-artifact@v4
