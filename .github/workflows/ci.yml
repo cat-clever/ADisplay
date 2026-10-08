@@ -170,7 +170,7 @@ jobs:
 
       - uses: ./.github/actions/setup-vcpkg
         with:
-          triplet: x64-windows-static
+          triplet: x64-windows-static-md
 
       # Ninja 需要 cl.exe 在 PATH 上，这个 action 负责摆好 MSVC 环境变量。
       - uses: ilammy/msvc-dev-cmd@v1
@@ -231,6 +231,23 @@ jobs:
             exit 1
           }
           Get-ChildItem publish/windows-x64/castcore.dll | Format-List Name, Length
+          # VC++ 运行库随包带上。castcore.dll 导入 MSVCP140 / VCRUNTIME140，而它们来自
+          # VC++ Redistributable —— 不带上的话「绿色版免装」就不成立，没装过的机器上
+          # castcore.dll 加载不起来。另一条路是把依赖编成静态 CRT，但那要求我们自己的
+          # 目标也用 /MT，而项目（含单元测试）都是 /MD，两者不能混（LNK2038）。
+          $crtRoot = Join-Path $env:VCToolsRedistDir "x64\Microsoft.VC143.CRT"
+          if (-not (Test-Path $crtRoot)) {
+            $crtRoot = (Get-ChildItem (Join-Path $env:VCToolsRedistDir "x64") -Directory -Filter "Microsoft.VC*.CRT" |
+                        Select-Object -First 1).FullName
+          }
+          if (-not $crtRoot -or -not (Test-Path $crtRoot)) {
+            Write-Error "找不到 VC++ 运行库目录（VCToolsRedistDir=$env:VCToolsRedistDir）"
+            exit 1
+          }
+          foreach ($dll in @("msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll")) {
+            Copy-Item (Join-Path $crtRoot $dll) "publish\windows-x64\" -Force
+          }
+          Get-ChildItem "publish\windows-x64\" | Where-Object { $_.Name -like "vcruntime*" -or $_.Name -like "msvcp*" } | Format-Table Name, Length
           Compress-Archive -Path publish/windows-x64/* -DestinationPath adisplay-windows-x64.zip -Force
 
       - uses: actions/upload-artifact@v4
@@ -252,7 +269,7 @@ jobs:
 
       - uses: ./.github/actions/setup-vcpkg
         with:
-          triplet: arm64-windows-static
+          triplet: arm64-windows-static-md
 
       # amd64_arm64 = x64 宿主 + ARM64 目标。
       # 不能写 arm64：那会让 vcvarsall 配出「ARM64 宿主原生」环境，
@@ -306,6 +323,23 @@ jobs:
             exit 1
           }
           Get-ChildItem publish/windows-arm64/castcore.dll | Format-List Name, Length
+          # VC++ 运行库随包带上。castcore.dll 导入 MSVCP140 / VCRUNTIME140，而它们来自
+          # VC++ Redistributable —— 不带上的话「绿色版免装」就不成立，没装过的机器上
+          # castcore.dll 加载不起来。另一条路是把依赖编成静态 CRT，但那要求我们自己的
+          # 目标也用 /MT，而项目（含单元测试）都是 /MD，两者不能混（LNK2038）。
+          $crtRoot = Join-Path $env:VCToolsRedistDir "arm64\Microsoft.VC143.CRT"
+          if (-not (Test-Path $crtRoot)) {
+            $crtRoot = (Get-ChildItem (Join-Path $env:VCToolsRedistDir "arm64") -Directory -Filter "Microsoft.VC*.CRT" |
+                        Select-Object -First 1).FullName
+          }
+          if (-not $crtRoot -or -not (Test-Path $crtRoot)) {
+            Write-Error "找不到 VC++ 运行库目录（VCToolsRedistDir=$env:VCToolsRedistDir）"
+            exit 1
+          }
+          foreach ($dll in @("msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll")) {
+            Copy-Item (Join-Path $crtRoot $dll) "publish\windows-arm64\" -Force
+          }
+          Get-ChildItem "publish\windows-arm64\" | Where-Object { $_.Name -like "vcruntime*" -or $_.Name -like "msvcp*" } | Format-Table Name, Length
           Compress-Archive -Path publish/windows-arm64/* -DestinationPath adisplay-windows-arm64.zip -Force
 
       - uses: actions/upload-artifact@v4
