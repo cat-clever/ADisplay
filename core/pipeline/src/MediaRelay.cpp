@@ -262,6 +262,10 @@ void MediaRelay::Impl::handle_local_playlist(const httplib::Request& request,
             fail(response, "拉子播放列表失败：" + variant_body.error);
             return;
         }
+        if (variant_body.truncated) {
+            AD_LOG_WARN("本地中转：子播放列表不完整（{} 字节），按已收到的部分处理",
+                        variant_body.body.size());
+        }
         playlist_url = variant;
         playlist.body = std::move(variant_body.body);
         format = classify_playlist(playlist.body);

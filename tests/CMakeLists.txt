@@ -17,6 +17,7 @@ set(ADISPLAY_TEST_SOURCES
     test_pipeline_media_source.cpp
     test_pipeline_hls_playlist.cpp
     test_pipeline_media_relay.cpp
+    test_pipeline_http_fetch.cpp
 )
 
 foreach(test_source IN LISTS ADISPLAY_TEST_SOURCES)
@@ -58,6 +59,14 @@ foreach(test_source IN LISTS ADISPLAY_TEST_SOURCES)
     # 单测里走）。
     if(test_name MATCHES "^test_pipeline_")
         target_link_libraries(${test_name} PRIVATE adisplay_pipeline)
+    endif()
+
+    # 远端拉取的用例要触达 core/pipeline/src 下的内部头（HttpFetch.h）。
+    # 它自己起一个裸 socket 假服务端 —— 要测的「声明了长度却只发一半」
+    # 恰恰是 httplib 的服务端表达不出来的。
+    if(test_name STREQUAL "test_pipeline_http_fetch")
+        target_include_directories(${test_name} PRIVATE
+            "${CMAKE_SOURCE_DIR}/core/pipeline/src")
     endif()
 
     # 中转服务的用例要自己起客户端发请求，得单独链 httplib ——

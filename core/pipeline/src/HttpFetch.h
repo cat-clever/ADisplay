@@ -10,9 +10,17 @@
 namespace adisplay::pipeline {
 
 struct FetchResult {
-    bool ok = false;    // HTTP 200 才算成功
+    bool ok = false;    // HTTP 200 / 206 才算成功
     int status = 0;     // HTTP 状态码；没拿到响应时为 0
     std::string body;
+
+    // 正文短于对端声明的长度，续传也没补齐。
+    //
+    // 单独标出来是因为两种调用方对它的判断必须相反：播放列表短一截仍然能用
+    // （起播前面那些分片，好过完全没有画面），而一个半截的 TS 分片喂进换封装
+    // 只会产出坏数据 —— 那比不播更糟。
+    bool truncated = false;
+
     std::string error;  // 失败原因（中文，供日志与界面显示）
 };
 

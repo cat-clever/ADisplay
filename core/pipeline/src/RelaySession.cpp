@@ -161,6 +161,14 @@ RelaySession::Produced RelaySession::produce_one(std::size_t index) {
         AD_LOG_WARN("本地中转：分片 {} {}", index, produced.error);
         return produced;
     }
+    if (fetched.truncated) {
+        // 半截的分片不能凑合：换封装是按字节流解析的，少一段之后它产出的
+        // moof/mdat 时间轴是错的，播放器那边表现为花屏或者卡死 —— 比「这一段
+        // 没下到」难排查得多。所以宁可让这一片失败，把日志留清楚。
+        produced.error = "分片下载不完整（" + std::to_string(fetched.body.size()) + " 字节）";
+        AD_LOG_WARN("本地中转：分片 {} {}", index, produced.error);
+        return produced;
+    }
 
     if (remuxer_ == nullptr) {
         remuxer_ = std::make_unique<Mp4Remuxer>();
