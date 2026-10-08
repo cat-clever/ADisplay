@@ -37,6 +37,41 @@ int write_callback(void* opaque, const uint8_t* data, int size) {
     return size;
 }
 
+// 输出侧的定位。内存流的定位本来就没有代价，给它一个真实现是有原因的：
+// MOV 复用器在写分片时会去 seek（回填长度、跳转之类），而 FFmpeg 对
+// 「不可寻址的输出」上的 seek 返回的正是 AVERROR(EPERM) —— 它的文案是
+// "Operation not permitted"，看起来像文件权限问题，实际与权限毫无关系。
+// 之前把 seekable 置 0 就是撞在这上面：每个分片都写失败。
+int64_t seek_callback(void* opaque, int64_t offset, int whence) {
+    auto* sink = static_cast<std::vector<uint8_t>*>(opaque);
+    if (sink == nullptr) {
+        return AVERROR(EINVAL);
+    }
+
+    int64_t base = 0;
+    if ((whence & AVSEEK_SIZE) != 0) {
+        // 复用器问「你有多大」，直接给答案，不要动位置。
+        return static_cast<int64_t>(sink->size());
+    }
+    if (whence == SEEK_CUR) {
+        base = 0;   // AVIO 传来的 offset 已经是相对量，由调用方保证
+    } else if (whence == SEEK_END) {
+        base = static_cast<int64_t>(sink->size());
+    } else if (whence != SEEK_SET) {
+        return AVERROR(EINVAL);
+    }
+
+    const int64_t target = base + offset;
+    if (target < 0) {
+        return AVERROR(EINVAL);
+    }
+    // 往前跳（回填）不能越过已有内容；往后退则把中间补零，复用器随后会覆盖。
+    if (static_cast<std::size_t>(target) > sink->size()) {
+        sink->resize(static_cast<std::size_t>(target), 0);
+    }
+    return target;
+}
+
 // 输入侧的只读内存流。
 struct MemoryReader {
     const uint8_t* data = nullptr;
@@ -159,7 +194,7 @@ bool Mp4Remuxer::ensure_output(const AVFormatContext* input, std::string* error)
         return false;
     }
     output_io_ = avio_alloc_context(io_buffer, kIoBufferSize, 1, &buffer_, nullptr,
-                                    write_callback, nullptr);
+                                    write_callback, seek_callback);
     if (output_io_ == nullptr) {
         av_free(io_buffer);
         *error = "创建输出 AVIO 失败";
@@ -167,7 +202,9 @@ bool Mp4Remuxer::ensure_output(const AVFormatContext* input, std::string* error)
     }
     // 内存输出不可寻址。fMP4 这条路本来也不需要回填（moov 是空的，样本全在
     // moof 里），显式置 0 免得复用器去做它做不到的 seek。
-    output_io_->seekable = 0;
+    // 必须声明可寻址：MOV 复用器会 seek，而「不可寻址 + seek」在 FFmpeg 里
+    // 返回的是 AVERROR(EPERM)（文案 "Operation not permitted"，与权限无关）。
+    output_io_->seekable = AVIO_SEEKABLE_NORMAL;
     output_->pb = output_io_;
     output_->flags |= AVFMT_FLAG_CUSTOM_IO;
 
