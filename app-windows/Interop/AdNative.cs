@@ -108,6 +108,7 @@ internal struct AdCallbacks
     public IntPtr OnAudioFrame;
     public IntPtr OnMediaUrl;
     public IntPtr OnPlaybackState;
+    public IntPtr OnPlaybackCommand;
     public IntPtr OnLog;
 }
 

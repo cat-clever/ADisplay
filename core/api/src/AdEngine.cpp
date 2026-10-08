@@ -103,6 +103,11 @@ bool is_valid_quality_preset(int preset) {
 // 引擎内部结构
 // ===========================================================================
 
+// DLNA 的 C++ 回调要转成 C ABI 回调，这件事由 DlnaBridge 做。
+// 它得读 AdEngine 的回调快照，所以只能在 AdEngine 之后定义 ——
+// 这里先声明，成员用 unique_ptr 持有。
+class DlnaBridge;
+
 struct AdEngine {
     mutable std::mutex mutex;
 
@@ -142,6 +147,17 @@ struct AdEngine {
     // DLNA 渲染器：提供设备描述与 SOAP 控制端点（文档 3.2）。
     std::unique_ptr<dlna::DlnaRenderer> dlna_renderer;
 
+    // DLNA 回调 -> C ABI 的桥，批次 3 接入。
+    std::unique_ptr<DlnaBridge> dlna_bridge;
+
+    // 单独一把锁保护 dlna_renderer 指针本身。不复用 mutex 是因为 GENA 推送
+    // 会真的发 HTTP 请求、可能卡好几秒，而 mutex 被回调快照和配置读写共用，
+    // 卡在那里会连累一大片不相干的调用。
+    mutable std::mutex renderer_mutex;
+
+    // 声明出来，让 unique_ptr 的析构点落在 DlnaBridge 定义之后。
+    ~AdEngine();
+
     // 取出用户数据与回调的快照，供锁外调用。
     void notify_state_changed(int new_state) {
         AdCallbacks snapshot{};
@@ -166,6 +182,97 @@ struct AdEngine {
         }
         if (snapshot.on_log != nullptr) {
             snapshot.on_log(user, level, message.c_str());
+        }
+    }
+
+    // ---- 给 DLNA 桥用的转发 -------------------------------------------------
+    //
+    // 和上面几个同一个模式：持锁取快照，锁外调用户代码。用户在回调里回头
+    // 再调 ad_engine_* 是很自然的写法，持锁调用必然死锁。
+
+    void notify_session_opened(uint32_t session_id, int stream_kind) {
+        AdCallbacks snapshot{};
+        void* user = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            snapshot = callbacks;
+            user = user_data;
+        }
+        if (snapshot.on_session_opened == nullptr) {
+            return;
+        }
+        // 字符串要活过回调，所以用局部的。DLNA 一行都没带发送端信息，
+        // 给空串而不是 NULL —— 界面层直接 std::string(peer->display_name)
+        // 是很自然的写法，NULL 会当场崩。
+        const std::string display_name;
+        const std::string address;
+        AdPeerInfo peer{};
+        peer.struct_size = static_cast<uint32_t>(sizeof(AdPeerInfo));
+        peer.display_name = display_name.c_str();
+        peer.address = address.c_str();
+        peer.kind = AD_PEER_ANDROID;   // DLNA 只可能来自 Android（文档 3.2）
+        snapshot.on_session_opened(user, session_id, &peer, stream_kind);
+    }
+
+    void notify_session_closed(uint32_t session_id, int reason) {
+        AdCallbacks snapshot{};
+        void* user = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            snapshot = callbacks;
+            user = user_data;
+        }
+        if (snapshot.on_session_closed != nullptr) {
+            snapshot.on_session_closed(user, session_id, reason);
+        }
+    }
+
+    void notify_media_url(uint32_t session_id, const std::string& url,
+                          const std::string& mime_type) {
+        AdCallbacks snapshot{};
+        void* user = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            snapshot = callbacks;
+            user = user_data;
+        }
+        if (snapshot.on_media_url != nullptr) {
+            snapshot.on_media_url(user, session_id, url.c_str(), mime_type.c_str());
+        }
+    }
+
+    void notify_playback_command(uint32_t session_id, int command, int64_t value) {
+        AdCallbacks snapshot{};
+        void* user = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            snapshot = callbacks;
+            user = user_data;
+        }
+        if (snapshot.on_playback_command != nullptr) {
+            snapshot.on_playback_command(user, session_id, command, value);
+        }
+    }
+
+    // 推送 GENA 事件。持 renderer_mutex 是为了和 stop() 里的析构互斥 ——
+    // 推送会阻塞，所以这把锁必须和 mutex 分开。
+    void publish_playback_event(const std::string& transport_state, int64_t duration_ms,
+                                int volume, bool mute_changed, bool muted) {
+        std::lock_guard<std::mutex> lock(renderer_mutex);
+        if (!dlna_renderer) {
+            return;
+        }
+        if (!transport_state.empty()) {
+            dlna_renderer->notify_transport_state(transport_state);
+        }
+        if (duration_ms >= 0) {
+            dlna_renderer->notify_duration_changed(duration_ms);
+        }
+        if (volume >= 0) {
+            dlna_renderer->notify_volume_changed(volume);
+        }
+        if (mute_changed) {
+            dlna_renderer->notify_mute_changed(muted);
         }
     }
 
@@ -215,6 +322,205 @@ struct AdEngine {
         }
         return AD_OK;
     }
+};
+
+// DlnaBridge 的定义必须落在 AdEngine 之后。
+AdEngine::~AdEngine() = default;
+
+// ---------------------------------------------------------------------------
+// DLNA 回调 -> C ABI 的桥（批次 3）
+//
+// DlnaRenderer 讲的是一套 C++ 接口（IDlnaListener），界面层只认 adisplay.h。
+// 这一层把两边对上，并缓存界面层回报的播放器状态。
+//
+// 状态为什么缓存在核心侧：手机的 GetTransportInfo / GetPositionInfo /
+// GetMediaInfo / GetVolume 都是同步 SOAP 应答，跨语言回调要同步取值很别扭；
+// 而且手机轮询很密，缓存下来最省事。缓存由 ad_engine_report_playback() 刷新。
+// ---------------------------------------------------------------------------
+class DlnaBridge final : public dlna::IDlnaListener {
+public:
+    explicit DlnaBridge(AdEngine* engine) : engine_(engine) {}
+
+    // ---- 手机推来一个新地址 -------------------------------------------------
+    void on_set_uri(const std::string& url, const std::string& metadata) override {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            url_ = url;
+            metadata_ = metadata;
+            // 换媒体要把进度清掉，不然新视频一上来进度条还是上一首的位置。
+            position_ms_ = -1;
+            duration_ms_ = -1;
+            transport_ = AD_TRANSPORT_TRANSITIONING;
+        }
+
+        // 一次推送算一次会话。旧的先按「被新会话抢占」关掉：部分 App 会先推
+        // 一个占位地址再推真的，不关的话界面层会同时开着两个播放器。
+        const uint32_t previous = session_id_.exchange(0);
+        if (previous != 0) {
+            engine_->notify_session_closed(previous, AD_CLOSE_REPLACED);
+        }
+        const uint32_t session = next_session_id_.fetch_add(1);
+        session_id_.store(session);
+
+        engine_->notify_session_opened(session, AD_STREAM_MEDIA_URL);
+        // mime_type 留空：准确类型在 DIDL-Lite 的 protocolInfo 里，那要再解一层
+        // 转义过的 XML；平台播放器自己会嗅探容器，给空比给错更诚实。
+        engine_->notify_media_url(session, url, std::string());
+    }
+
+    // ---- 手机的控制意图：核心不执行，转给界面层的播放器 ----------------------
+    void on_play() override { send_command(AD_CMD_PLAY, 0); }
+    void on_pause() override { send_command(AD_CMD_PAUSE, 0); }
+    void on_stop() override { send_command(AD_CMD_STOP, 0); }
+    void on_seek(int64_t target_ms) override { send_command(AD_CMD_SEEK, target_ms); }
+    void on_set_volume(int volume) override { send_command(AD_CMD_SET_VOLUME, volume); }
+    void on_set_mute(bool mute) override { send_command(AD_CMD_SET_MUTE, mute ? 1 : 0); }
+
+    // ---- 手机的同步查询：直接从缓存答 ----------------------------------------
+    int64_t current_position_ms() const override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return position_ms_;
+    }
+    int64_t media_duration_ms() const override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return duration_ms_;
+    }
+    std::string current_transport_state() const override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return upnp_state_locked();
+    }
+    int current_volume() const override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return volume_;
+    }
+    bool current_mute() const override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return muted_;
+    }
+
+    // ---- 界面层回报播放器状态 ------------------------------------------------
+    AdResult report(const AdPlaybackStatus& status) {
+        const uint32_t session = session_id_.load();
+        if (session == 0 || status.session_id != session) {
+            return AD_ERR_NOT_FOUND;
+        }
+
+        std::string state_event;
+        int64_t duration_event = -1;
+        int volume_event = -1;
+        bool mute_event = false;
+        bool mute_changed = false;
+
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+
+            const int wanted = clamp_transport(status.transport_state);
+            if (wanted != transport_) {
+                transport_ = wanted;
+                state_event = upnp_state_locked();
+            }
+            if (status.position_ms >= 0) {
+                position_ms_ = status.position_ms;
+            }
+            if (status.duration_ms >= 0 && status.duration_ms != duration_ms_) {
+                duration_ms_ = status.duration_ms;
+                duration_event = duration_ms_;
+            }
+            // 用 -1 而不是 0 表示「这项没变」：0 是合法值（音量 0、未静音），
+            // 拿 0 当不变会把真实状态冲掉。
+            if (status.volume >= 0) {
+                const int clamped = status.volume > 100 ? 100 : status.volume;
+                if (clamped != volume_) {
+                    volume_ = clamped;
+                    volume_event = clamped;
+                }
+            }
+            if (status.muted >= 0) {
+                const bool value = status.muted != 0;
+                if (value != muted_) {
+                    muted_ = value;
+                    mute_event = value;
+                    mute_changed = true;
+                }
+            }
+        }
+
+        // 推送会发 HTTP 请求，绝不能在持 mutex_ 时做 —— 那会把所有
+        // Get*Info 一起拖住（它们要拿同一把锁）。
+        if (!state_event.empty() || duration_event >= 0 || volume_event >= 0 || mute_changed) {
+            engine_->publish_playback_event(state_event, duration_event, volume_event,
+                                            mute_changed, mute_event);
+        }
+        return AD_OK;
+    }
+
+    // 停服时清干净，避免下次 start 之后残留上一次的会话与状态。
+    void reset() {
+        session_id_.store(0);
+        std::lock_guard<std::mutex> lock(mutex_);
+        url_.clear();
+        metadata_.clear();
+        position_ms_ = -1;
+        duration_ms_ = -1;
+        transport_ = AD_TRANSPORT_NO_MEDIA_PRESENT;
+        volume_ = 100;
+        muted_ = false;
+    }
+
+private:
+    void send_command(int command, int64_t value) {
+        const uint32_t session = session_id_.load();
+        if (session == 0) {
+            // 还没推过媒体。手机不该显示这些按钮；真收到了也不该把一条
+            // 没有会话的命令丢给界面层。
+            AD_LOG_WARN("收到播放控制但当前没有媒体会话，已忽略（command={}）", command);
+            return;
+        }
+        engine_->notify_playback_command(session, command, value);
+    }
+
+    // 界面层给了不认识的状态值时按「停着」处理，不要把越界值透给手机 ——
+    // 手机端是按字串精确匹配的，收到没见过的值可能直接判定设备异常。
+    static int clamp_transport(int value) {
+        switch (value) {
+            case AD_TRANSPORT_NO_MEDIA_PRESENT:
+            case AD_TRANSPORT_STOPPED:
+            case AD_TRANSPORT_PLAYING:
+            case AD_TRANSPORT_PAUSED:
+            case AD_TRANSPORT_TRANSITIONING:
+                return value;
+            default:
+                return AD_TRANSPORT_STOPPED;
+        }
+    }
+
+    // 手机端会精确匹配这些字串（UPnP AVTransport 规范），值取自
+    // DlnaRenderer.h 里的 transport_state 常量，不要自己拼。
+    std::string upnp_state_locked() const {
+        switch (transport_) {
+            case AD_TRANSPORT_PLAYING:       return dlna::transport_state::kPlaying;
+            case AD_TRANSPORT_PAUSED:        return dlna::transport_state::kPaused;
+            case AD_TRANSPORT_TRANSITIONING: return dlna::transport_state::kTransitioning;
+            case AD_TRANSPORT_STOPPED:       return dlna::transport_state::kStopped;
+            default:                         return dlna::transport_state::kNoMedia;
+        }
+    }
+
+    AdEngine* engine_ = nullptr;
+
+    mutable std::mutex mutex_;
+    std::string url_;
+    std::string metadata_;
+    int64_t position_ms_ = -1;
+    int64_t duration_ms_ = -1;
+    int transport_ = AD_TRANSPORT_NO_MEDIA_PRESENT;
+    // 与 DlnaRenderer 在没有 listener 时的取值保持一致（GetVolume 默认 100）。
+    int volume_ = 100;
+    bool muted_ = false;
+
+    // 0 表示「还没有媒体会话」。命令与状态回报都按它过滤。
+    std::atomic<uint32_t> session_id_{0};
+    std::atomic<uint32_t> next_session_id_{1};
 };
 
 // ===========================================================================
@@ -591,8 +897,15 @@ AdResult AD_CALL ad_engine_start(AdEngine* engine) {
             engine->change_state(AD_STATE_ERROR);
             return AD_ERR_NETWORK;
         }
-        // 媒体管线要到批次 3 才接进来，现在没有 listener，
-        // 所以控制动作会被记录但不会有画面。
+        // 把播放意图与播放状态接给界面层（批次 3）。
+        //
+        // 核心自己不播放：DLNA 给的是一条 URL，解码与渲染交给各平台自带的
+        // 播放器（macOS AVPlayer / Windows MediaPlayerElement / 电视端
+        // ExoPlayer）。这一层只做两件事 —— 把手机的控制意图转成 C 回调
+        // 送出去，以及缓存界面层回报的状态供手机的 Get*Info 同步应答。
+        engine->dlna_bridge = std::make_unique<DlnaBridge>(engine);
+        engine->dlna_renderer->set_listener(engine->dlna_bridge.get());
+
         dlna_port = engine->dlna_renderer->port();
     }
 
@@ -670,9 +983,19 @@ void AD_CALL ad_engine_stop(AdEngine* engine) {
         engine->discovery.reset();
     }
 
-    if (engine->dlna_renderer) {
-        engine->dlna_renderer->stop();
-        engine->dlna_renderer.reset();
+    {
+        // 先摘 listener 再停渲染器：停的过程中可能还有回调在路上，
+        // 桥先没了就会踩空。renderer_mutex 同时挡住在途的 GENA 推送。
+        std::lock_guard<std::mutex> lock(engine->renderer_mutex);
+        if (engine->dlna_renderer) {
+            engine->dlna_renderer->set_listener(nullptr);
+            engine->dlna_renderer->stop();
+            engine->dlna_renderer->reset();
+        }
+    }
+    if (engine->dlna_bridge) {
+        engine->dlna_bridge->reset();
+        engine->dlna_bridge.reset();
     }
 
     engine->change_state(AD_STATE_STOPPED);
@@ -879,6 +1202,20 @@ AdResult AD_CALL ad_engine_disconnect_session(AdEngine* engine, uint32_t session
     }
     (void)session_id;
     return AD_ERR_NOT_FOUND;
+}
+
+AdResult AD_CALL ad_engine_report_playback(AdEngine* engine, const AdPlaybackStatus* status) {
+    if (engine == nullptr || status == nullptr) {
+        return AD_ERR_INVALID_ARG;
+    }
+    if (status->struct_size != sizeof(AdPlaybackStatus) ||
+        status->abi_version != AD_ABI_VERSION) {
+        return AD_ERR_INVALID_ARG;
+    }
+    if (!engine->dlna_bridge) {
+        return AD_ERR_NOT_RUNNING;
+    }
+    return engine->dlna_bridge->report(*status);
 }
 
 AdResult AD_CALL ad_engine_get_session_count(AdEngine* engine, uint32_t* out_count) {

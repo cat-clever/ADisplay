@@ -142,6 +142,33 @@ typedef enum AdStreamKind {
     AD_STREAM_MEDIA_URL    = 2   /* DLNA / AirPlay 视频推送：只给 URL，由接收端自行拉流 */
 } AdStreamKind;
 
+/*
+ * 播放状态。取值与 UPnP AVTransport 的 TransportState 一一对应 ——
+ * 手机端拿它决定显示播放还是暂停按钮，含义必须精确对上。
+ */
+typedef enum AdTransportState {
+    AD_TRANSPORT_NO_MEDIA_PRESENT = 0,  /* 还没有收到媒体 */
+    AD_TRANSPORT_STOPPED          = 1,
+    AD_TRANSPORT_PLAYING          = 2,
+    AD_TRANSPORT_PAUSED           = 3,  /* 对应 UPnP 的 PAUSED_PLAYBACK */
+    AD_TRANSPORT_TRANSITIONING    = 4   /* 正在起播 / 拖动中 */
+} AdTransportState;
+
+/*
+ * 手机发来的播放控制意图。
+ *
+ * 核心自己不播放（DLNA 给的是 URL），所以这些意图会原样转给界面层，
+ * 由界面层用平台播放器执行 —— 见 AdCallbacks.on_playback_command。
+ */
+typedef enum AdPlaybackCommand {
+    AD_CMD_PLAY       = 0,
+    AD_CMD_PAUSE      = 1,
+    AD_CMD_STOP       = 2,
+    AD_CMD_SEEK       = 3,  /* value 是目标位置（毫秒） */
+    AD_CMD_SET_VOLUME = 4,  /* value 是 0..100 */
+    AD_CMD_SET_MUTE   = 5   /* value 是 0 或 1 */
+} AdPlaybackCommand;
+
 /* ========================================================================
  * 结构体
  * ===================================================================== */
@@ -279,6 +306,13 @@ typedef struct AdCallbacks {
     void (AD_CALL *on_playback_state)(void* user_data, uint32_t session_id, int transport_state,
                                       int64_t position_ms, int64_t duration_ms, int volume);
 
+    /* 手机发来的播放控制意图：播放 / 暂停 / 停止 / 跳转 / 调音量 / 静音。
+       command 见 AdPlaybackCommand，value 的含义见该枚举的注释。
+
+       界面层拿自己的播放器执行，然后把结果用 ad_engine_report_playback()
+       回报给核心 —— 手机端的进度条和音量滑块靠那份回报更新。 */
+    void (AD_CALL *on_playback_command)(void* user_data, uint32_t session_id, int command, int64_t value);
+
     /* 日志。level 见 AdLogLevel。msg 为 UTF-8，只在回调期间有效。 */
     void (AD_CALL *on_log)(void* user_data, int level, const char* msg);
 } AdCallbacks;
@@ -383,6 +417,37 @@ AD_API AdResult AD_CALL ad_engine_respond_connect_request(AdEngine* engine,
 
 /* 主动断开某个会话。 */
 AD_API AdResult AD_CALL ad_engine_disconnect_session(AdEngine* engine, uint32_t session_id);
+
+/*
+ * 界面层播放器的当前状态。
+ *
+ * 界面层是播放状态的唯一权威来源：核心不碰播放器，手机的 GetTransportInfo /
+ * GetPositionInfo / GetMediaInfo / GetVolume 全部从这里取答案。所以界面层在
+ * 状态真的变了的时候必须回报一次，否则手机会一直看到旧值。
+ *
+ * position_ms / duration_ms 填 -1 表示「还不知道」；volume 与 muted 填 -1 表示
+ * 「这项没变」—— 用 -1 而不是 0，是因为 0 是合法值（音量 0、未静音），
+ * 拿 0 当「不变」会把真实状态冲掉。
+ */
+typedef struct AdPlaybackStatus {
+    uint32_t    struct_size;      /* = sizeof(AdPlaybackStatus) */
+    uint32_t    abi_version;      /* = AD_ABI_VERSION */
+
+    uint32_t    session_id;       /* 来自 on_media_url / on_session_opened */
+    uint32_t    reserved;
+
+    int         transport_state;  /* AdTransportState */
+    int64_t     position_ms;      /* 当前播放位置，未知填 -1 */
+    int64_t     duration_ms;      /* 总时长，未知填 -1 */
+    int         volume;           /* 0..100，-1 表示不变 */
+    int         muted;            /* 0 或 1，-1 表示不变 */
+} AdPlaybackStatus;
+
+/*
+ * 回报播放器状态。状态确实变化时核心会把对应的事件推给手机（GENA）。
+ * 未运行或 session_id 对不上时返回 AD_ERR_NOT_FOUND。
+ */
+AD_API AdResult AD_CALL ad_engine_report_playback(AdEngine* engine, const AdPlaybackStatus* status);
 
 /* 取当前会话数。多设备排队策略见文档 4.2 SessionManager。 */
 AD_API AdResult AD_CALL ad_engine_get_session_count(AdEngine* engine, uint32_t* out_count);
