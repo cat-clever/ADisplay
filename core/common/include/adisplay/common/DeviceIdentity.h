@@ -17,6 +17,13 @@ namespace adisplay::common {
 
 class Config;
 
+// 配置里存标识的键名。
+//
+// 提到头文件是为了让 AdEngine 也能用：它要判断「标识有没有落过盘」——
+// 两边各写一遍字符串字面量，改一处漏一处就会静默失效。
+inline constexpr const char* kConfigKeyDeviceId = "identity.device_id";
+inline constexpr const char* kConfigKeyUuid = "identity.uuid";
+
 class DeviceIdentity {
 public:
     // 从配置读取；缺失或格式非法则生成新的一份。

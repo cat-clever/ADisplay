@@ -417,7 +417,7 @@ AdResult AD_CALL ad_engine_create(const AdConfig* config, AdEngine** out_engine)
     // 原先只在改名时才调用 —— 用户不改名字的话，配置永远不会被写，
     // 下次启动又生成一套新标识。手机端会把它当成另一台设备要求重新配对，
     // 直接违反文档 2.4 的「标识不变」。
-    if (!engine->persisted.has(kKeyDeviceId)) {
+    if (!engine->persisted.has(common::kConfigKeyDeviceId)) {
         if (engine->persist() != AD_OK) {
             AD_LOG_WARN("设备标识落盘失败，下次启动可能会变化");
         }

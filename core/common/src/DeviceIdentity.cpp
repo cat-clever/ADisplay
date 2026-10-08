@@ -14,10 +14,6 @@ bool is_hex(char c) {
     return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
 }
 
-// 配置键名，改动会导致老用户的 deviceid 丢失，别随便改。
-constexpr const char* kKeyDeviceId = "identity.device_id";
-constexpr const char* kKeyUuid     = "identity.uuid";
-
 }  // namespace
 
 std::string generate_device_id() {
@@ -139,13 +135,13 @@ DeviceIdentity DeviceIdentity::from_bytes(const uint8_t* six_bytes, const uint8_
 DeviceIdentity DeviceIdentity::load_or_create(const Config& config) {
     DeviceIdentity identity;
 
-    identity.device_id_ = config.get_string(kKeyDeviceId, std::string());
+    identity.device_id_ = config.get_string(kConfigKeyDeviceId, std::string());
     if (!is_valid_device_id(identity.device_id_)) {
         // 配置里没有，或者被用户改坏了 —— 重新生成。
         identity.device_id_ = generate_device_id();
     }
 
-    identity.uuid_ = config.get_string(kKeyUuid, std::string());
+    identity.uuid_ = config.get_string(kConfigKeyUuid, std::string());
     if (!is_valid_uuid(identity.uuid_)) {
         identity.uuid_ = generate_uuid_v4();
     }
@@ -154,8 +150,8 @@ DeviceIdentity DeviceIdentity::load_or_create(const Config& config) {
 }
 
 void DeviceIdentity::store(Config& config) const {
-    config.set_string(kKeyDeviceId, device_id_);
-    config.set_string(kKeyUuid, uuid_);
+    config.set_string(kConfigKeyDeviceId, device_id_);
+    config.set_string(kConfigKeyUuid, uuid_);
 }
 
 }  // namespace adisplay::common
