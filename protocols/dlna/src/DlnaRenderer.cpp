@@ -395,6 +395,23 @@ struct DlnaRenderer::Impl {
 
     // ---- HTTP 处理 --------------------------------------------------------
 
+    // 请求一次自己的设备描述，确认服务真的在监听且路由能响应。
+    // 监听是异步启动的，所以重试几次。
+    bool verify_listening(uint16_t port) const {
+        for (int attempt = 0; attempt < 10; ++attempt) {
+            httplib::Client probe("127.0.0.1", port);
+            probe.set_connection_timeout(0, 300 * 1000);   // 300ms
+            probe.set_read_timeout(1, 0);
+
+            const auto response = probe.Get("/description.xml");
+            if (response && response->status == 200) {
+                return true;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        return false;
+    }
+
     void handle_description(httplib::Response& response) {
         const std::string xml = description_ns::build_device_description(config, base_url);
         response.set_content(xml, "text/xml; charset=\"utf-8\"");
@@ -623,6 +640,37 @@ bool DlnaRenderer::start(const DlnaConfig& config, std::string* out_error) {
     impl_->server_thread = std::thread([this]() {
         impl_->server.listen_after_bind();
     });
+
+    // ---- 启动自检 --------------------------------------------------------
+    //
+    // 起来之后立刻请求一次自己的设备描述，确认真能在端口上响应。
+    //
+    // 不做这一步的话，「日志说就绪、实际没在监听」这种问题只能等用户
+    // 从外部发现 —— 而这正是刚刚发生的事：SSDP 一侧全部正常、我们收到了
+    // 手机的查询也回了响应，但手机拿到 LOCATION 后拉不到描述，
+    // 设备就是不出现。中间隔了好几轮排查才定位到这里。
+    //
+    // 监听是异步的，所以带几次重试。
+    if (!impl_->verify_listening(config.http_port)) {
+        const std::string message =
+            "DLNA 启动自检失败：HTTP 服务未能在端口 " +
+            std::to_string(config.http_port) + " 上响应设备描述请求。";
+        {
+            std::lock_guard<std::mutex> lock(impl_->mutex);
+            impl_->last_error = message;
+        }
+        if (out_error != nullptr) {
+            *out_error = message;
+        }
+        AD_LOG_ERROR("{}", message);
+
+        impl_->running.store(false);
+        impl_->server.stop();
+        if (impl_->server_thread.joinable()) {
+            impl_->server_thread.join();
+        }
+        return false;
+    }
 
     AD_LOG_INFO("DLNA 设备描述已就绪：{}/description.xml", impl_->base_url);
     return true;
