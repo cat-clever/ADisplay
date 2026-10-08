@@ -7,6 +7,10 @@
 #  include <bcrypt.h>
 #elif defined(__APPLE__)
 #  include <stdlib.h>   // arc4random_buf
+#elif defined(__ANDROID__)
+#  include <errno.h>
+#  include <fcntl.h>
+#  include <unistd.h>
 #else
 #  include <errno.h>
 #  include <fcntl.h>
@@ -62,14 +66,23 @@ bool random_bytes(uint8_t* out, std::size_t count) {
     return true;
 
 #elif defined(__ANDROID__)
-    // Android 用 arc4random_buf 而不是 getrandom：后者要 API 28 才声明出来，
-    // 而我们在 android-24 上构建，是编译期就找不到符号（不是运行时 ENOSYS，
-    // 所以下面那个 ENOSYS 兜底根本走不到）。Bionic 从一开始就提供
-    // arc4random_buf，内部同样由内核的随机源支撑。
+    // Android 直接读 /dev/urandom。
     //
-    // 也可以把 minSdk 抬到 28 来迁就 getrandom，但电视盒子里 Android 8
-    // 及以下的还不少，为一个函数放弃这批设备不划算。
-    ::arc4random_buf(out, count);
+    // 试过两条更短的路都不通：getrandom() 要 API 28 才声明出来（我们在
+    // android-24 上构建，是编译期找不到符号，不是运行时 ENOSYS）；而
+    // arc4random_buf 虽然在 Bionic 里有，libc++ 的 <cstdlib> 不会把它带进
+    // 全局命名空间，同样编不过。
+    //
+    // 既然如此就用它下面的实现 —— read_dev_urandom 本来就摆在文件里，
+    // 是给「内核太老没有 getrandom」准备的兜底，这里正好复用，不必为
+    // 一个函数再去和头文件较劲。
+    //
+    // 另一条路是把 minSdk 抬到 28 换回 getrandom，但电视盒子里 Android 8
+    // 及以下的还不少，为这个放弃那批设备不划算。
+    if (!read_dev_urandom(out, count)) {
+        std::memset(out, 0, count);
+        return false;
+    }
     return true;
 
 #else
