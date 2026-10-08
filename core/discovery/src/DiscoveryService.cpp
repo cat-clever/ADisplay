@@ -10,6 +10,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <mutex>
 #include <sstream>
 #include <thread>
@@ -112,6 +113,12 @@ struct DiscoveryService::Impl {
     SsdpServer ssdp;
     std::atomic<bool> running{false};
     std::thread network_monitor;
+
+    // 用条件变量代替「睡够 3 秒再看停止标志」的轮询。
+    // 后者会让关闭操作必须等满一个轮询周期 —— 而 stop() 是从界面线程调的，
+    // 用户看到的就是「点关闭卡一下、鼠标转圈」。
+    std::condition_variable monitor_wakeup;
+    std::mutex monitor_mutex;
     std::string current_address;
     std::string last_error;
 
@@ -226,9 +233,15 @@ struct DiscoveryService::Impl {
         }
 
         while (running.load(std::memory_order_relaxed)) {
-            std::this_thread::sleep_for(std::chrono::seconds(kNetworkPollSeconds));
-            if (!running.load(std::memory_order_relaxed)) {
-                return;
+            // 等一个轮询周期，或者被 stop() 立刻唤醒。
+            {
+                std::unique_lock<std::mutex> lock(monitor_mutex);
+                const bool stopping = monitor_wakeup.wait_for(
+                    lock, std::chrono::seconds(kNetworkPollSeconds),
+                    [this]() { return !running.load(std::memory_order_relaxed); });
+                if (stopping) {
+                    return;
+                }
             }
 
             std::string address;
@@ -348,6 +361,9 @@ void DiscoveryService::stop() {
     if (!impl_->running.exchange(false)) {
         return;
     }
+
+    // 立刻唤醒监控线程，免得 join 要等满一个轮询周期。
+    impl_->monitor_wakeup.notify_all();
 
     if (impl_->network_monitor.joinable()) {
         impl_->network_monitor.join();
