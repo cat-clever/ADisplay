@@ -70,7 +70,17 @@ void Log::init(LogLevel level, const std::string& file_path) {
 
     auto logger = std::make_shared<spdlog::logger>(kLoggerName, sinks.begin(), sinks.end());
     logger->set_level(to_spdlog(level));
-    logger->flush_on(spdlog::level::warn);  // 警告以上立即落盘，崩溃时日志还在
+
+    // 每条日志都立即落盘。
+    //
+    // 原来设的是 flush_on(warn) —— 想着「正常日志攒着写，省点 IO」。
+    // 实践中的后果是：用户报「搜不到设备」时，日志文件里只有到 WARN 为止的
+    // 内容，最关键的几条 INFO（DLNA 就绪、SSDP 在哪些网卡上广播、mDNS 注册
+    // 结果）全都还在缓冲区里。那些恰恰是排查时唯一有用的信息。
+    //
+    // 这个程序的日志量很小（几秒一条），每条 flush 的开销可以忽略。
+    // 排查时能看到完整日志，比省这点 IO 重要得多。
+    logger->flush_on(spdlog::level::info);
     spdlog::register_or_replace(logger);
     spdlog::set_default_logger(logger);
 

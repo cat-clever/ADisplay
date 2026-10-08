@@ -423,6 +423,21 @@ AdResult AD_CALL ad_engine_create(const AdConfig* config, AdEngine** out_engine)
         }
     }
 
+    // ---- 把核心日志转发给界面层 ------------------------------------------
+    //
+    // 不挂这个 sink 的话，核心产生的所有日志（端口冲突、mDNS 注册结果、
+    // SSDP 在哪些网卡上广播）都到不了界面 —— AdEngine::notify_log 写了
+    // 却从来没人调用，因为 AD_LOG_* 走的是 spdlog，不会自动触发它。
+    //
+    // 后果很具体：用户报「手机搜不到设备」时，界面上只有界面自己写的那一条
+    // 「已就绪」，而真正能定位问题的信息一条都看不到。
+    //
+    // 捕获裸指针是安全的：销毁时先摘 sink 再 delete，见 ad_engine_destroy。
+    AdEngine* const raw_engine = engine.get();
+    common::Log::set_sink([raw_engine](common::LogLevel level, std::string_view message) {
+        raw_engine->notify_log(static_cast<int>(level), std::string(message));
+    });
+
     AD_LOG_INFO("ADisplay 核心已创建，版本 {}，设备名「{}」，标识 {}",
                 ADISPLAY_VERSION, engine->device_name, engine->identity.device_id());
 
@@ -438,6 +453,10 @@ void AD_CALL ad_engine_destroy(AdEngine* engine) {
     ad_engine_stop(engine);
 
     AD_LOG_INFO("ADisplay 核心已销毁");
+
+    // 必须先摘掉日志 sink 再销毁引擎：sink 里捕获的是 engine 的裸指针，
+    // 顺序反了的话，之后任何一条日志都会写到已释放的内存上。
+    common::Log::set_sink(nullptr);
 
     {
         std::lock_guard<std::mutex> lock(engine->mutex);
