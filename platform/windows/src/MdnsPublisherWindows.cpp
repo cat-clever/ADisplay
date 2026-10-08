@@ -122,9 +122,28 @@ public:
                 values_.push_back(value);
             }
 
+            // pszHostName 是必填的。原来这里留了 nullptr，注释写「由系统取本机主机名」——
+            // 那是错的：DNS-SD 拿这个字段去发主机的 A 记录，系统不会替我们补，留空就是
+            // 注册失败。取本机主机名，再按 mDNS 的惯例补上 .local。
+            wchar_t host_buffer[MAX_COMPUTERNAME_LENGTH + 1] = {};
+            DWORD host_length = MAX_COMPUTERNAME_LENGTH + 1;
+            if (::GetComputerNameExW(ComputerNameDnsHostname, host_buffer, &host_length) == FALSE) {
+                set_error(out_error, "取本机主机名失败（GetComputerNameExW 出错）");
+                return false;
+            }
+            std::wstring host_name(host_buffer, host_length);
+            if (host_name.find(L'.') == std::wstring::npos) {
+                host_name += L".local";
+            }
+            host_name_ = pool_->intern(host_name);
+            if (host_name_ == nullptr) {
+                set_error(out_error, "内存不足（主机名）");
+                return false;
+            }
+
             std::memset(&instance_, 0, sizeof(instance_));
             instance_.pszInstanceName = instance_name_;
-            instance_.pszHostName = nullptr;      // 由系统取本机主机名
+            instance_.pszHostName = host_name_;
             instance_.wPort = info.port;          // 注意是主机字节序，不是网络字节序
             instance_.wPriority = 0;
             instance_.wWeight = 0;
@@ -151,17 +170,28 @@ public:
             // 原来这里写的是一句猜测（"需要 Windows 10 1703 以上、DNS Client 服务
             // 在运行"），而实测返回的 14 在 Win32 里是 ERROR_OUTOFMEMORY，与那句话
             // 对不上 —— 猜出来的提示会把排查方向带偏。让系统自己说，是什么就是什么。
-            LPSTR buffer = nullptr;
-            const DWORD length = ::FormatMessageA(
+            // 用宽字符版本再转 UTF-8。FormatMessageA 给的是系统 ANSI 编码（中文
+            // Windows 上是 GBK），直接当 UTF-8 写进日志就是一片乱码 —— 第一版就是
+            // 这么写的，日志里看到的是一串问号方块。
+            LPWSTR wide_buffer = nullptr;
+            const DWORD wide_length = ::FormatMessageW(
                 FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM |
                     FORMAT_MESSAGE_IGNORE_INSERTS | FORMAT_MESSAGE_MAX_WIDTH_MASK,
                 nullptr, status, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-                reinterpret_cast<LPSTR>(&buffer), 0, nullptr);
+                reinterpret_cast<LPWSTR>(&wide_buffer), 0, nullptr);
 
             std::string detail;
-            if (length > 0 && buffer != nullptr) {
-                detail.assign(buffer, length);
-                ::LocalFree(buffer);
+            if (wide_length > 0 && wide_buffer != nullptr) {
+                const int bytes = ::WideCharToMultiByte(CP_UTF8, 0, wide_buffer,
+                                                        static_cast<int>(wide_length),
+                                                        nullptr, 0, nullptr, nullptr);
+                if (bytes > 0) {
+                    detail.resize(static_cast<std::size_t>(bytes));
+                    ::WideCharToMultiByte(CP_UTF8, 0, wide_buffer,
+                                          static_cast<int>(wide_length), &detail[0], bytes,
+                                          nullptr, nullptr);
+                }
+                ::LocalFree(wide_buffer);
                 while (!detail.empty() &&
                        (detail.back() == '\n' || detail.back() == '\r' || detail.back() == ' ')) {
                     detail.pop_back();
@@ -242,6 +272,7 @@ private:
     DNS_SERVICE_CANCEL cancel_handle_{};
     bool has_cancel_handle_ = false;
     wchar_t* instance_name_ = nullptr;
+    wchar_t* host_name_ = nullptr;
     std::vector<wchar_t*> keys_;
     std::vector<wchar_t*> values_;
     std::atomic<bool> published_{false};

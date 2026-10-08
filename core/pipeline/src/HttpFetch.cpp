@@ -4,7 +4,17 @@
 
 #include <cctype>
 #include <cstdlib>
+#include <cstring>
 #include <string>
+
+#if defined(_WIN32)
+#  include <winsock2.h>
+#  include <ws2tcpip.h>
+#else
+#  include <netdb.h>
+#  include <sys/socket.h>
+#  include <unistd.h>
+#endif
 
 namespace adisplay::pipeline {
 namespace {
@@ -86,6 +96,110 @@ HttpTarget parse_http_url(const std::string& url) {
 
 }  // namespace
 
+
+#if defined(_WIN32)
+using RawSocket = SOCKET;
+inline void close_raw_socket(RawSocket fd) {
+    ::closesocket(fd);
+}
+#else
+using RawSocket = int;
+inline void close_raw_socket(RawSocket fd) {
+    ::close(fd);
+}
+#endif
+
+// 失败时的原始探针。
+//
+// 「读失败」这类报错的信息量为零：连接建立了，但对端到底回了什么、什么也没回，
+// 从外面完全看不出来。这里用最朴素的 HTTP/1.0 请求（不谈压缩、不带多余头、
+// 连完即关）再探一次，把对端实际发回来的头若干字节记进日志。
+//
+// 目的不是靠它取到数据，而是把猜测换成事实 —— 与给 Windows 加启动日志同一个思路：
+// 没有可观测性时，人只能在错误的方向上来回试。
+std::string probe_raw_response(const std::string& host, int port, const std::string& path) {
+#if defined(_WIN32)
+    WSADATA wsa_data;
+    if (::WSAStartup(MAKEWORD(2, 2), &wsa_data) != 0) {
+        return "探针：WSAStartup 失败";
+    }
+#endif
+
+    struct addrinfo hints;
+    std::memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+
+    struct addrinfo* addresses = nullptr;
+    const std::string port_text = std::to_string(port);
+    if (::getaddrinfo(host.c_str(), port_text.c_str(), &hints, &addresses) != 0 ||
+        addresses == nullptr) {
+        return "探针：解析主机失败";
+    }
+
+    RawSocket fd = static_cast<RawSocket>(-1);
+    for (struct addrinfo* it = addresses; it != nullptr; it = it->ai_next) {
+        fd = ::socket(it->ai_family, it->ai_socktype, it->ai_protocol);
+        if (fd == static_cast<RawSocket>(-1)) {
+            continue;
+        }
+        if (::connect(fd, it->ai_addr, static_cast<int>(it->ai_addrlen)) == 0) {
+            break;
+        }
+        close_raw_socket(fd);
+        fd = static_cast<RawSocket>(-1);
+    }
+    ::freeaddrinfo(addresses);
+
+    if (fd == static_cast<RawSocket>(-1)) {
+        return "探针：连不上";
+    }
+
+    const std::string request = "GET " + path + " HTTP/1.0\r\nHost: " + host +
+                                "\r\nConnection: close\r\n\r\n";
+    // 往一个已被对端关掉的 socket 上写会触发 SIGPIPE，在 macOS/Linux 上那是直接
+    // 杀进程。探针是为了排查问题，绝不能把自己搞崩 —— 两个平台各有各的关法。
+#if defined(SO_NOSIGPIPE)
+    int no_sigpipe = 1;
+    (void)::setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &no_sigpipe, sizeof(no_sigpipe));
+#endif
+#if defined(MSG_NOSIGNAL)
+    const int send_flags = MSG_NOSIGNAL;
+#else
+    const int send_flags = 0;
+#endif
+    (void)::send(fd, request.data(), static_cast<int>(request.size()), send_flags);
+
+    std::string received;
+    char buffer[512];
+    for (int i = 0; i < 4; ++i) {
+        const int got = static_cast<int>(::recv(fd, buffer, sizeof(buffer), 0));
+        if (got <= 0) {
+            break;
+        }
+        received.append(buffer, static_cast<std::size_t>(got));
+        if (received.size() >= sizeof(buffer) * 4) {
+            break;
+        }
+    }
+    close_raw_socket(fd);
+
+    if (received.empty()) {
+        return "探针：连上了但对端一个字节都没回";
+    }
+
+    // 只留可见字符，避免把二进制塞进日志。
+    std::string readable;
+    for (char ch : received) {
+        const unsigned char u = static_cast<unsigned char>(ch);
+        readable.push_back((u >= 0x20 && u < 0x7f) ? ch : '.');
+        if (readable.size() >= 200) {
+            break;
+        }
+    }
+    return "探针收到 " + std::to_string(received.size()) + " 字节：" + readable;
+}
+
 FetchResult fetch_url(const std::string& url, int timeout_seconds) {
     FetchResult result;
 
@@ -119,7 +233,8 @@ FetchResult fetch_url(const std::string& url, int timeout_seconds) {
 
     const httplib::Result response = client.Get(target.path.c_str(), headers);
     if (!response) {
-        result.error = "请求失败：" + std::string(httplib::to_string(response.error()));
+        result.error = "请求失败：" + std::string(httplib::to_string(response.error())) + "；" +
+                       probe_raw_response(target.host, target.port, target.path);
         return result;
     }
 
