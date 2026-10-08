@@ -103,3 +103,7 @@ AD_TEST(dlna_subscribe_is_accepted, "GENA 订阅会被受理并返回 SID 与 TI
 
     renderer.stop();
 }
+
+int main() {
+    return adtest::run_all("DLNA HTTP 端点测试");
+}
