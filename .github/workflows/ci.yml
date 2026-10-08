@@ -15,9 +15,12 @@ on:
     branches: [main]
   workflow_dispatch:
   workflow_call:
-    # 发布那条路会传 false：发布要的是「构建并打包」，不是在发布时再跑一遍测试 ——
-    # 同一个提交在推分支时已经由 push 触发的那轮测过了，再测一次只是多等几分钟。
-    # 默认 true，所以 push 与 PR 都照常跑测试。
+    # 发布那条路会传 false：发布要的是「构建并打包」，不是在发布时再跑一遍测试。
+    # 默认 true，所以手动触发与 PR 都照常跑测试。
+    #
+    # 注意这意味着发版那次构建不跑测试 —— 推分支已经不触发构建了，所以打 tag 那次
+    # 就是该提交唯一的 CI 构建。想让它顺带验一遍，把 release.yml 里的
+    # run-tests: false 去掉即可。
     inputs:
       run-tests:
         description: 是否运行单元测试
