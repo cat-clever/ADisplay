@@ -597,11 +597,17 @@ bool DlnaRenderer::start(const DlnaConfig& config, std::string* out_error) {
 
     impl_->register_routes();
 
-    // 先 listen 探测端口能否绑定，失败时能立刻给出明确原因 ——
-    // 49152 常被别的投屏软件占着。
-    if (!impl_->server.bind_to_any_port("0.0.0.0", config.http_port)) {
+    // 先绑定再异步监听，这样端口占用能立刻发现。
+    //
+    // 这里必须用 bind_to_port（返回 bool）而不是 bind_to_any_port ——
+    // 后者返回的是 int（成功给端口号，失败给 -1），于是
+    //「if (!bind_to_any_port(...))」在失败时同样是假，绑定失败会被完全
+    // 吞掉：日志照样打「设备描述已就绪」，而 HTTP 服务根本没起来，
+    // 手机拿到 LOCATION 后拉不到描述，设备就不出现在列表里。
+    if (!impl_->server.bind_to_port("0.0.0.0", config.http_port)) {
         const std::string message =
-            "DLNA 端口 " + std::to_string(config.http_port) + " 绑定失败，可能被占用。";
+            "DLNA 端口 " + std::to_string(config.http_port) +
+            " 绑定失败，可能被占用。";
         {
             std::lock_guard<std::mutex> lock(impl_->mutex);
             impl_->last_error = message;
