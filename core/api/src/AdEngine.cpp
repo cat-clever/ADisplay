@@ -12,6 +12,7 @@
 
 #include <adisplay/common/Config.h>
 #include <adisplay/discovery/DiscoveryService.h>
+#include <adisplay/dlna/DlnaRenderer.h>
 #include <adisplay/common/DeviceIdentity.h>
 #include <adisplay/common/DeviceName.h>
 #include <adisplay/common/Log.h>
@@ -33,6 +34,7 @@ namespace {
 // 漏掉哪一个，全局那边就会报 "use of undeclared identifier"。
 namespace common = adisplay::common;
 namespace discovery = adisplay::discovery;
+namespace dlna = adisplay::dlna;
 
 constexpr uint16_t kDefaultAirplayPort = 7000;
 constexpr uint16_t kDefaultDlnaPort    = 49152;
@@ -136,6 +138,9 @@ struct AdEngine {
     // 用 unique_ptr 是因为 DiscoveryService 不可拷贝且构造较重，
     // 而 AdEngine 会用 new 直接分配。
     std::unique_ptr<discovery::DiscoveryService> discovery;
+
+    // DLNA 渲染器：提供设备描述与 SOAP 控制端点（文档 3.2）。
+    std::unique_ptr<dlna::DlnaRenderer> dlna_renderer;
 
     // 取出用户数据与回调的快照，供锁外调用。
     void notify_state_changed(int new_state) {
@@ -515,6 +520,50 @@ AdResult AD_CALL ad_engine_start(AdEngine* engine) {
         engine->castpc_port  = castpc_port;
     }
 
+    // ---- 启动 DLNA 的 HTTP 服务 ------------------------------------------
+    // 顺序很重要：SSDP 通告里的 LOCATION 指向 /description.xml，那个地址
+    // 必须与这里实际监听的端口完全一致。手机拿到 LOCATION 后会立刻去拉，
+    // 拉不到就直接把设备从列表里去掉 —— 表现是「设备出现后立刻消失」。
+    // 所以先起 HTTP 服务确定端口，再用同一个端口值去做 SSDP 通告。
+    if (engine->enable_dlna) {
+        uint16_t dlna_port_in_use = common::find_available_tcp_port(
+            engine->dlna_port, kPortProbeAttempts);
+        if (dlna_port_in_use == 0) {
+            const std::string message =
+                "DLNA 找不到可用端口（从 " + std::to_string(engine->dlna_port) + " 起）";
+            engine->set_last_error(message);
+            AD_LOG_ERROR("{}", message);
+            engine->change_state(AD_STATE_ERROR);
+            return AD_ERR_PORT_IN_USE;
+        }
+        if (dlna_port_in_use != engine->dlna_port) {
+            AD_LOG_WARN("DLNA 端口 {} 被占用，改用 {}",
+                        engine->dlna_port, dlna_port_in_use);
+        }
+        dlna_port = dlna_port_in_use;
+
+        dlna::DlnaConfig dlna_config;
+        dlna_config.device_name = engine->device_name;
+        dlna_config.uuid = engine->identity.uuid();
+        dlna_config.http_port = dlna_port;
+        dlna_config.server_header = std::string("UPnP/1.0 ADisplay/") + ADISPLAY_VERSION;
+
+        engine->dlna_renderer = std::make_unique<dlna::DlnaRenderer>();
+
+        std::string dlna_error;
+        if (!engine->dlna_renderer->start(dlna_config, &dlna_error)) {
+            const std::string message = "DLNA 启动失败：" + dlna_error;
+            engine->set_last_error(message);
+            AD_LOG_ERROR("{}", message);
+            engine->dlna_renderer.reset();
+            engine->change_state(AD_STATE_ERROR);
+            return AD_ERR_NETWORK;
+        }
+        // 媒体管线要到批次 3 才接进来，现在没有 listener，
+        // 所以控制动作会被记录但不会有画面。
+        dlna_port = engine->dlna_renderer->port();
+    }
+
     // ---- 启动服务发现 ----------------------------------------------------
     // 端口都确认可用了，开始广播。手机在投屏列表里能不能看到我们，
     // 完全取决于这一步有没有成功。
@@ -581,8 +630,14 @@ void AD_CALL ad_engine_stop(AdEngine* engine) {
     if (engine->discovery) {
         // stop 里会发出 mDNS 的 goodbye 与 SSDP 的 byebye，
         // 手机端列表里会立刻看到设备消失，而不是等超时。
+        // 顺序上先停广播再停 HTTP：反过来手机可能还在拿着 LOCATION 来拉描述。
         engine->discovery->stop();
         engine->discovery.reset();
+    }
+
+    if (engine->dlna_renderer) {
+        engine->dlna_renderer->stop();
+        engine->dlna_renderer.reset();
     }
 
     engine->change_state(AD_STATE_STOPPED);
@@ -714,6 +769,15 @@ AdResult AD_CALL ad_engine_set_device_name(AdEngine* engine, const char* utf8_na
             // 下次启停服务时会用新名字重新注册。
             AD_LOG_WARN("广播改名失败：{}", discovery_error);
         }
+    }
+
+    if (engine->dlna_renderer) {
+        std::string dlna_error;
+        if (!engine->dlna_renderer->set_device_name(validation.normalized, &dlna_error)) {
+            AD_LOG_WARN("DLNA 改名失败：{}", dlna_error);
+        }
+        // 设备描述是每次请求现生成的，不需要重启 HTTP 服务 ——
+        // 手机下次来拉 description.xml 就是新名字。
     }
 
     return engine->persist();
