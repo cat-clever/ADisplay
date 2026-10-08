@@ -295,7 +295,13 @@ jobs:
 
   # =========================================================================
   # macOS Universal：文档 2.5 要求一个包同时覆盖 Apple Silicon 与 Intel。
-  # 依赖走自定义三元组 arm64-osx-universal，让每个库都编成通用二进制。
+  #
+  # 不靠「一次编出胖库」的自定义三元组：FFmpeg 的 configure 只认单个 --arch，
+  # 一次配置编不出通用二进制。改成用 arm64-osx-static / x64-osx-static 两个静态
+  # 三元组各编一遍，最后把两份 libcastcore.dylib 用 lipo 合成一份。
+  #
+  # 静态链接是这套做法的前提：动态链接下 FFmpeg 会散成一组 .dylib，那就得逐个
+  # lipo 再逐个改 install_name，漏掉任何一个都是启动即崩的包。
   # =========================================================================
   macos-universal:
     name: macOS Universal
@@ -310,32 +316,55 @@ jobs:
           fi
           ninja --version
 
+      # 两个架构共用这一次缓存调用：vcpkg 的二进制缓存是把整个目录一起恢复、
+      # 一起保存的（两个三元组的 VCPKG_BINARY_SOURCES 指向同一个 vcpkg-cache），
+      # x64 的产物也在同一个条目里，再调一次只会多出一份内容重复的缓存。
+      # 这里传的三元组只用来区分缓存键，真正用哪个三元组由 CMakePresets 指定。
       - uses: ./.github/actions/setup-vcpkg
         with:
-          triplet: arm64-osx-universal
+          triplet: arm64-osx-static
           host-triplet: arm64-osx
           overlay-triplets: ${{ github.workspace }}/triplets
 
-      - name: 配置核心库
-        run: cmake --preset macos-universal
+      - name: 配置核心库（arm64）
+        run: cmake --preset macos-arm64
 
-      - name: 构建核心库
-        run: cmake --build --preset macos-universal
+      - name: 构建核心库（arm64）
+        run: cmake --build --preset macos-arm64
 
+      - name: 配置核心库（x86_64）
+        run: cmake --preset macos-x64
+
+      - name: 构建核心库（x86_64）
+        run: cmake --build --preset macos-x64
+
+      - name: 合并成通用二进制
+        run: |
+          set -euo pipefail
+          # 静态链接下只需要合这一个文件 —— 依赖都已经进到 libcastcore.dylib 里了。
+          # 落在 build/universal 而不是某个预设的构建目录，免得被之后的 configure 覆盖。
+          mkdir -p build/universal/lib
+          lipo -create \
+            build/macos-arm64/lib/libcastcore.dylib \
+            build/macos-x64/lib/libcastcore.dylib \
+            -output build/universal/lib/libcastcore.dylib
+
+      # 只跑 arm64 这一份：runner 本身是 Apple Silicon，x86_64 的可执行文件要靠
+      # Rosetta 才跑得起来，而 Rosetta 不在 runner 镜像的保障范围内。
       - name: 单元测试
-        run: ctest --preset macos-universal
+        run: ctest --preset macos-arm64
 
       - name: 确认核心库确实是通用二进制
         run: |
-          lipo -info build/macos-universal/lib/libcastcore.dylib
-          lipo -info build/macos-universal/lib/libcastcore.dylib | grep -q "arm64" || exit 1
-          lipo -info build/macos-universal/lib/libcastcore.dylib | grep -q "x86_64" || exit 1
+          lipo -info build/universal/lib/libcastcore.dylib
+          lipo -info build/universal/lib/libcastcore.dylib | grep -q "arm64" || exit 1
+          lipo -info build/universal/lib/libcastcore.dylib | grep -q "x86_64" || exit 1
 
       - name: 构建 SwiftUI 界面
         run: |
           set -euo pipefail
           # 让链接器能找到刚编出来的通用版核心库。
-          export LIBRARY_PATH="${PWD}/build/macos-universal/lib:${LIBRARY_PATH:-}"
+          export LIBRARY_PATH="${PWD}/build/universal/lib:${LIBRARY_PATH:-}"
           cd app-macos
           swift build -c release --arch arm64 --arch x86_64
 
@@ -356,7 +385,7 @@ jobs:
 
           ./app-macos/build-app.sh \
             "${EXECUTABLE}" \
-            "${PWD}/build/macos-universal/lib/libcastcore.dylib" \
+            "${PWD}/build/universal/lib/libcastcore.dylib" \
             "${PWD}/dist"
 
           # 验证包内每个 Mach-O 都是通用二进制，避免发出只能跑一半机器的包。
