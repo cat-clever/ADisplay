@@ -24,6 +24,9 @@ private struct PlayerSurface: NSViewRepresentable {
         view.player = player
         view.controlsStyle = .floating
         view.allowsPictureInPicturePlayback = true
+        // 全屏按钮默认是关的，得显式打开 —— 投屏过来本来就是想在大屏上看，
+        // 没有这个按钮等于每次都要手动拖窗口。
+        view.showsFullScreenToggleButton = true
         return view
     }
 
