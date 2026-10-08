@@ -8,12 +8,22 @@
   "dependencies": [
     {
       "name": "spdlog",
-      "features": ["fmt"]
+      "features": [
+        "fmt"
+      ]
     },
     "fmt",
     "nlohmann-json",
     "tinyxml2",
-    "cpp-httplib"
+    "cpp-httplib",
+    {
+      "name": "ffmpeg",
+      "default-features": false,
+      "features": [
+        "avcodec",
+        "avformat"
+      ]
+    }
   ],
   "builtin-baseline": "2750401336fb7c95f6619657a46a7e798661341c"
 }
