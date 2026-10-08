@@ -136,8 +136,25 @@ int probe_port(uint16_t port, int socket_type, int protocol) {
     address.sin_addr.s_addr = htonl(INADDR_ANY);
     address.sin_port = htons(port);
 
-    // 刻意不设 SO_REUSEADDR：设了以后在 Linux/macOS 上会让「已处于 TIME_WAIT」
-    // 的端口也绑定成功，掩盖真实的占用情况。这里要的是最严格的判定。
+    // 设 SO_REUSEADDR 再探测。
+    //
+    // 不设的话，刚关闭的服务留下的 TIME_WAIT 端口会被判成「被占用」——
+    // 而这个判定会让上层不断往上找新端口，表现为「每次启动 DLNA 端口都
+    // 不一样」（49152 → 49153 → 49155…），既没法给防火墙固定放行规则，
+    // 也会让用户以为端口没释放。
+    //
+    // 设了之后语义依然准确：真正有进程在 LISTEN 的端口，REUSEADDR 也绑不上。
+    // 它只是放行了 TIME_WAIT 这类「已经关闭、内核还在收尾」的情况。
+    {
+        const int reuse = 1;
+#if defined(_WIN32)
+        ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR,
+                     reinterpret_cast<const char*>(&reuse), sizeof(reuse));
+#else
+        ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+#endif
+    }
+
     const int bind_result =
         ::bind(fd, reinterpret_cast<const sockaddr*>(&address), sizeof(address));
 
