@@ -536,12 +536,25 @@ struct DlnaRenderer::Impl {
         });
 
         // 订阅与续订都走 SUBSCRIBE，取消走 UNSUBSCRIBE。
-        server.Subscribe("/event", [this](const httplib::Request& request, httplib::Response& response) {
-            handle_subscribe(request, response);
-        });
-        server.Unsubscribe("/event", [this](const httplib::Request& request, httplib::Response& response) {
-            handle_unsubscribe(request, response);
-        });
+        //
+        // cpp-httplib 只支持标准 HTTP 方法，SUBSCRIBE / UNSUBSCRIBE 属于
+        // WebDAV/UPnP 的扩展方法，没有对应的注册接口。所以用 pre-routing
+        // 处理器在路由之前拦截 —— 返回 Handled 表示已处理，库不会再往下走。
+        server.set_pre_routing_handler(
+            [this](const httplib::Request& request, httplib::Response& response) {
+                if (request.path != "/event") {
+                    return httplib::Server::HandlerResponse::Unhandled;
+                }
+                if (request.method == "SUBSCRIBE") {
+                    handle_subscribe(request, response);
+                    return httplib::Server::HandlerResponse::Handled;
+                }
+                if (request.method == "UNSUBSCRIBE") {
+                    handle_unsubscribe(request, response);
+                    return httplib::Server::HandlerResponse::Handled;
+                }
+                return httplib::Server::HandlerResponse::Unhandled;
+            });
 
         // 手机有时会先 GET 一下事件地址探测可用性。
         server.Get("/event", [](const httplib::Request&, httplib::Response& response) {

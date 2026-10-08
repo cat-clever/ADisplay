@@ -9,6 +9,8 @@ set(ADISPLAY_TEST_SOURCES
     test_device_name.cpp
     test_device_identity.cpp
     test_ssdp_message.cpp
+    test_dlna_description.cpp
+    test_dlna_soap.cpp
 )
 
 foreach(test_source IN LISTS ADISPLAY_TEST_SOURCES)
@@ -23,6 +25,13 @@ foreach(test_source IN LISTS ADISPLAY_TEST_SOURCES)
         target_link_libraries(${test_name} PRIVATE adisplay_discovery)
         target_include_directories(${test_name} PRIVATE
             "${CMAKE_SOURCE_DIR}/core/discovery/src")
+    endif()
+
+    # DLNA 的两组测试同样要触达 protocols/dlna/src 下的内部头。
+    if(test_name MATCHES "^test_dlna_")
+        target_link_libraries(${test_name} PRIVATE adisplay_dlna)
+        target_include_directories(${test_name} PRIVATE
+            "${CMAKE_SOURCE_DIR}/protocols/dlna/src")
     endif()
     target_include_directories(${test_name} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
     target_link_libraries(${test_name} PRIVATE adisplay_warnings)
