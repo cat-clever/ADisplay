@@ -19,8 +19,21 @@ on:
   workflow_dispatch:
   workflow_call:
 
+# 并发策略：不同提交的运行各跑各的，不互相取消、也不排队。
+#
+# 原来 group 用的是「workflow + 分支」，于是同一个分支上来了新推送就会把
+# 上一轮取消掉（cancel-in-progress），或者退一步变成排队等待 —— 两种都不是
+# 我们想要的：推送很密的时候，某一次运行的验证结果会被后一次顶掉，
+# 而那一版恰恰是需要看的。
+#
+# 改成按提交（sha）分组之后：不同提交落在不同组，立刻并行跑；只有同一个
+# 提交被重复触发（重跑、手动触发）才会去重，那次取消是无害的。
+#
+# 注意 GitHub 账号本身有并发 job 上限（公开仓库免费额度是 20 个）。我们一轮
+# 矩阵 7 个任务，所以同时跑两轮没问题，三轮开始会撞上限 —— 那一层的排队是
+# 账号级的，改 workflow 绕不过去。
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.sha }}
   cancel-in-progress: true
 
 env:
