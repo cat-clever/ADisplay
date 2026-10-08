@@ -11,3 +11,5 @@
 add_subdirectory(common)
 add_subdirectory(discovery)
 add_subdirectory(api)
+
+add_subdirectory(pipeline)

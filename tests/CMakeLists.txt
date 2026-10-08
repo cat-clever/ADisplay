@@ -13,6 +13,7 @@ set(ADISPLAY_TEST_SOURCES
     test_dlna_soap.cpp
     test_dlna_http.cpp
     test_dlna_media_url.cpp
+    test_pipeline_media_source.cpp
 )
 
 foreach(test_source IN LISTS ADISPLAY_TEST_SOURCES)
@@ -41,6 +42,11 @@ foreach(test_source IN LISTS ADISPLAY_TEST_SOURCES)
     # adisplay_dlna 是 PRIVATE 链接它，头文件传不出来。
     if(test_name STREQUAL "test_dlna_http")
         target_link_libraries(${test_name} PRIVATE httplib::httplib)
+    endif()
+
+    # 媒体管线目前只有纯逻辑，不依赖 FFmpeg，直接链静态库即可。
+    if(test_name MATCHES "^test_pipeline_")
+        target_link_libraries(${test_name} PRIVATE adisplay_pipeline)
     endif()
     target_include_directories(${test_name} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
     target_link_libraries(${test_name} PRIVATE adisplay_warnings)
