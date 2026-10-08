@@ -4,7 +4,6 @@ import android.os.Build
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -25,7 +24,6 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import androidx.tv.material3.Button
 import androidx.tv.material3.Surface
 import androidx.tv.material3.Text
 
@@ -86,17 +84,13 @@ fun StandbyScreen() {
             // 按钮紧跟状态文字、排在说明之前 —— 矮屏上它必须在首屏可见区内。
             Spacer(modifier = Modifier.height(layout.spacingMedium))
 
-            Button(
+            ActionButton(
+                text = if (serviceEnabled) "关闭接收服务" else "开启接收服务",
+                textStyle = layout.actionStyle,
+                minWidth = layout.buttonMinWidth,
+                focusRequester = buttonFocus,
                 onClick = { serviceEnabled = !serviceEnabled },
-                modifier = Modifier
-                    .defaultMinSize(minWidth = layout.buttonMinWidth)
-                    .focusRequester(buttonFocus)
-            ) {
-                Text(
-                    text = if (serviceEnabled) "关闭接收服务" else "开启接收服务",
-                    style = layout.actionStyle
-                )
-            }
+            )
 
             Spacer(modifier = Modifier.height(layout.spacingLoose))
 
