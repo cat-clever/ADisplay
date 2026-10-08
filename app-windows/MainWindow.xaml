@@ -23,6 +23,7 @@
             <Grid.RowDefinitions>
                 <RowDefinition Height="*" />
                 <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
             </Grid.RowDefinitions>
 
             <!-- 背后的 Media Foundation 负责拉流、硬解与音画同步，
@@ -39,7 +40,36 @@
                 <Button x:Name="StopCastingButton"
                         Content="停止接收"
                         Click="OnStopCastingClick" />
+                <ToggleButton x:Name="CastingLogToggle"
+                              Content="显示日志"
+                              Checked="OnCastingLogToggled"
+                              Unchecked="OnCastingLogToggled" />
             </StackPanel>
+
+            <!--
+                投屏页也要能看日志。投屏一失败，设置页连同它的日志区会被整个
+                盖住 —— 而那正是最需要看日志的时候。默认收起，不挡画面。
+            -->
+            <Border x:Name="CastingLogPanel"
+                    Grid.Row="2"
+                    Height="160"
+                    Visibility="Collapsed"
+                    Background="{ThemeResource LayerFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1">
+                <ScrollViewer x:Name="CastingLogScrollViewer" VerticalScrollBarVisibility="Auto">
+                    <ItemsControl x:Name="CastingLogList">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <TextBlock Text="{Binding}"
+                                           FontFamily="Consolas"
+                                           FontSize="12"
+                                           TextWrapping="Wrap" />
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </ScrollViewer>
+            </Border>
         </Grid>
 
         <Grid x:Name="SettingsPanel" Padding="28" RowSpacing="20" MinWidth="480" MinHeight="480">

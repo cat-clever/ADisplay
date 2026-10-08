@@ -42,6 +42,8 @@ public sealed partial class MainWindow : Window
 
         _dispatcher = DispatcherQueue.GetForCurrentThread();
         LogList.ItemsSource = _logLines;
+        // 投屏页的日志区跟设置页共用同一个集合，两边同步。
+        CastingLogList.ItemsSource = _logLines;
 
         _engine.StateChanged += OnEngineStateChanged;
         _engine.LogEmitted += OnEngineLogEmitted;
@@ -397,7 +399,18 @@ public sealed partial class MainWindow : Window
         _dispatcher.TryEnqueue(() =>
         {
             LogScrollViewer.ChangeView(null, LogScrollViewer.ScrollableHeight, null);
+            if (CastingLogPanel.Visibility == Visibility.Visible)
+            {
+                CastingLogScrollViewer.ChangeView(null, CastingLogScrollViewer.ScrollableHeight, null);
+            }
         });
+    }
+
+    private void OnCastingLogToggled(object sender, RoutedEventArgs e)
+    {
+        CastingLogPanel.Visibility = CastingLogToggle.IsChecked == true
+            ? Visibility.Visible
+            : Visibility.Collapsed;
     }
 
     // 日志区每行是独立的 TextBlock，只能一行行选。这个按钮把全部日志
