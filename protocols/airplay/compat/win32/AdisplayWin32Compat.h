@@ -21,6 +21,20 @@
 #  include <BaseTsd.h>
 #  include <time.h>
 
+// UxPlay 的 compat.h 里有这么一段：
+//     #ifndef snprintf
+//     #define snprintf _snprintf
+//     #endif
+// 那是老 MSVC 还没有符合 C99 的 snprintf 的年代留下的。现代 UCRT 自带标准
+// snprintf，再定义这个别名会和标准头里的声明直接冲突（C1189），整个编译单元
+// 编译不过。
+//
+// 先占住这个名字，让它那边的 #ifndef 不成立即可。自引用宏不会递归展开，
+// 所以后面 <stdio.h> 里的声明照常有效。
+#  ifndef snprintf
+#    define snprintf snprintf
+#  endif
+
 // UxPlay 用 ssize_t 接 recv 系列的返回值。MSVC 的对应类型叫 SSIZE_T。
 #  ifndef _ADISPLAY_SSIZE_T_DEFINED
 #    define _ADISPLAY_SSIZE_T_DEFINED

@@ -144,3 +144,7 @@ AD_TEST(raop_txt_wire_round_trips, "整条 RAOP 记录能从线上格式原样�
     AD_CHECK_EQ(parsed.at("pk"), std::string("abcd"));
     AD_CHECK_EQ(parsed.at("am"), std::string("AppleTV3,2"));
 }
+
+int main() {
+    return adtest::run_all("AirPlay 广播内容测试");
+}

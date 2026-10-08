@@ -64,8 +64,14 @@ bool send_all(RawSocket fd, const std::string& data) {
 #else
         const int flags = 0;
 #endif
+        const std::size_t remaining = data.size() - sent;
+        const std::size_t chunk = remaining > 65536 ? 65536 : remaining;
+#if defined(_WIN32)
         const int written = static_cast<int>(
-            ::send(fd, data.data() + sent, static_cast<int>(data.size() - sent), flags));
+            ::send(fd, data.data() + sent, static_cast<int>(chunk), flags));
+#else
+        const int written = static_cast<int>(::send(fd, data.data() + sent, chunk, flags));
+#endif
         if (written <= 0) {
             return false;
         }
@@ -96,7 +102,8 @@ public:
         struct sockaddr_in address;
         std::memset(&address, 0, sizeof(address));
         address.sin_family = AF_INET;
-        address.sin_addr.s_addr = ::htonl(INADDR_LOOPBACK);
+        // 不加 :: —— Darwin 上 htonl 是宏，限定符会被一起展开成语法垃圾。
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
         address.sin_port = 0;   // 让系统挑一个空闲端口
         if (::bind(listen_fd_, reinterpret_cast<struct sockaddr*>(&address), sizeof(address)) != 0) {
             close_socket(listen_fd_);
@@ -117,7 +124,7 @@ public:
 #endif
         std::memset(&bound, 0, sizeof(bound));
         if (::getsockname(listen_fd_, reinterpret_cast<struct sockaddr*>(&bound), &bound_len) == 0) {
-            port_ = ::ntohs(bound.sin_port);
+            port_ = ntohs(bound.sin_port);
         }
 
         thread_ = std::thread([this]() { serve(); });
@@ -362,4 +369,8 @@ AD_TEST(http_fetch_rejects_bad_url, "地址不合法：不发起请求，直接�
     const FetchResult relative_result = fetch_url("/a.m3u8", 5);
     AD_CHECK(!relative_result.ok);
     AD_CHECK(!relative_result.error.empty());
+}
+
+int main() {
+    return adtest::run_all("远端拉取测试");
 }
