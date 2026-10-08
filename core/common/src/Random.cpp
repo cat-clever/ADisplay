@@ -61,6 +61,17 @@ bool random_bytes(uint8_t* out, std::size_t count) {
     ::arc4random_buf(out, count);
     return true;
 
+#elif defined(__ANDROID__)
+    // Android 用 arc4random_buf 而不是 getrandom：后者要 API 28 才声明出来，
+    // 而我们在 android-24 上构建，是编译期就找不到符号（不是运行时 ENOSYS，
+    // 所以下面那个 ENOSYS 兜底根本走不到）。Bionic 从一开始就提供
+    // arc4random_buf，内部同样由内核的随机源支撑。
+    //
+    // 也可以把 minSdk 抬到 28 来迁就 getrandom，但电视盒子里 Android 8
+    // 及以下的还不少，为一个函数放弃这批设备不划算。
+    ::arc4random_buf(out, count);
+    return true;
+
 #else
     std::size_t done = 0;
     while (done < count) {
