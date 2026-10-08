@@ -13,6 +13,9 @@ target_include_directories(castcore
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../../include>
         $<INSTALL_INTERFACE:include>
+    PRIVATE
+        # configure_file 生成的 adisplay/version.h 落在这里。
+        ${CMAKE_BINARY_DIR}/generated/include
 )
 
 target_link_libraries(castcore

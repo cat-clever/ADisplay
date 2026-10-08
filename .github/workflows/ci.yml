@@ -262,9 +262,33 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - uses: android-actions/setup-android@v3
+      # 不引 android-actions/setup-android：ubuntu-22.04 的 runner 镜像已经
+      # 预装了整套 Android SDK（platforms;android-34、build-tools 34.0.0、
+      # NDK 27.3），那个 action 反而多一个失败点。这里只做一次存在性断言，
+      # 缺组件时能一眼看出是镜像变了，而不是让 Gradle 报一堆看不懂的错。
+      - name: 校验 Android SDK
+        run: |
+          set -euo pipefail
+          echo "ANDROID_HOME=${ANDROID_HOME:-（未设置）}"
+          echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT:-（未设置）}"
 
+          SDK_DIR="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          if [ -z "${SDK_DIR}" ] || [ ! -d "${SDK_DIR}" ]; then
+            echo "runner 上没有 Android SDK" >&2
+            exit 1
+          fi
+
+          test -d "${SDK_DIR}/platforms/android-34" \
+            || { echo "缺少 platforms;android-34" >&2; exit 1; }
+
+          echo "build-tools："
+          ls "${SDK_DIR}/build-tools" || true
+
+      # setup-gradle 只做缓存，Gradle 本体要显式指定版本装。
+      # AGP 8.5 要求 Gradle 8.7 以上。
       - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
 
       - name: 构建 APK
         working-directory: app-tv

@@ -8,6 +8,7 @@
 // 批次 0 阶段协议服务尚未接入，start() 只做端口占用探测与状态流转 ——
 // 端口探测本身是文档 4.5 明确要求的功能（macOS 自带 AirPlay 接收器占 7000）。
 #include <adisplay/adisplay.h>
+#include <adisplay/version.h>   // 由 CMake 生成
 
 #include <adisplay/common/Config.h>
 #include <adisplay/common/DeviceIdentity.h>
@@ -23,10 +24,6 @@
 #include <new>
 #include <string>
 #include <vector>
-
-#ifndef ADISPLAY_VERSION
-#  define ADISPLAY_VERSION "0.0.0-dev"
-#endif
 
 namespace {
 

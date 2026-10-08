@@ -35,8 +35,19 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(AdDisplayOptions)
 include(AdDisplayWarnings)
 
-# 版本号注入到核心库，由 ad_version_string() 返回。
-add_compile_definitions(ADISPLAY_VERSION="${PROJECT_VERSION}")
+# ---------------------------------------------------------------------------
+# 版本头
+#
+# 刻意不用 add_compile_definitions(ADISPLAY_VERSION="${PROJECT_VERSION}")：
+# CMake 语言里的双引号是引用语法，不是值的一部分，那样传下去的是
+# ADISPLAY_VERSION=0.1.0，宏在 C++ 里展开成 0.1.0 —— 非法记号，编译不过。
+# 生成一个头文件没有这层歧义，也顺便让版本号能被界面层直接 include。
+# ---------------------------------------------------------------------------
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/adisplay_version.h.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/generated/include/adisplay/version.h"
+    @ONLY
+)
 
 # ---------------------------------------------------------------------------
 # 依赖

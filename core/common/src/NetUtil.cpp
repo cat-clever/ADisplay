@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstring>
+#include <cwchar>   // wcslen，把适配器描述从宽字符转 UTF-8 时要用
 #include <mutex>
 #include <vector>
 

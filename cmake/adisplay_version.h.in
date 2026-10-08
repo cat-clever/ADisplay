@@ -1,0 +1,15 @@
+// ADisplay 版本信息
+//
+// 这个文件由 CMake 根据 CMakeLists.txt 里 project(... VERSION ...) 生成，
+// 不要手工修改 —— 改了会在下次配置时被覆盖。
+//
+// 为什么不用 -D 传版本号：CMake 语言里的双引号是「引用语法」，不是值的一部分，
+// 所以 add_compile_definitions(FOO="${X}") 实际传下去的是 FOO=0.1.0，
+// 宏在 C++ 里会展开成 0.1.0 这种非法记号。要正确传递字符串常量得写三层转义，
+// 极易出错。生成头文件没有这层歧义。
+#pragma once
+
+#define ADISPLAY_VERSION       "@PROJECT_VERSION@"
+#define ADISPLAY_VERSION_MAJOR @PROJECT_VERSION_MAJOR@
+#define ADISPLAY_VERSION_MINOR @PROJECT_VERSION_MINOR@
+#define ADISPLAY_VERSION_PATCH @PROJECT_VERSION_PATCH@

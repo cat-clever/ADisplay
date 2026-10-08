@@ -87,7 +87,8 @@
         "rhs": "Windows"
       },
       "cacheVariables": {
-        "VCPKG_TARGET_TRIPLET": "arm64-windows"
+        "VCPKG_TARGET_TRIPLET": "arm64-windows",
+        "VCPKG_HOST_TRIPLET": "x64-windows"
       }
     },
 
