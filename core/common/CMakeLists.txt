@@ -27,6 +27,11 @@ target_link_libraries(adisplay_common
 if(WIN32)
     # BCryptGenRandom（随机数）、GetAdaptersAddresses（网卡枚举）
     target_link_libraries(adisplay_common PUBLIC bcrypt iphlpapi ws2_32)
+
+    # MSVC 会把 getenv / strncpy 这类 C 函数标成「不安全」并刷一屏 C4996。
+    # 这些用法在本项目里都是有界的（读环境变量、已知长度的拷贝），
+    # 关掉这个告警，免得把真正的警告淹掉。
+    target_compile_definitions(adisplay_common PRIVATE _CRT_SECURE_NO_WARNINGS)
 elseif(APPLE)
     # arc4random_buf 在 libSystem 里，无需额外链接
 elseif(UNIX)

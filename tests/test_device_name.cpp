@@ -32,7 +32,7 @@ AD_TEST(exactly_32_chars_valid, "恰好32个字符合规") {
     AD_CHECK_EQ(result.normalized, name);
 }
 
-AD_TEST(33_chars_invalid, "33个字符不合规") {
+AD_TEST(chars_33_invalid, "33个字符不合规") {
     const std::string name(33, 'x');
     const DeviceNameValidation result = validate_device_name(name);
     AD_CHECK(!result.valid);

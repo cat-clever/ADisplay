@@ -124,9 +124,13 @@ jobs:
         with:
           triplet: arm64-windows
 
+      # amd64_arm64 = x64 宿主 + ARM64 目标。
+      # 不能写 arm64：那会让 vcvarsall 配出「ARM64 宿主原生」环境，
+      # PATH 里会出现 ARM64 架构的 clang++.exe，而 runner 是 x64，
+      # 执行不了它，CMake 的编译器探测会直接判定编译器损坏。
       - uses: ilammy/msvc-dev-cmd@v1
         with:
-          arch: arm64
+          arch: amd64_arm64
 
       - name: 确认 Ninja 可用
         shell: pwsh

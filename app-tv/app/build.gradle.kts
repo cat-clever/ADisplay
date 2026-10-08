@@ -43,6 +43,14 @@ android {
         compose = true
     }
 
+    // Compose Compiler 的版本必须与 Kotlin 版本严格配对，否则编译期直接报
+    // 「This version (x) of the Compose Compiler requires Kotlin version y」。
+    // 1.5.14 对应 Kotlin 1.9.24（见 top-level build.gradle.kts 里的 kotlin 版本）。
+    // 将来升 Kotlin 到 2.x 时，这一项要换成 org.jetbrains.kotlin.plugin.compose 插件。
+    composeOptions {
+        kotlinCompilerExtensionVersion = "1.5.14"
+    }
+
     // 批次 0 尚未接入 C++ 核心（JNI 随批次 5），先不开 externalNativeBuild。
     // 接入时需要：
     //   externalNativeBuild { cmake { path = file("src/main/cpp/CMakeLists.txt") } }
