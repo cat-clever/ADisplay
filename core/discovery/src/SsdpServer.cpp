@@ -7,6 +7,7 @@
 #include "SsdpMessage.h"
 
 #include <adisplay/common/Log.h>
+#include <adisplay/common/NetUtil.h>
 #include <adisplay/common/Random.h>
 
 #include <algorithm>
@@ -117,6 +118,13 @@ struct SsdpServer::Impl {
     std::atomic<uint64_t> responded_count{0};
     std::chrono::steady_clock::time_point last_announce;
 
+    // 实际使用的网卡与地址，启动时确定，日志里会打出来便于排障。
+    std::string interface_name;
+    std::string interface_address;
+    // choose_interface 返回的指针指向这里，所以要保活。
+    std::vector<common::NetworkAddress> cached_interfaces;
+    std::string preferred_address;
+
     // ---- 组播相关的 socket 设置 -------------------------------------------
 
     bool open_socket(std::string* out_error) {
@@ -153,32 +161,127 @@ struct SsdpServer::Impl {
             return false;
         }
 
+        // 选定要用的网卡。
+        //
+        // 之前这里用 INADDR_ANY 让内核自选，多网卡机器上（VMware、WSL、
+        // VPN 都会建虚拟网卡）可能挑到虚拟网卡，广播就发到别的网段去了 ——
+        // 文档 6.3 专门提到过这个。现在显式挑一块适合广播的网卡。
+        const common::NetworkAddress* chosen = choose_interface();
+        if (chosen == nullptr) {
+            set_error(out_error,
+                      "找不到可用的局域网网卡。请确认已连接 Wi-Fi 或网线。");
+            close_socket(socket_handle);
+            socket_handle = kInvalidSocket;
+            return false;
+        }
+        interface_address = chosen->address;
+        interface_name = chosen->interface_name;
+        AD_LOG_INFO("SSDP 使用网卡 {}（{}）", interface_name, interface_address);
+
         // 加入组播组，否则收不到发往 239.255.255.250 的 M-SEARCH。
+        //
+        // 这一步的返回值必须检查：失败时 socket 收不到任何组播，
+        // 表现就是「手机搜不到设备」，而且不会有任何报错、日志里也看不出
+        // 异常 —— 排查时会误以为是手机或路由器的问题。
         ip_mreq membership;
         std::memset(&membership, 0, sizeof(membership));
         membership.imr_multiaddr.s_addr = ::inet_addr(kMulticastAddress);
-        membership.imr_interface.s_addr = htonl(INADDR_ANY);
+        membership.imr_interface.s_addr = ::inet_addr(interface_address.c_str());
 
-#if defined(_WIN32)
-        ::setsockopt(socket_handle, IPPROTO_IP, IP_ADD_MEMBERSHIP,
-                     reinterpret_cast<const char*>(&membership), sizeof(membership));
-#else
-        ::setsockopt(socket_handle, IPPROTO_IP, IP_ADD_MEMBERSHIP,
-                     &membership, sizeof(membership));
-#endif
+        if (!set_socket_option(IPPROTO_IP, IP_ADD_MEMBERSHIP, &membership, sizeof(membership),
+                               "IP_ADD_MEMBERSHIP", out_error)) {
+            close_socket(socket_handle);
+            socket_handle = kInvalidSocket;
+            return false;
+        }
 
-        // 关掉组播回环没有意义（本机也要能看到自己发出去的包，便于排障），
-        // 但要保证发送接口由系统按路由选择，不能固定到某块网卡 ——
-        // 文档 6.3 提到多网卡与虚拟网卡会让广播发错网段。
+        // 指定组播的发送接口。不设的话由内核按路由选，多网卡时同样可能选错。
+        in_addr outbound;
+        outbound.s_addr = ::inet_addr(interface_address.c_str());
+        if (!set_socket_option(IPPROTO_IP, IP_MULTICAST_IF, &outbound, sizeof(outbound),
+                               "IP_MULTICAST_IF", out_error)) {
+            close_socket(socket_handle);
+            socket_handle = kInvalidSocket;
+            return false;
+        }
+
+        // 组播回环保持开启（默认就是开的）：本机也要能看到自己发出去的包，
+        // 排障时很有用，而且不影响其他设备。
         unsigned char ttl = 4;
-#if defined(_WIN32)
-        ::setsockopt(socket_handle, IPPROTO_IP, IP_MULTICAST_TTL,
-                     reinterpret_cast<const char*>(&ttl), sizeof(ttl));
-#else
-        ::setsockopt(socket_handle, IPPROTO_IP, IP_MULTICAST_TTL, &ttl, sizeof(ttl));
-#endif
+        if (!set_socket_option(IPPROTO_IP, IP_MULTICAST_TTL, &ttl, sizeof(ttl),
+                               "IP_MULTICAST_TTL", out_error)) {
+            close_socket(socket_handle);
+            socket_handle = kInvalidSocket;
+            return false;
+        }
 
         return true;
+    }
+
+    // 统一的 setsockopt 包装：失败时把 errno / WSA 错误码一起报出来。
+    // 这类失败在原来的代码里是静默的，导致功能坏掉却毫无线索。
+    bool set_socket_option(int level, int option, const void* value, std::size_t size,
+                           const char* option_name, std::string* out_error) {
+#if defined(_WIN32)
+        const int result = ::setsockopt(socket_handle, level, option,
+                                        static_cast<const char*>(value),
+                                        static_cast<int>(size));
+#else
+        const int result = ::setsockopt(socket_handle, level, option, value, size);
+#endif
+        if (result == 0) {
+            return true;
+        }
+
+#if defined(_WIN32)
+        const int code = ::WSAGetLastError();
+#else
+        const int code = errno;
+#endif
+        const std::string message =
+            std::string("设置 socket 选项 ") + option_name + " 失败（错误码 " +
+            std::to_string(code) + "）";
+        AD_LOG_ERROR("{}", message);
+        set_error(out_error, message);
+        return false;
+    }
+
+    // 挑一块适合收发组播的网卡。
+    //
+    // 优先用配置里指定的地址；否则从「可广播地址」里挑第一个 IPv4 ——
+    // NetUtil::broadcastable_addresses 已经排除了回环与虚拟网卡（文档 6.3）。
+    const common::NetworkAddress* choose_interface() {
+        const std::vector<common::NetworkAddress> candidates = common::broadcastable_addresses();
+
+        if (!preferred_address.empty()) {
+            for (const common::NetworkAddress& candidate : candidates) {
+                if (candidate.address == preferred_address) {
+                    cached_interfaces = candidates;
+                    return find_cached(preferred_address);
+                }
+            }
+            AD_LOG_WARN("配置里指定的网卡地址 {} 不在可用列表中，改为自动选择",
+                        preferred_address);
+        }
+
+        cached_interfaces = candidates;
+
+        // 优先 IPv4：UPnP 的组播地址是 IPv4 的。
+        for (const common::NetworkAddress& candidate : cached_interfaces) {
+            if (!candidate.is_ipv6) {
+                return &candidate;
+            }
+        }
+        return cached_interfaces.empty() ? nullptr : &cached_interfaces.front();
+    }
+
+    const common::NetworkAddress* find_cached(const std::string& address) {
+        for (const common::NetworkAddress& candidate : cached_interfaces) {
+            if (candidate.address == address) {
+                return &candidate;
+            }
+        }
+        return nullptr;
     }
 
     // ---- 发送 --------------------------------------------------------------
