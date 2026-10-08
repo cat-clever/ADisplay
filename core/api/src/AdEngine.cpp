@@ -411,6 +411,18 @@ AdResult AD_CALL ad_engine_create(const AdConfig* config, AdEngine** out_engine)
     engine->require_confirmation = engine->persisted.get_bool(
         kKeyRequireConfirm, engine->require_confirmation);
 
+    // 首次运行时 deviceid / uuid 是新生成的，必须立刻落盘。
+    //
+    // load_or_create 只在内存里生成，真正写盘要等 persist()，而 persist()
+    // 原先只在改名时才调用 —— 用户不改名字的话，配置永远不会被写，
+    // 下次启动又生成一套新标识。手机端会把它当成另一台设备要求重新配对，
+    // 直接违反文档 2.4 的「标识不变」。
+    if (!engine->persisted.has(kKeyDeviceId)) {
+        if (engine->persist() != AD_OK) {
+            AD_LOG_WARN("设备标识落盘失败，下次启动可能会变化");
+        }
+    }
+
     AD_LOG_INFO("ADisplay 核心已创建，版本 {}，设备名「{}」，标识 {}",
                 ADISPLAY_VERSION, engine->device_name, engine->identity.device_id());
 

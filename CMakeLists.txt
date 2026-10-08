@@ -1,7 +1,11 @@
 cmake_minimum_required(VERSION 3.21)
 
+# 版本号要跟着 git tag 走。发版时记得同步这几处：
+#   CMakeLists.txt（这里）、vcpkg.json、app-macos/Info.plist、
+#   app-tv/app/build.gradle.kts
+# 它们会分别出现在界面显示的版本、macOS 的「关于」、以及 Android 的应用信息里。
 project(ADisplay
-    VERSION 0.1.0
+    VERSION 0.4.0
     DESCRIPTION "跨平台投屏接收端：AirPlay / DLNA 接收，支持 Windows、macOS、Android TV"
     HOMEPAGE_URL "https://github.com/cat-clever/ADisplay"
     LANGUAGES CXX)

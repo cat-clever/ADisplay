@@ -13,7 +13,7 @@ android {
         minSdk = 26
         targetSdk = 34
         versionCode = 1
-        versionName = "0.1.0"
+        versionName = "0.4.0"
 
         // 自用项目，全 ABI 打进一个 APK 即可（文档 2.5）。
         ndk {
