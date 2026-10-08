@@ -5,6 +5,8 @@ add_library(adisplay_dlna STATIC
     # SOAP 请求解析与应答构建。同样是纯逻辑，必须能被测试覆盖 ——
     # 应答格式错一个元素名，手机端就表现为「点了没反应」。
     src/DlnaSoap.cpp
+    # HTTP 服务端、SOAP 动作分发、GENA 事件订阅。
+    src/DlnaRenderer.cpp
 )
 
 target_include_directories(adisplay_dlna
@@ -18,6 +20,7 @@ target_link_libraries(adisplay_dlna
     PRIVATE
         adisplay_warnings
         tinyxml2::tinyxml2
+        httplib::httplib
 )
 
 set_target_properties(adisplay_dlna PROPERTIES
