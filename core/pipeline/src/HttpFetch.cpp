@@ -157,6 +157,21 @@ std::string probe_raw_response(const std::string& host, int port, const std::str
 
     const std::string request = "GET " + path + " HTTP/1.0\r\nHost: " + host +
                                 "\r\nConnection: close\r\n\r\n";
+    // 必须设接收超时。recv 是阻塞的，而对端完全可能连上了却不回也不关 ——
+    // 那样探针会永久阻塞，把调用它的中转线程一起挂死。排查工具反过来制造新故障，
+    // 比没有探针更糟。
+#if defined(_WIN32)
+    const DWORD recv_timeout_ms = 5000;
+    (void)::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO,
+                       reinterpret_cast<const char*>(&recv_timeout_ms),
+                       sizeof(recv_timeout_ms));
+#else
+    struct timeval recv_timeout;
+    recv_timeout.tv_sec = 5;
+    recv_timeout.tv_usec = 0;
+    (void)::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &recv_timeout, sizeof(recv_timeout));
+#endif
+
     // 往一个已被对端关掉的 socket 上写会触发 SIGPIPE，在 macOS/Linux 上那是直接
     // 杀进程。探针是为了排查问题，绝不能把自己搞崩 —— 两个平台各有各的关法。
 #if defined(SO_NOSIGPIPE)
