@@ -126,7 +126,8 @@ AD_TEST(展开通告目标, "build_targets 展开 rootdevice/uuid/设备类型/�
 AD_TEST(alive报文含必需的头, "NOTIFY alive 含 LOCATION/CACHE-CONTROL/NTS") {
     const SsdpAdvertisement advertisement = make_advertisement();
     const std::vector<NotificationTarget> targets = build_targets(advertisement);
-    const std::string message = build_alive_message(advertisement, targets[0]);
+    const std::string message =
+        build_alive_message(advertisement, targets[0], advertisement.location);
 
     AD_CHECK_EQ(first_line(message), std::string("NOTIFY * HTTP/1.1"));
     AD_CHECK_EQ(header_value(message, "HOST"), std::string("239.255.255.250:1900"));
@@ -154,7 +155,8 @@ AD_TEST(byebye报文不带位置, "NOTIFY byebye 不带 LOCATION 与 CACHE-CONTR
 
 AD_TEST(搜索响应的字段, "M-SEARCH 响应的字段齐全") {
     const SsdpAdvertisement advertisement = make_advertisement();
-    const std::string message = build_search_response(advertisement, "ssdp:all");
+    const std::string message =
+        build_search_response(advertisement, "ssdp:all", advertisement.location);
 
     AD_CHECK_EQ(first_line(message), std::string("HTTP/1.1 200 OK"));
     AD_CHECK_EQ(header_value(message, "ST"), std::string("ssdp:all"));
@@ -190,11 +192,63 @@ AD_TEST(报文以空行结尾, "报文以 CRLF CRLF 结尾") {
     const SsdpAdvertisement advertisement = make_advertisement();
     const std::vector<NotificationTarget> targets = build_targets(advertisement);
 
-    const std::string alive = build_alive_message(advertisement, targets[0]);
-    const std::string response = build_search_response(advertisement, "ssdp:all");
+    const std::string alive =
+        build_alive_message(advertisement, targets[0], advertisement.location);
+    const std::string response =
+        build_search_response(advertisement, "ssdp:all", advertisement.location);
 
     AD_CHECK(alive.size() >= 4 && alive.compare(alive.size() - 4, 4, "\r\n\r\n") == 0);
     AD_CHECK(response.size() >= 4 && response.compare(response.size() - 4, 4, "\r\n\r\n") == 0);
+}
+
+AD_TEST(location_suffix_取端口与路径, "location_suffix 保留端口、丢掉主机名") {
+    AD_CHECK_EQ(location_suffix("http://192.168.1.5:49152/description.xml"),
+                std::string(":49152/description.xml"));
+    // 没有端口时只取路径
+    AD_CHECK_EQ(location_suffix("http://192.168.1.5/description.xml"),
+                std::string("/description.xml"));
+    // 连路径都没有
+    AD_CHECK_EQ(location_suffix("http://192.168.1.5:49152"), std::string(""));
+    AD_CHECK_EQ(location_suffix(""), std::string(""));
+}
+
+AD_TEST(location_for_按网卡拼地址, "location_for 用指定网卡的地址重建 URL") {
+    const SsdpAdvertisement advertisement = make_advertisement();
+
+    // 这是多网卡场景的核心：同一份通告，不同网卡要给出不同的 LOCATION。
+    // 否则另一块网段上的手机会拿到一个跨网段访问不到的地址 ——
+    // 广播收到了、设备却不出现。
+    AD_CHECK_EQ(location_for(advertisement, "172.20.10.5"),
+                std::string("http://172.20.10.5:49152/description.xml"));
+    AD_CHECK_EQ(location_for(advertisement, "192.168.137.167"),
+                std::string("http://192.168.137.167:49152/description.xml"));
+
+    // 地址为空时退回原值，总比给一个空 URL 强
+    AD_CHECK_EQ(location_for(advertisement, ""), advertisement.location);
+}
+
+AD_TEST(alive_用传入的位置, "alive 报文里的 LOCATION 来自参数而非通告本身") {
+    const SsdpAdvertisement advertisement = make_advertisement();
+    const std::vector<NotificationTarget> targets = build_targets(advertisement);
+
+    const std::string message = build_alive_message(
+        advertisement, targets[0], "http://172.20.10.5:49152/description.xml");
+
+    AD_CHECK_EQ(header_value(message, "LOCATION"),
+                std::string("http://172.20.10.5:49152/description.xml"));
+    // 通告里原本的地址不该出现
+    AD_CHECK(message.find("192.168.1.20") == std::string::npos);
+}
+
+AD_TEST(search_response_用传入的位置, "M-SEARCH 响应的 LOCATION 来自参数") {
+    const SsdpAdvertisement advertisement = make_advertisement();
+
+    const std::string message = build_search_response(
+        advertisement, "ssdp:all", "http://172.20.10.5:49152/description.xml");
+
+    AD_CHECK_EQ(header_value(message, "LOCATION"),
+                std::string("http://172.20.10.5:49152/description.xml"));
+    AD_CHECK(message.find("192.168.1.20") == std::string::npos);
 }
 
 int main() {
