@@ -63,12 +63,16 @@ configure_file(
 # 走 vcpkg manifest 模式（vcpkg.json）。若调用方没提供 vcpkg 工具链，
 # 退回 find_package，方便在已装好依赖的机器上直接 cmake。
 # ---------------------------------------------------------------------------
-# 批次 0 只需要这三项。XML 解析（tinyxml2）与 HTTP 服务（cpp-httplib）
-# 是 DLNA 模块的依赖，等批次 2 真正用到时再加 —— 提前引入只会多几个
-# 配置阶段的硬失败点，不划算。
+# 基础依赖（批次 0 起）
 find_package(spdlog CONFIG REQUIRED)
 find_package(fmt CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
+
+# DLNA 模块的依赖（批次 2 起）：
+#   tinyxml2     —— 生成设备描述 XML、解析手机发来的 SOAP 请求
+#   cpp-httplib  —— 提供设备描述 XML 的 HTTP 服务，并接 SOAP 动作与 GENA 订阅
+find_package(tinyxml2 CONFIG REQUIRED)
+find_package(httplib CONFIG REQUIRED)
 
 message(STATUS "")
 message(STATUS "ADisplay ${PROJECT_VERSION} 配置摘要")
@@ -86,6 +90,7 @@ message(STATUS "")
 # 子目录
 # ---------------------------------------------------------------------------
 add_subdirectory(core)
+add_subdirectory(protocols)
 
 if(ADISPLAY_BUILD_TESTS)
     enable_testing()
