@@ -23,6 +23,9 @@ target_link_libraries(castcore
         adisplay_common
         adisplay_discovery
         adisplay_dlna
+        # AirPlay 接收端（批次 4）。协议实现复用 UxPlay，
+        # 取舍与许可证说明见 cmake/UxPlayProtocol.cmake。
+        adisplay_airplay
         # 本地换封装中转（媒体管线）。
         adisplay_pipeline
 )

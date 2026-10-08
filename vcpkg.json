@@ -17,6 +17,21 @@
     "tinyxml2",
     "cpp-httplib",
     {
+      "name": "openssl",
+      "comment": "AirPlay 协议层用它做配对密钥、FairPlay 与流解密。不启用 TLS —— 播放列表本身走明文 HTTP。Android 暂不编 AirPlay，不必为它多编一遍。",
+      "platform": "!android"
+    },
+    {
+      "name": "libplist",
+      "comment": "AirPlay 的控制通道用 plist 传参：/info 的应答、SETUP 的流描述都是它。",
+      "platform": "!android"
+    },
+    {
+      "name": "pthreads",
+      "comment": "Windows 上 UxPlay 的协议层按 pthread 写。只 Windows 需要。",
+      "platform": "windows"
+    },
+    {
       "name": "ffmpeg",
       "default-features": false,
       "features": [

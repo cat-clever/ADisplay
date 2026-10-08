@@ -10,6 +10,7 @@
 #include <adisplay/adisplay.h>
 #include <adisplay/version.h>   // 由 CMake 生成
 
+#include <adisplay/airplay/AirplayReceiver.h>
 #include <adisplay/common/Config.h>
 #include <adisplay/discovery/DiscoveryService.h>
 #include <adisplay/dlna/DlnaRenderer.h>
@@ -22,6 +23,7 @@
 #include <atomic>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <memory>
 #include <mutex>
 #include <new>
@@ -35,6 +37,7 @@ namespace {
 // 漏掉哪一个，全局那边就会报 "use of undeclared identifier"。
 namespace common = adisplay::common;
 namespace discovery = adisplay::discovery;
+namespace airplay = adisplay::airplay;
 namespace dlna = adisplay::dlna;
 namespace pipeline = adisplay::pipeline;
 
@@ -109,6 +112,7 @@ bool is_valid_quality_preset(int preset) {
 // 它得读 AdEngine 的回调快照，所以只能在 AdEngine 之后定义 ——
 // 这里先声明，成员用 unique_ptr 持有。
 class DlnaBridge;
+class AirplayBridge;
 
 struct AdEngine {
     mutable std::mutex mutex;
@@ -160,6 +164,15 @@ struct AdEngine {
     // DLNA 回调 -> C ABI 的桥，批次 3 接入。
     std::unique_ptr<DlnaBridge> dlna_bridge;
 
+    // AirPlay 接收端（批次 4）。
+    //
+    // 和 DLNA 渲染器不同，它自己绑控制通道的端口，也是唯一知道配对公钥的地方
+    // —— 广播要用的端口、设备 id、公钥都得从它这里取（见 start()）。
+    std::unique_ptr<airplay::AirplayReceiver> airplay_receiver;
+
+    // AirPlay 回调 -> C ABI 的桥。
+    std::unique_ptr<AirplayBridge> airplay_bridge;
+
     // 单独一把锁保护 dlna_renderer 指针本身。不复用 mutex 是因为 GENA 推送
     // 会真的发 HTTP 请求、可能卡好几秒，而 mutex 被回调快照和配置读写共用，
     // 卡在那里会连累一大片不相干的调用。
@@ -200,7 +213,9 @@ struct AdEngine {
     // 和上面几个同一个模式：持锁取快照，锁外调用户代码。用户在回调里回头
     // 再调 ad_engine_* 是很自然的写法，持锁调用必然死锁。
 
-    void notify_session_opened(uint32_t session_id, int stream_kind) {
+    // peer_kind 由调用方给出：DLNA 只可能来自 Android，AirPlay 只可能来自
+    // iOS。在这里写死成其中一种，界面层就会把 iPhone 显示成安卓设备。
+    void notify_session_opened(uint32_t session_id, int stream_kind, int peer_kind) {
         AdCallbacks snapshot{};
         void* user = nullptr;
         {
@@ -220,7 +235,7 @@ struct AdEngine {
         peer.struct_size = static_cast<uint32_t>(sizeof(AdPeerInfo));
         peer.display_name = display_name.c_str();
         peer.address = address.c_str();
-        peer.kind = AD_PEER_ANDROID;   // DLNA 只可能来自 Android（文档 3.2）
+        peer.kind = peer_kind;
         snapshot.on_session_opened(user, session_id, &peer, stream_kind);
     }
 
@@ -372,7 +387,7 @@ public:
         const uint32_t session = next_session_id_.fetch_add(1);
         session_id_.store(session);
 
-        engine_->notify_session_opened(session, AD_STREAM_MEDIA_URL);
+        engine_->notify_session_opened(session, AD_STREAM_MEDIA_URL, AD_PEER_ANDROID);
 
         // 交给界面层之前先过一道本地中转。这一步只做字符串拼接、不发网络请求
         // —— 它在 SOAP 的 SetAVTransportURI 应答路径上，在这里拉远端内容会让
@@ -541,6 +556,138 @@ private:
     bool muted_ = false;
 
     // 0 表示「还没有媒体会话」。命令与状态回报都按它过滤。
+    std::atomic<uint32_t> session_id_{0};
+    std::atomic<uint32_t> next_session_id_{1};
+};
+
+// AirPlay 回调 -> C ABI 的桥（批次 4）。
+//
+// 和 DlnaBridge 一样，核心自己不播放：
+//   * AirPlay 视频推送给的是一条 HLS 地址，交给界面层的平台播放器去拉；
+//   * 镜像流的音视频帧原样转出去，由渲染层处理。
+//
+// 镜像与视频推送共用一个会话号。对用户来说「一次投屏」就是一次会话 ——
+// iPhone 先开镜像、再从某个 App 里推个视频，是同一台设备接二连三的动作，
+// 界面上不该冒出两条并行记录。
+class AirplayBridge final : public airplay::IAirplayListener {
+public:
+    explicit AirplayBridge(AdEngine* engine) : engine_(engine) {}
+
+    void on_client_connected(const std::string& device_id, const std::string& model,
+                             const std::string& name) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        device_id_ = device_id;
+        model_ = model;
+        name_ = name;
+    }
+
+    void on_client_disconnected() override {
+        close_session(AD_CLOSE_USER_REQUEST);
+    }
+
+    void on_mirror_started() override {
+        open_session(AD_STREAM_MIRROR_VIDEO);
+    }
+
+    void on_mirror_stopped() override {
+        // 镜像结束不等于设备断开：iPhone 常常停掉镜像之后仍然连着，
+        // 接着还能再推一个视频。所以这里只结束会话，不假设设备走了。
+        close_session(AD_CLOSE_USER_REQUEST);
+    }
+
+    void on_video_play(const std::string& url, float start_position) override {
+        (void) start_position;
+        if (url.empty()) {
+            AD_LOG_WARN("AirPlay 视频推送没带地址，起播不了");
+            return;
+        }
+        const uint32_t session = open_session(AD_STREAM_MEDIA_URL);
+
+        // 与 DLNA 同一条判断：有些片源平台播放器吃不下（典型是
+        // HEVC-in-MPEG-TS），需要在本地换个封装再交给它。
+        std::string playback_url = url;
+        if (engine_->media_relay) {
+            playback_url = engine_->media_relay->resolve_for_playback(url);
+            if (playback_url != url) {
+                AD_LOG_INFO("该片源可能需要在本地换封装，已改走中转：{}", playback_url);
+            }
+        }
+        if (session != 0) {
+            engine_->notify_media_url(session, playback_url, std::string());
+        }
+    }
+
+    void on_video_stop() override {
+        close_session(AD_CLOSE_USER_REQUEST);
+    }
+
+    void on_video_frame(const unsigned char* data, int size, bool is_h265) override {
+        // 帧的到达与计数由 AirplayReceiver 记日志（节流也在那边），
+        // 这里只补一件事：部分 iOS 版本不发 mirror_video_running，
+        // 上来直接送帧 —— 那就在第一帧时把会话开出来。
+        (void) data;
+        (void) size;
+        (void) is_h265;
+        if (session_id_.load() == 0) {
+            open_session(AD_STREAM_MIRROR_VIDEO);
+        }
+    }
+
+    void on_audio_frame(const unsigned char* data, int size, int compression_type) override {
+        // 镜像的伴音与视频同属一路会话，帧本身由渲染层处理，这里无需额外动作。
+        (void) data;
+        (void) size;
+        (void) compression_type;
+    }
+
+    double on_volume_requested() override {
+        // 协议层问「音量是多少」时要立刻作答，等不了界面层。返回 1.0（满音量）：
+        // 报 0 会被发送端当成静音而改变它的行为。
+        return 1.0;
+    }
+
+    void on_volume_changed(int volume) override {
+        (void) volume;
+    }
+
+    // 停服时清干净，避免下次 start 之后残留上一次的会话。
+    void reset() {
+        close_session(AD_CLOSE_INTERNAL_ERROR);
+        session_id_.store(0);
+        std::lock_guard<std::mutex> lock(mutex_);
+        device_id_.clear();
+        model_.clear();
+        name_.clear();
+    }
+
+private:
+    // 已经有会话就复用。返回 0 只在这条消息不该起会话时出现。
+    uint32_t open_session(int stream_kind) {
+        const uint32_t existing = session_id_.load();
+        if (existing != 0) {
+            return existing;
+        }
+        const uint32_t session = next_session_id_.fetch_add(1);
+        session_id_.store(session);
+        engine_->notify_session_opened(session, stream_kind, AD_PEER_IOS);
+        return session;
+    }
+
+    void close_session(int reason) {
+        const uint32_t previous = session_id_.exchange(0);
+        if (previous != 0) {
+            engine_->notify_session_closed(previous, reason);
+        }
+    }
+
+    AdEngine* engine_ = nullptr;
+
+    mutable std::mutex mutex_;
+    std::string device_id_;
+    std::string model_;
+    std::string name_;
+
+    // 0 表示当前没有 AirPlay 会话。
     std::atomic<uint32_t> session_id_{0};
     std::atomic<uint32_t> next_session_id_{1};
 };
@@ -940,6 +1087,66 @@ AdResult AD_CALL ad_engine_start(AdEngine* engine) {
         dlna_port = engine->dlna_renderer->port();
     }
 
+    // ---- 启动 AirPlay 接收端 ----------------------------------------------
+    //
+    // 必须排在广播之前，两个原因：
+    //
+    //  1. 广播只是「看不看得见」，控制通道才是「连不连得上」。少了后者，
+    //     iPhone 会在「屏幕镜像」里列出本机，点下去却毫无反应 —— 这比
+    //     设备根本不出现更让人困惑。
+    //  2. 端口、设备 id、配对公钥都要用它给出的那份。端口是它自己绑的
+    //     （被占用时协议层另选一个），而设备 id 它会在 /info 里按自己的
+    //     规则格式化一遍；广播若用配置里存的原串，大小写一差，iOS 就会
+    //     当成两台设备。
+    //
+    // 它起不来不算整个服务失败：DLNA 那一路通常还是好的。但这时**必须**
+    // 停止广播 AirPlay —— 广播一个没人应答的服务，用户看到的就是
+    // 「看得见、点不动」。
+    bool airplay_ready = false;
+    std::string airplay_device_id = engine->identity.device_id();
+    std::string airplay_public_key;
+    if (engine->enable_airplay && !airplay::airplay_supported()) {
+        // 这份构建没编入协议层（目前是 Android）。如实说出来 —— 否则用户
+        // 面对的是「镜像列表里能看到设备、点了没反应」，而真正的原因在别处。
+        AD_LOG_WARN("这份构建没有编入 AirPlay 协议层，本次不广播 AirPlay"
+                    "（DLNA 与自研协议不受影响）");
+    } else if (engine->enable_airplay) {
+        airplay::AirplayConfig airplay_config;
+        airplay_config.device_name = engine->device_name;
+        airplay_config.device_id = engine->identity.device_id();
+        airplay_config.port = airplay_port;
+
+        // 配对密钥要和配置放在一起。它必须落盘：每次启动重新生成的话，
+        // iPhone 会把本机当成新设备，每次投屏都要重新配对一遍。
+        std::filesystem::path config_file(engine->config_path);
+        if (config_file.has_parent_path()) {
+            airplay_config.key_file =
+                (config_file.parent_path() / "airplay-pairing.key").string();
+        } else {
+            airplay_config.key_file = "airplay-pairing.key";
+        }
+
+        engine->airplay_receiver = std::make_unique<airplay::AirplayReceiver>();
+        engine->airplay_bridge = std::make_unique<AirplayBridge>(engine);
+        engine->airplay_receiver->set_listener(engine->airplay_bridge.get());
+
+        std::string airplay_error;
+        if (engine->airplay_receiver->start(airplay_config, &airplay_error)) {
+            airplay_ready = true;
+            airplay_port = engine->airplay_receiver->port();
+            airplay_device_id = engine->airplay_receiver->device_id();
+            airplay_public_key = engine->airplay_receiver->public_key();
+            AD_LOG_INFO("AirPlay 接收端已就绪，控制通道端口 {}", airplay_port);
+        } else {
+            engine->airplay_receiver.reset();
+            engine->airplay_bridge.reset();
+            const std::string message =
+                "AirPlay 接收端启动失败，本次不广播 AirPlay：" + airplay_error;
+            AD_LOG_ERROR("{}", message);
+            engine->set_last_error(message);
+        }
+    }
+
     // ---- 启动服务发现 ----------------------------------------------------
     // 端口都确认可用了，开始广播。手机在投屏列表里能不能看到我们，
     // 完全取决于这一步有没有成功。
@@ -950,12 +1157,19 @@ AdResult AD_CALL ad_engine_start(AdEngine* engine) {
     {
         discovery::DiscoveryConfig discovery_config;
         discovery_config.device_name = engine->device_name;
-        discovery_config.device_id = engine->identity.device_id();
+        // 用接收端规范化后的设备 id（小写）。协议层的 /info 是拿同一段
+        // 原始字节按自己的规则转出来的，广播用另一个写法就会被当成两台设备。
+        discovery_config.device_id = airplay_ready ? airplay_device_id
+                                                   : engine->identity.device_id();
         discovery_config.uuid = engine->identity.uuid();
         discovery_config.airplay_port = airplay_port;
         discovery_config.dlna_port = dlna_port;
         discovery_config.castpc_port = castpc_port;
-        discovery_config.enable_airplay = engine->enable_airplay;
+        // 配对公钥：缺了它 iPhone 能看见我们却配不上对。
+        discovery_config.airplay_pk = airplay_public_key;
+        // 只在接收端真的起来了才广播。这条是与「看得见、点不动」直接相关的
+        // 一处：广播了却没有东西应答，用户无从判断问题出在哪一边。
+        discovery_config.enable_airplay = airplay_ready;
         discovery_config.enable_dlna = engine->enable_dlna;
         discovery_config.enable_castpc = engine->enable_castpc;
         // SERVER 头按 UPnP 规范拼全：<OS>/<版本> UPnP/1.0 <产品>/<版本>。
@@ -1012,6 +1226,20 @@ void AD_CALL ad_engine_stop(AdEngine* engine) {
         // 顺序上先停广播再停 HTTP：反过来手机可能还在拿着 LOCATION 来拉描述。
         engine->discovery->stop();
         engine->discovery.reset();
+    }
+
+    // 顺序与启动相反：先让广播 goodbye，再拆控制通道 —— 反过来手机可能
+    // 还拿着刚看到的名字来连一个已经不存在的端口。
+    if (engine->airplay_receiver) {
+        // 与 DLNA 同一套路：先摘监听器，再停服务。停的过程中还可能有回调
+        // 在路上，桥先没了就会踩空。
+        engine->airplay_receiver->set_listener(nullptr);
+        engine->airplay_receiver->stop();
+        engine->airplay_receiver.reset();
+    }
+    if (engine->airplay_bridge) {
+        engine->airplay_bridge->reset();
+        engine->airplay_bridge.reset();
     }
 
     {

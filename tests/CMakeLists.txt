@@ -13,6 +13,7 @@ set(ADISPLAY_TEST_SOURCES
     test_dlna_soap.cpp
     test_dlna_http.cpp
     test_dlna_media_url.cpp
+    test_airplay_advert.cpp
     test_pipeline_media_source.cpp
     test_pipeline_hls_playlist.cpp
     test_pipeline_media_relay.cpp
@@ -30,6 +31,12 @@ foreach(test_source IN LISTS ADISPLAY_TEST_SOURCES)
         target_link_libraries(${test_name} PRIVATE adisplay_discovery)
         target_include_directories(${test_name} PRIVATE
             "${CMAKE_SOURCE_DIR}/core/discovery/src")
+    endif()
+
+    # AirPlay 广播内容的用例住在 discovery 模块里（那份定义是 mDNS 与
+    # 协议层 /info 共同的数据源，放在哪一边都不合适，放这里两边都能用）。
+    if(test_name STREQUAL "test_airplay_advert")
+        target_link_libraries(${test_name} PRIVATE adisplay_discovery)
     endif()
 
     # DLNA 的测试同样要触达 protocols/dlna/src 下的内部头。

@@ -23,6 +23,8 @@ endif()
 add_library(adisplay_discovery STATIC
     # 统一管理 mDNS 与 SSDP，并处理网卡变化（文档 4.2）。
     src/DiscoveryService.cpp
+    # AirPlay 广播内容的唯一出处，mDNS 与协议层 /info 共用。
+    src/AirplayAdvert.cpp
     # SSDP 没有可用的系统服务，是自己实现的一份，一份代码跨平台。
     src/SsdpServer.cpp
     # SSDP 的报文构建与解析。单独成文件是为了能被单元测试直接覆盖。

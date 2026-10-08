@@ -38,6 +38,13 @@ struct DiscoveryConfig {
     std::string airplay_model = "AppleTV6,2";
     std::string airplay_srcvers = "220.68";
 
+    // AirPlay 接收端的 Ed25519 公钥（十六进制串），由协议层生成后交给这里。
+    //
+    // 它必须出现在 _airplay._tcp 与 _raop._tcp 的 TXT 记录里：iOS 的
+    // pair-verify 要用它核对接收端身份，缺失的表现是设备可见但连不上。
+    // 留空表示协议层未就绪，那种情况广播会缺 pk。
+    std::string airplay_pk;
+
     // SSDP 的 SERVER 头。
     //
     // 格式是「<OS>/<版本> UPnP/1.0 <产品>/<版本>」，三部分都不能少：
