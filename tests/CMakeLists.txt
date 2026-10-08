@@ -14,6 +14,8 @@ set(ADISPLAY_TEST_SOURCES
     test_dlna_http.cpp
     test_dlna_media_url.cpp
     test_pipeline_media_source.cpp
+    test_pipeline_hls_playlist.cpp
+    test_pipeline_media_relay.cpp
 )
 
 foreach(test_source IN LISTS ADISPLAY_TEST_SOURCES)
@@ -44,9 +46,17 @@ foreach(test_source IN LISTS ADISPLAY_TEST_SOURCES)
         target_link_libraries(${test_name} PRIVATE httplib::httplib)
     endif()
 
-    # 媒体管线目前只有纯逻辑，不依赖 FFmpeg，直接链静态库即可。
+    # 媒体管线的用例直接链静态库。播放列表那几条只走纯逻辑，中转服务那条会
+    # 真的起一次本地服务、真的发请求（换封装需要真实 TS 素材，那条路径不在
+    # 单测里走）。
     if(test_name MATCHES "^test_pipeline_")
         target_link_libraries(${test_name} PRIVATE adisplay_pipeline)
+    endif()
+
+    # 中转服务的用例要自己起客户端发请求，得单独链 httplib ——
+    # adisplay_pipeline 是 PRIVATE 链它的，头文件传不出来。
+    if(test_name STREQUAL "test_pipeline_media_relay")
+        target_link_libraries(${test_name} PRIVATE httplib::httplib)
     endif()
     target_include_directories(${test_name} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
     target_link_libraries(${test_name} PRIVATE adisplay_warnings)
