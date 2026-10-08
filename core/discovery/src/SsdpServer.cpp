@@ -498,6 +498,23 @@ struct SsdpServer::Impl {
             *out_error = message;
         }
     }
+
+    // 逐块网卡把实际会广播出去的设备描述地址打出来。
+    //
+    // 不能只打 advertisement.location —— 那是配置里的原始值，每次广播时
+    // 都会被换成该网卡自己的地址。只打它的话，日志看起来和修复前一模一样，
+    // 根本没法确认逐网卡的 LOCATION 到底生效了没有。
+    void log_broadcast_addresses(const SsdpAdvertisement& advertisement) const {
+        std::string detail;
+        for (const InterfaceBinding& binding : interfaces_) {
+            if (!detail.empty()) {
+                detail += "\n";
+            }
+            detail += "  " + binding.name + "（" + binding.address + "）→ " +
+                      location_for(advertisement, binding.address);
+        }
+        AD_LOG_INFO("SSDP 已启动，各网卡广播的设备描述地址：\n{}", detail);
+    }
 };
 
 // ===========================================================================
@@ -543,22 +560,7 @@ bool SsdpServer::start(const SsdpAdvertisement& advertisement, std::string* out_
     // 而有些手机端只在进入投屏页面时才搜索一次。
     impl_->announce_alive();
 
-    // 逐块网卡把实际会广播出去的设备描述地址打出来。
-    //
-    // 不能只打 advertisement.location —— 那是配置里的原始值，每次广播时
-    // 都会被换成该网卡自己的地址。只打它的话，日志看起来和修复前一模一样，
-    // 根本没法确认逐网卡的 LOCATION 到底生效了没有。
-    {
-        std::string detail;
-        for (const InterfaceBinding& binding : interfaces_) {
-            if (!detail.empty()) {
-                detail += "\n";
-            }
-            detail += "  " + binding.name + "（" + binding.address + "）→ " +
-                      location_for(advertisement, binding.address);
-        }
-        AD_LOG_INFO("SSDP 已启动，各网卡广播的设备描述地址：\n{}", detail);
-    }
+    impl_->log_broadcast_addresses(advertisement);
     return true;
 }
 
