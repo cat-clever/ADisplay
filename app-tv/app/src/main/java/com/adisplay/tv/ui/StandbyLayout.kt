@@ -55,6 +55,9 @@ private val EXPANDED_MIN_WIDTH = 1100
  *   standard  1080p 电视（700..1100dp）—— 标准 10 英尺排版
  *   expanded  4K 电视（>= 1100dp）—— 放大字号，远距离可读
  */
+// 必须标 @Composable：函数体里读了 MaterialTheme.typography，
+// 那是 @Composable 属性，从普通函数里访问不到。
+@Composable
 fun resolveStandbyLayout(screenWidthDp: Int): StandbyLayout {
     return when {
         screenWidthDp < COMPACT_MAX_WIDTH -> StandbyLayout(
