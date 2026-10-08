@@ -79,6 +79,12 @@ public:
     virtual void on_volume_changed(int volume) = 0;
 };
 
+// 实现细节，定义在 .cpp 里。
+//
+// 放在命名空间作用域而不是类内部：协议层的回调是 .cpp 里的一组自由函数，
+// 它们要解引用这个结构体 —— 嵌在类里就是私有类型，自由函数够不着。
+struct AirplayReceiverImpl;
+
 class AirplayReceiver {
 public:
     AirplayReceiver();
@@ -118,8 +124,7 @@ public:
     void set_listener(IAirplayListener* listener);
 
 private:
-    struct Impl;
-    std::unique_ptr<Impl> impl_;
+    std::unique_ptr<AirplayReceiverImpl> impl_;
 };
 
 // 这份构建是否编进了 AirPlay 协议层。

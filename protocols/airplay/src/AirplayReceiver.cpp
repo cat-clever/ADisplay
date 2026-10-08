@@ -89,7 +89,7 @@ bool airplay_supported() {
 
 #if ADISPLAY_HAVE_AIRPLAY_RECEIVER
 
-struct AirplayReceiver::Impl {
+struct AirplayReceiverImpl {
     mutable std::mutex mutex;
 
     raop_t* raop = nullptr;
@@ -132,7 +132,9 @@ struct AirplayReceiver::Impl {
             return;
         }
         const int64_t now = now_ms();
-        const int64_t previous = last_frame_log_ms.load();
+        // 不能是 const：compare_exchange_strong 在失败时会把实际值写回来，
+        // 参数是非 const 引用。
+        int64_t previous = last_frame_log_ms.load();
         if (now - previous < kFrameLogIntervalMs) {
             return;
         }
@@ -148,8 +150,8 @@ struct AirplayReceiver::Impl {
 
 namespace {
 
-AirplayReceiver::Impl* impl_of(void* cls) {
-    return static_cast<AirplayReceiver::Impl*>(cls);
+AirplayReceiverImpl* impl_of(void* cls) {
+    return static_cast<AirplayReceiverImpl*>(cls);
 }
 
 // ---- 下面这一组是交给协议层的回调 -----------------------------------------
@@ -170,7 +172,7 @@ void cb_conn_feedback(void* cls) {
 }
 
 void cb_conn_reset(void* cls, int reason) {
-    AirplayReceiver::Impl* impl = impl_of(cls);
+    AirplayReceiverImpl* impl = impl_of(cls);
     AD_LOG_INFO("AirPlay 连接已重置（原因码 {}）", reason);
     if (impl->mirroring.exchange(false)) {
         IAirplayListener* listener = impl->listener_snapshot();
@@ -185,7 +187,7 @@ void cb_conn_reset(void* cls, int reason) {
 }
 
 void cb_video_reset(void* cls, reset_type_t reset_type) {
-    AirplayReceiver::Impl* impl = impl_of(cls);
+    AirplayReceiverImpl* impl = impl_of(cls);
     AD_LOG_DEBUG("AirPlay 视频流重置（类型 {}）", static_cast<int>(reset_type));
     if (impl->mirroring.exchange(false)) {
         IAirplayListener* listener = impl->listener_snapshot();
@@ -197,7 +199,7 @@ void cb_video_reset(void* cls, reset_type_t reset_type) {
 
 void cb_video_process(void* cls, raop_ntp_t* ntp, video_decode_struct* data) {
     (void) ntp;
-    AirplayReceiver::Impl* impl = impl_of(cls);
+    AirplayReceiverImpl* impl = impl_of(cls);
     if (data == nullptr || data->data == nullptr || data->data_len <= 0) {
         return;
     }
@@ -211,7 +213,7 @@ void cb_video_process(void* cls, raop_ntp_t* ntp, video_decode_struct* data) {
 
 void cb_audio_process(void* cls, raop_ntp_t* ntp, audio_decode_struct* data) {
     (void) ntp;
-    AirplayReceiver::Impl* impl = impl_of(cls);
+    AirplayReceiverImpl* impl = impl_of(cls);
     if (data == nullptr || data->data == nullptr || data->data_len <= 0) {
         return;
     }
@@ -263,7 +265,7 @@ void cb_video_report_size(void* cls, float* width_source, float* height_source,
 }
 
 void cb_mirror_video_running(void* cls, bool is_running) {
-    AirplayReceiver::Impl* impl = impl_of(cls);
+    AirplayReceiverImpl* impl = impl_of(cls);
     IAirplayListener* listener = impl->listener_snapshot();
     if (is_running) {
         if (impl->mirroring.exchange(true)) {
@@ -290,7 +292,7 @@ void cb_mirror_video_running(void* cls, bool is_running) {
 // 与 DLNA 那条路径的行为保持一致（见 docs/发布说明.md 里「还不能做什么」）。
 void cb_report_client_request(void* cls, char* deviceid, char* model, char* name,
                               bool* admit) {
-    AirplayReceiver::Impl* impl = impl_of(cls);
+    AirplayReceiverImpl* impl = impl_of(cls);
     const std::string device = deviceid != nullptr ? deviceid : "";
     const std::string model_text = model != nullptr ? model : "";
     const std::string name_text = name != nullptr ? name : "";
@@ -394,12 +396,12 @@ void cb_audio_get_format(void* cls, unsigned char* ct, unsigned short* spf,
 }
 
 double cb_audio_set_client_volume(void* cls) {
-    AirplayReceiver::Impl* impl = impl_of(cls);
+    AirplayReceiverImpl* impl = impl_of(cls);
     return static_cast<double>(impl->volume.load()) / 100.0;
 }
 
 void cb_audio_set_volume(void* cls, float volume) {
-    AirplayReceiver::Impl* impl = impl_of(cls);
+    AirplayReceiverImpl* impl = impl_of(cls);
     int percent = static_cast<int>(volume * 100.0f + 0.5f);
     if (percent < 0) {
         percent = 0;
@@ -426,7 +428,7 @@ int cb_video_set_codec(void* cls, video_codec_t codec) {
 }
 
 void cb_on_video_play(void* cls, const char* location, const float start_position) {
-    AirplayReceiver::Impl* impl = impl_of(cls);
+    AirplayReceiverImpl* impl = impl_of(cls);
     const std::string url = location != nullptr ? location : "";
     AD_LOG_INFO("AirPlay 视频推送：{}（起播位置 {:.1f}s）", url,
                 static_cast<double>(start_position));
@@ -448,7 +450,7 @@ void cb_on_video_rate(void* cls, const float rate) {
 }
 
 void cb_on_video_stop(void* cls) {
-    AirplayReceiver::Impl* impl = impl_of(cls);
+    AirplayReceiverImpl* impl = impl_of(cls);
     AD_LOG_INFO("AirPlay 视频推送已停止");
 
     IAirplayListener* listener = impl->listener_snapshot();
@@ -508,9 +510,9 @@ void cb_log(void* cls, int level, const char* msg) {
 
 // 不带协议层时给一个空壳。
 //
-// 留空壳而不是把整个类都用 #if 包起来，是为了让"有没有 AirPlay"只影响
+// 留空壳而不是把整个类都用 #if 包起来，是为了让「有没有 AirPlay」只影响
 // 这一个文件里的实现，不影响任何调用方的代码形状。
-struct AirplayReceiver::Impl {
+struct AirplayReceiverImpl {
     std::mutex mutex;
     IAirplayListener* listener = nullptr;
 };
@@ -519,7 +521,7 @@ struct AirplayReceiver::Impl {
 
 // ===========================================================================
 
-AirplayReceiver::AirplayReceiver() : impl_(new Impl()) {}
+AirplayReceiver::AirplayReceiver() : impl_(new AirplayReceiverImpl()) {}
 
 AirplayReceiver::~AirplayReceiver() {
     stop();

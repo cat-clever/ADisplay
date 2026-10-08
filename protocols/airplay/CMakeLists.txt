@@ -86,6 +86,10 @@ if(ADISPLAY_HAVE_AIRPLAY_RECEIVER)
             # 两个开关都要打开，否则会走到已废弃的兼容分支上。
             PLIST_210
             PLIST_230
+            # OpenSSL 3 把 1.1.1 那一代的 API 标成了废弃，而这个宏让它按
+            # 1.1.1 的可见性暴露出来 —— 上游对所有平台都设了它，
+            # 漏掉的话协议层里用到的那几个接口会随 OpenSSL 版本时有时无。
+            OPENSSL_API_COMPAT=0x10101000L
     )
 
     if(WIN32)
@@ -99,10 +103,12 @@ if(ADISPLAY_HAVE_AIRPLAY_RECEIVER)
         # 默认加了 /DWIN32，但那是它的默认值而不是我们的声明 —— 依赖别人的默认
         # 值，会在某次工具链更新后变成一段只在 Windows 上走错分支的代码。
         target_compile_definitions(adisplay_airplay_proto PRIVATE WIN32)
-        # Windows 上上游用 pthreads4w 提供的 pthread.h。
-        find_package(PThreads4W REQUIRED)
+        # Windows 上上游按 pthread 写，而 pthreads-win32 的 pthread_t 不是
+        # 能赋 0 的类型（上游的 THREAD_CREATE 宏里有一句 handle = 0），
+        # 在 MSVC 上编不过。协议层用到的接口只有十三个，我们自己在
+        # compat/win32/pthread.h 里包一层 Win32 原语，顺带去掉一个依赖。
         target_link_libraries(adisplay_airplay_proto
-            PUBLIC ws2_32 wsock32 iphlpapi PThreads4W::PThreads4W)
+            PUBLIC ws2_32 wsock32 iphlpapi)
     else()
         find_package(Threads REQUIRED)
         target_link_libraries(adisplay_airplay_proto PUBLIC Threads::Threads)

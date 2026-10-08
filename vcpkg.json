@@ -25,10 +25,6 @@
       "platform": "!android"
     },
     {
-      "name": "pthreads",
-      "platform": "windows"
-    },
-    {
       "name": "ffmpeg",
       "default-features": false,
       "features": [
