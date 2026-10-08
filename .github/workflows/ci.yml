@@ -4,20 +4,26 @@ name: 构建与测试
 # 发版时的产物与 CI 上验证过的产物是同一套构建流程，不会出现
 # 「CI 绿了但发出去的包是另一套参数编的」这种事。
 on:
-  push:
-    branches: [main]
-    # 纯文档改动不影响构建产物，没必要占一轮 CI。
-    # 注意 .github/ 下的文件不在此列，改 workflow 本身仍会触发。
-    paths-ignore: &docs_only
-      - 'docs/**'
-      - '**.md'
-      - 'LICENSE'
-      - '.gitignore'
+  # 推分支不自动构建。
+  #
+  # 推送密的时候每推一次就要把整套矩阵跑一遍（依赖命中二进制缓存也要几分钟），
+  # 而多数中间提交并不需要那份产物 —— 只有少数几次推送才真的要看构建结果。
+  # 改成按需触发，两种触发途径：
+  #   * 想验证时手动跑一轮：gh workflow run ci.yml
+  #   * 发版时由 release.yml 经 workflow_call 调起来构建并打包
   pull_request:
     branches: [main]
-    paths-ignore: *docs_only
   workflow_dispatch:
   workflow_call:
+    # 发布那条路会传 false：发布要的是「构建并打包」，不是在发布时再跑一遍测试 ——
+    # 同一个提交在推分支时已经由 push 触发的那轮测过了，再测一次只是多等几分钟。
+    # 默认 true，所以 push 与 PR 都照常跑测试。
+    inputs:
+      run-tests:
+        description: 是否运行单元测试
+        required: false
+        type: boolean
+        default: true
 
 # 并发策略：不同提交的运行各跑各的，不互相取消、也不排队。
 #
@@ -147,6 +153,7 @@ jobs:
         run: cmake --build --preset linux-x64
 
       - name: 单元测试
+        if: ${{ inputs.run-tests }}
         run: ctest --preset linux-x64
 
   # =========================================================================
@@ -182,6 +189,7 @@ jobs:
         run: cmake --build --preset windows-x64
 
       - name: 单元测试
+        if: ${{ inputs.run-tests }}
         run: ctest --preset windows-x64
 
       - uses: actions/setup-dotnet@v4
@@ -366,6 +374,7 @@ jobs:
       # 只跑 arm64 这一份：runner 本身是 Apple Silicon，x86_64 的可执行文件要靠
       # Rosetta 才跑得起来，而 Rosetta 不在 runner 镜像的保障范围内。
       - name: 单元测试
+        if: ${{ inputs.run-tests }}
         run: ctest --preset macos-arm64
 
       - name: 确认核心库确实是通用二进制

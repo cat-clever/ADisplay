@@ -15,48 +15,32 @@ on:
 
 permissions:
   contents: write
-  # 取 CI 那一轮的产物要读 Actions 的运行与产物记录。不加这条，gh run download
-  # 会因为没有 actions: read 而 403。
-  actions: read
 
 jobs:
-  # 这里不再重跑构建矩阵。
+  # 发布自己构建并打包 —— 但它要的是「构建产物」，不是在发布时再跑一遍测试，
+  # 所以复用 ci.yml 的构建定义、把测试关掉（run-tests: false）。同一个提交在推
+  # 分支时，push 触发的那轮已经测过了。
   #
-  # 原来这个位置是 `uses: ./.github/workflows/ci.yml`，等于把整套构建与测试再走
-  # 一遍 —— 而同一个提交在推分支时 ci.yml 已经编过、也跑过单元测试了。重来一遍
-  # 既多花几分钟，也让发出去的二进制与 CI 里验证过的那份分属两次构建：有二进制
-  # 缓存时一般相同，但没有任何东西保证它一定相同。
-  #
-  # 改成取那一轮的产物 —— 编一次、晋升发布。代价是打 tag 前必须先让 ci.yml 跑绿，
-  # 而这本来就是应该的：找不到成功的 CI 运行就直接失败，不发没验证过的提交。
+  # 没有把构建步骤抄一份到本文件里：那等于同时维护两套打包流程，改了一处忘了
+  # 另一处只是时间问题，而这套流程里全是「漏一个文件包就坏掉」的细节。
+  build:
+    uses: ./.github/workflows/ci.yml
+    with:
+      run-tests: false
+
   publish:
-    name: 汇总 CI 产物并发布
+    name: 汇总产物并发布
+    needs: build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: 取 CI 已经构建好的产物
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-
-          RUN_ID="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml \
-                      --commit "$GITHUB_SHA" --status success --limit 1 \
-                      --json databaseId --jq '.[0].databaseId // empty')"
-          if [ -z "${RUN_ID}" ]; then
-            echo "找不到 $GITHUB_SHA 的 ci.yml 成功运行 —— 先让它跑绿再打 tag。" >&2
-            exit 1
-          fi
-          echo "取 CI 运行 ${RUN_ID} 的产物"
-
-          mkdir -p artifacts
-          # gh run download 按产物名建子目录，这里平铺成一层 —— 与原先
-          # download-artifact(merge-multiple: true) 的结果一致，后面的清点与
-          # 发布步骤因此不用改。
-          gh run download "${RUN_ID}" --repo "$GITHUB_REPOSITORY" --dir _download
-          find _download -type f -exec mv -t artifacts {} +
-          rm -rf _download
+      - name: 下载全部构建产物
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          # 把各 job 的产物平铺到一个目录，方便一次性挂上去。
+          merge-multiple: true
 
       - name: 清点产物
         run: |
