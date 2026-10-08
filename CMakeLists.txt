@@ -96,6 +96,12 @@ message(STATUS "")
 add_subdirectory(core)
 add_subdirectory(protocols)
 
+# 电视端的 JNI 薄壳。只在 Android 构建里出现 —— 桌面端三套界面各自
+# 直接链接 castcore，不需要 JNI。
+if(ANDROID)
+    add_subdirectory(app-tv/app/src/main/cpp)
+endif()
+
 if(ADISPLAY_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
