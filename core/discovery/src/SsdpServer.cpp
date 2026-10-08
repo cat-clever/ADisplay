@@ -118,12 +118,12 @@ struct SsdpServer::Impl {
     std::atomic<uint64_t> responded_count{0};
     std::chrono::steady_clock::time_point last_announce;
 
-    // 实际使用的网卡与地址，启动时确定，日志里会打出来便于排障。
-    std::string interface_name;
-    std::string interface_address;
-    // choose_interface 返回的指针指向这里，所以要保活。
-    std::vector<common::NetworkAddress> cached_interfaces;
-    std::string preferred_address;
+    // 实际用于收发广播的网卡。可能有多块 —— 详见 open_socket 里的说明。
+    struct InterfaceBinding {
+        std::string name;
+        std::string address;
+    };
+    std::vector<InterfaceBinding> interfaces_;
 
     // ---- 组播相关的 socket 设置 -------------------------------------------
 
@@ -161,52 +161,85 @@ struct SsdpServer::Impl {
             return false;
         }
 
-        // 选定要用的网卡。
+        // ---- 选定要参与广播的网卡 ----------------------------------------
         //
-        // 之前这里用 INADDR_ANY 让内核自选，多网卡机器上（VMware、WSL、
-        // VPN 都会建虚拟网卡）可能挑到虚拟网卡，广播就发到别的网段去了 ——
-        // 文档 6.3 专门提到过这个。现在显式挑一块适合广播的网卡。
-        const common::NetworkAddress* chosen = choose_interface();
-        if (chosen == nullptr) {
+        // 这里是按「所有可用网卡都发」做的，不是只挑一块。
+        //
+        // 原因：真实机器上经常同时挂着多个网段 —— 有线一个、Wi-Fi 一个，
+        // 还可能是手机热点（172.20.10.x）与网络共享（192.168.137.x）并存。
+        // 手机连的是哪个网段我们事先无从知道，只挑一块就有一半概率挑错，
+        // 表现是「手机上搜不到设备」，而且没有任何报错。
+        //
+        // 加入组播组可以对多块网卡分别做；发送时每次切换 IP_MULTICAST_IF
+        // 即可。这样不管手机在哪个网段都能收到。
+        interfaces_.clear();
+        for (const common::NetworkAddress& candidate : common::broadcastable_addresses()) {
+            if (candidate.is_ipv6) {
+                continue;   // UPnP 的组播地址是 IPv4 的
+            }
+            InterfaceBinding binding;
+            binding.name = candidate.interface_name;
+            binding.address = candidate.address;
+            interfaces_.push_back(binding);
+        }
+
+        if (interfaces_.empty()) {
             set_error(out_error,
                       "找不到可用的局域网网卡。请确认已连接 Wi-Fi 或网线。");
             close_socket(socket_handle);
             socket_handle = kInvalidSocket;
             return false;
         }
-        interface_address = chosen->address;
-        interface_name = chosen->interface_name;
-        AD_LOG_INFO("SSDP 使用网卡 {}（{}）", interface_name, interface_address);
 
-        // 加入组播组，否则收不到发往 239.255.255.250 的 M-SEARCH。
+        {
+            std::string joined;
+            for (const InterfaceBinding& binding : interfaces_) {
+                if (!joined.empty()) {
+                    joined += "，";
+                }
+                joined += binding.name + "（" + binding.address + "）";
+            }
+            AD_LOG_INFO("SSDP 将在 {} 块网卡上广播：{}",
+                        interfaces_.size(), joined);
+        }
+
+        // ---- 逐块网卡加入组播组 ------------------------------------------
         //
-        // 这一步的返回值必须检查：失败时 socket 收不到任何组播，
-        // 表现就是「手机搜不到设备」，而且不会有任何报错、日志里也看不出
-        // 异常 —— 排查时会误以为是手机或路由器的问题。
-        ip_mreq membership;
-        std::memset(&membership, 0, sizeof(membership));
-        membership.imr_multiaddr.s_addr = ::inet_addr(kMulticastAddress);
-        membership.imr_interface.s_addr = ::inet_addr(interface_address.c_str());
+        // 返回值必须检查：失败的那块网卡收不到任何组播，如果全都失败，
+        // 表现就是「手机搜不到设备」，而且不会有任何报错 ——
+        // 排查时会误以为是手机或路由器的问题。
+        std::size_t joined_count = 0;
+        std::string last_join_error;
 
-        if (!set_socket_option(IPPROTO_IP, IP_ADD_MEMBERSHIP, &membership, sizeof(membership),
-                               "IP_ADD_MEMBERSHIP", out_error)) {
+        for (const InterfaceBinding& binding : interfaces_) {
+            ip_mreq membership;
+            std::memset(&membership, 0, sizeof(membership));
+            membership.imr_multiaddr.s_addr = ::inet_addr(kMulticastAddress);
+            membership.imr_interface.s_addr = ::inet_addr(binding.address.c_str());
+
+            std::string join_error;
+            if (set_socket_option(IPPROTO_IP, IP_ADD_MEMBERSHIP,
+                                  &membership, sizeof(membership),
+                                  "IP_ADD_MEMBERSHIP", &join_error)) {
+                ++joined_count;
+            } else {
+                // 单块失败不影响其他网卡 —— 继续尝试，最后再判断。
+                last_join_error = binding.name + "：" + join_error;
+                AD_LOG_WARN("网卡 {} 加入组播组失败，跳过：{}",
+                            binding.name, join_error);
+            }
+        }
+
+        if (joined_count == 0) {
+            set_error(out_error,
+                      "所有网卡都无法加入 SSDP 组播组。" + last_join_error);
             close_socket(socket_handle);
             socket_handle = kInvalidSocket;
             return false;
         }
 
-        // 指定组播的发送接口。不设的话由内核按路由选，多网卡时同样可能选错。
-        in_addr outbound;
-        outbound.s_addr = ::inet_addr(interface_address.c_str());
-        if (!set_socket_option(IPPROTO_IP, IP_MULTICAST_IF, &outbound, sizeof(outbound),
-                               "IP_MULTICAST_IF", out_error)) {
-            close_socket(socket_handle);
-            socket_handle = kInvalidSocket;
-            return false;
-        }
-
-        // 组播回环保持开启（默认就是开的）：本机也要能看到自己发出去的包，
-        // 排障时很有用，而且不影响其他设备。
+        /* 组播回环保持默认开启：本机也要能看到自己发出去的包，
+           排障时很有用，而且不影响其他设备。 */
         unsigned char ttl = 4;
         if (!set_socket_option(IPPROTO_IP, IP_MULTICAST_TTL, &ttl, sizeof(ttl),
                                "IP_MULTICAST_TTL", out_error)) {
@@ -246,43 +279,6 @@ struct SsdpServer::Impl {
         return false;
     }
 
-    // 挑一块适合收发组播的网卡。
-    //
-    // 优先用配置里指定的地址；否则从「可广播地址」里挑第一个 IPv4 ——
-    // NetUtil::broadcastable_addresses 已经排除了回环与虚拟网卡（文档 6.3）。
-    const common::NetworkAddress* choose_interface() {
-        const std::vector<common::NetworkAddress> candidates = common::broadcastable_addresses();
-
-        if (!preferred_address.empty()) {
-            for (const common::NetworkAddress& candidate : candidates) {
-                if (candidate.address == preferred_address) {
-                    cached_interfaces = candidates;
-                    return find_cached(preferred_address);
-                }
-            }
-            AD_LOG_WARN("配置里指定的网卡地址 {} 不在可用列表中，改为自动选择",
-                        preferred_address);
-        }
-
-        cached_interfaces = candidates;
-
-        // 优先 IPv4：UPnP 的组播地址是 IPv4 的。
-        for (const common::NetworkAddress& candidate : cached_interfaces) {
-            if (!candidate.is_ipv6) {
-                return &candidate;
-            }
-        }
-        return cached_interfaces.empty() ? nullptr : &cached_interfaces.front();
-    }
-
-    const common::NetworkAddress* find_cached(const std::string& address) {
-        for (const common::NetworkAddress& candidate : cached_interfaces) {
-            if (candidate.address == address) {
-                return &candidate;
-            }
-        }
-        return nullptr;
-    }
 
     // ---- 发送 --------------------------------------------------------------
 
@@ -300,7 +296,25 @@ struct SsdpServer::Impl {
         target.sin_family = AF_INET;
         target.sin_addr.s_addr = ::inet_addr(kMulticastAddress);
         target.sin_port = htons(kPort);
-        send_to(data, target);
+
+        // 每块网卡各发一次。
+        //
+        // 一个 socket 只能设一个组播出接口，所以要发一轮、换一次接口。
+        // 不这么做的话，只有默认路由那块网卡上的设备能收到，
+        // 手机如果在另一个网段就什么都看不到。
+        for (const InterfaceBinding& binding : interfaces_) {
+            in_addr outbound;
+            outbound.s_addr = ::inet_addr(binding.address.c_str());
+
+            // 切换失败就跳过这块网卡：宁可少发一块，也不要因为一次失败
+            // 让整轮广播中断。
+            if (!set_socket_option(IPPROTO_IP, IP_MULTICAST_IF,
+                                   &outbound, sizeof(outbound),
+                                   "IP_MULTICAST_IF", nullptr)) {
+                continue;
+            }
+            send_to(data, target);
+        }
     }
 
     void announce_alive() {
