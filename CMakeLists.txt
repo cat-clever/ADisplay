@@ -1,9 +1,19 @@
 cmake_minimum_required(VERSION 3.21)
 
-# 版本号要跟着 git tag 走。发版时记得同步这几处：
-#   CMakeLists.txt（这里）、vcpkg.json、app-macos/Info.plist、
-#   app-tv/app/build.gradle.kts
-# 它们会分别出现在界面显示的版本、macOS 的「关于」、以及 Android 的应用信息里。
+# 版本号要跟着 git tag 走。发版时要同步的是这六处 —— 前五处是版本号本身，
+# 后两处是从它算出来的构建号（主*10000 + 次*100 + 修订）：
+#
+#   CMakeLists.txt（这里）                界面显示的版本
+#   vcpkg.json                            依赖清单里的项目版本
+#   app-windows/ADisplay.Windows.csproj   Windows 程序集版本
+#   app-macos/Info.plist                  CFBundleShortVersionString
+#   app-tv/app/build.gradle.kts           versionName
+#   app-macos/Info.plist                  CFBundleVersion       = 构建号
+#   app-tv/app/build.gradle.kts           versionCode           = 构建号
+#
+# CI 里有一步会逐个核对（见 .github/workflows/ci.yml 的「版本号一致性」）。
+# 后两处最容易漏：它们不是版本号，换个 5.7 出来却长得像另一个版本号，
+# 逐文件搜旧版本号时不会被注意到 —— 这个清单就是为了不再靠记性。
 project(ADisplay
     VERSION 0.5.7
     DESCRIPTION "跨平台投屏接收端：AirPlay / DLNA 接收，支持 Windows、macOS、Android TV"
