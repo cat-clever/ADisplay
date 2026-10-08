@@ -93,8 +93,15 @@ const ServiceSpec kAvTransportSpec = {
           <allowedValue>NO_MEDIA_PRESENT</allowedValue>
         </allowedValueList>
       </stateVariable>
-      <stateVariable sendEvents="no"><name>TransportStatus</name><dataType>string</dataType></stateVariable>
-      <stateVariable sendEvents="no"><name>TransportPlaySpeed</name><dataType>string</dataType></stateVariable>
+      <stateVariable sendEvents="no"><name>TransportStatus</name><dataType>string</dataType>
+        <allowedValueList>
+          <allowedValue>OK</allowedValue>
+          <allowedValue>ERROR_OCCURRED</allowedValue>
+        </allowedValueList>
+      </stateVariable>
+      <stateVariable sendEvents="no"><name>TransportPlaySpeed</name><dataType>string</dataType>
+        <allowedValueList><allowedValue>1</allowedValue></allowedValueList>
+      </stateVariable>
       <stateVariable sendEvents="no"><name>AVTransportURI</name><dataType>string</dataType></stateVariable>
       <stateVariable sendEvents="no"><name>AVTransportURIMetaData</name><dataType>string</dataType></stateVariable>
       <stateVariable sendEvents="no"><name>NextAVTransportURI</name><dataType>string</dataType></stateVariable>
@@ -109,11 +116,26 @@ const ServiceSpec kAvTransportSpec = {
       <stateVariable sendEvents="no"><name>RelativeCounterPosition</name><dataType>i4</dataType></stateVariable>
       <stateVariable sendEvents="no"><name>AbsoluteCounterPosition</name><dataType>i4</dataType></stateVariable>
       <stateVariable sendEvents="no"><name>NumberOfTracks</name><dataType>ui4</dataType></stateVariable>
-      <stateVariable sendEvents="no"><name>PlaybackStorageMedium</name><dataType>string</dataType></stateVariable>
-      <stateVariable sendEvents="no"><name>RecordStorageMedium</name><dataType>string</dataType></stateVariable>
-      <stateVariable sendEvents="no"><name>RecordMediumWriteStatus</name><dataType>string</dataType></stateVariable>
+      <stateVariable sendEvents="no"><name>PlaybackStorageMedium</name><dataType>string</dataType>
+        <allowedValueList>
+          <allowedValue>NONE</allowedValue>
+          <allowedValue>NETWORK</allowedValue>
+        </allowedValueList>
+      </stateVariable>
+      <stateVariable sendEvents="no"><name>RecordStorageMedium</name><dataType>string</dataType>
+        <allowedValueList><allowedValue>NOT_IMPLEMENTED</allowedValue></allowedValueList>
+      </stateVariable>
+      <stateVariable sendEvents="no"><name>RecordMediumWriteStatus</name><dataType>string</dataType>
+        <allowedValueList><allowedValue>NOT_IMPLEMENTED</allowedValue></allowedValueList>
+      </stateVariable>
       <stateVariable sendEvents="no"><name>A_ARG_TYPE_InstanceID</name><dataType>ui4</dataType></stateVariable>
-      <stateVariable sendEvents="no"><name>A_ARG_TYPE_SeekMode</name><dataType>string</dataType></stateVariable>
+      <stateVariable sendEvents="no"><name>A_ARG_TYPE_SeekMode</name><dataType>string</dataType>
+        <allowedValueList>
+          <allowedValue>REL_TIME</allowedValue>
+          <allowedValue>ABS_TIME</allowedValue>
+          <allowedValue>TRACK_NR</allowedValue>
+        </allowedValueList>
+      </stateVariable>
       <stateVariable sendEvents="no"><name>A_ARG_TYPE_SeekTarget</name><dataType>string</dataType></stateVariable>)",
 };
 
@@ -155,7 +177,9 @@ const ServiceSpec kRenderingControlSpec = {
       </stateVariable>
       <stateVariable sendEvents="yes"><name>Mute</name><dataType>boolean</dataType></stateVariable>
       <stateVariable sendEvents="no"><name>A_ARG_TYPE_InstanceID</name><dataType>ui4</dataType></stateVariable>
-      <stateVariable sendEvents="no"><name>A_ARG_TYPE_Channel</name><dataType>string</dataType></stateVariable>)",
+      <stateVariable sendEvents="no"><name>A_ARG_TYPE_Channel</name><dataType>string</dataType>
+        <allowedValueList><allowedValue>Master</allowedValue></allowedValueList>
+      </stateVariable>)",
 };
 
 const ServiceSpec kConnectionManagerSpec = {
@@ -189,9 +213,22 @@ const ServiceSpec kConnectionManagerSpec = {
       <stateVariable sendEvents="yes"><name>SourceProtocolInfo</name><dataType>string</dataType></stateVariable>
       <stateVariable sendEvents="yes"><name>SinkProtocolInfo</name><dataType>string</dataType></stateVariable>
       <stateVariable sendEvents="yes"><name>CurrentConnectionIDs</name><dataType>string</dataType></stateVariable>
-      <stateVariable sendEvents="no"><name>A_ARG_TYPE_ConnectionStatus</name><dataType>string</dataType></stateVariable>
+      <stateVariable sendEvents="no"><name>A_ARG_TYPE_ConnectionStatus</name><dataType>string</dataType>
+        <allowedValueList>
+          <allowedValue>OK</allowedValue>
+          <allowedValue>ContentFormatMismatch</allowedValue>
+          <allowedValue>InsufficientBandwidth</allowedValue>
+          <allowedValue>UnreliableChannel</allowedValue>
+          <allowedValue>Unknown</allowedValue>
+        </allowedValueList>
+      </stateVariable>
       <stateVariable sendEvents="no"><name>A_ARG_TYPE_ConnectionManager</name><dataType>string</dataType></stateVariable>
-      <stateVariable sendEvents="no"><name>A_ARG_TYPE_Direction</name><dataType>string</dataType></stateVariable>
+      <stateVariable sendEvents="no"><name>A_ARG_TYPE_Direction</name><dataType>string</dataType>
+        <allowedValueList>
+          <allowedValue>Input</allowedValue>
+          <allowedValue>Output</allowedValue>
+        </allowedValueList>
+      </stateVariable>
       <stateVariable sendEvents="no"><name>A_ARG_TYPE_ProtocolInfo</name><dataType>string</dataType></stateVariable>
       <stateVariable sendEvents="no"><name>A_ARG_TYPE_ConnectionID</name><dataType>i4</dataType></stateVariable>
       <stateVariable sendEvents="no"><name>A_ARG_TYPE_AVTransportID</name><dataType>i4</dataType></stateVariable>
