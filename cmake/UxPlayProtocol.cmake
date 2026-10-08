@@ -32,6 +32,12 @@ FetchContent_Declare(uxplay_protocol
     # SOURCE_SUBDIR 不存在时只下载、不 add_subdirectory，于是我们拿到源码，
     # 用自己的规则编译（见 protocols/airplay/CMakeLists.txt）。
     SOURCE_SUBDIR  adisplay-does-not-use-uxplay-root-project
+    # 上游的 lib/compat.h 会给 snprintf 定义一个 _snprintf 别名，而现代 UCRT 的
+    # <stdio.h> 只要发现 snprintf 是宏就 #error —— 没有别的办法绕开，
+    # 只能把那段去掉。理由与幂等性说明见 cmake/PatchUxPlayCompat.cmake。
+    PATCH_COMMAND  ${CMAKE_COMMAND}
+                   -DCOMPAT_FILE=<SOURCE_DIR>/lib/compat.h
+                   -P "${CMAKE_CURRENT_LIST_DIR}/PatchUxPlayCompat.cmake"
 )
 
 FetchContent_MakeAvailable(uxplay_protocol)

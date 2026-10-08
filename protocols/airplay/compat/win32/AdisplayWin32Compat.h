@@ -21,19 +21,12 @@
 #  include <BaseTsd.h>
 #  include <time.h>
 
-// UxPlay 的 compat.h 里有这么一段：
-//     #ifndef snprintf
-//     #define snprintf _snprintf
-//     #endif
-// 那是老 MSVC 还没有符合 C99 的 snprintf 的年代留下的。现代 UCRT 自带标准
-// snprintf，再定义这个别名会和标准头里的声明直接冲突（C1189），整个编译单元
-// 编译不过。
+// 这里刻意**不**给 snprintf / strdup 之类的名字做宏替换，理由见下面两处注释。
 //
-// 先占住这个名字，让它那边的 #ifndef 不成立即可。自引用宏不会递归展开，
-// 所以后面 <stdio.h> 里的声明照常有效。
-#  ifndef snprintf
-#    define snprintf snprintf
-#  endif
+// 上游的 lib/compat.h 会给 snprintf 定义一个 _snprintf 别名（老 MSVC 还没有符合
+// C99 的 snprintf 的年代留下的），而现代 UCRT 的 <stdio.h> 有一条硬性检查：
+// 只要 snprintf 是宏就 #error。所以那一段是由 cmake/PatchUxPlayCompat.cmake
+// 从上游源码里去掉的 —— 在这里补一个宏只会把同一个错误再引回来。
 
 // UxPlay 用 ssize_t 接 recv 系列的返回值。MSVC 的对应类型叫 SSIZE_T。
 #  ifndef _ADISPLAY_SSIZE_T_DEFINED
@@ -41,10 +34,10 @@
 typedef SSIZE_T ssize_t;
 #  endif
 
-// MSVC 把 strdup 归在「POSIX 已废弃」名下，改叫 _strdup。
-#  ifndef strdup
-#    define strdup _strdup
-#  endif
+// strdup 不必替换：UCRT 的 <string.h> 本身就声明了它（归在「POSIX 旧名」那一组
+// 里，带一条弃用警告，不阻断编译）。反而定义成 _strdup 的宏会把 string.h 里的
+// 声明一起改写掉，引出真正的重定义冲突。用到它的两个文件都包含 string.h
+// （raop_handlers.h 不包含，但只有 raop.c 引它，而 raop.c 在最上面就包含了）。
 
 // 时钟。
 //
@@ -66,8 +59,8 @@ typedef int adisplay_clockid_t;
 
 // 微秒级睡眠。
 //
-// 同样换成自己的名字：pthreads4w 自带一份 unistd.h，某些版本里就有 usleep，
-// 直接定义同名符号可能在链接期撞车。
+// 同样换成自己的名字而不是直接定义 usleep 符号：万一将来换回某个自带
+// unistd.h 的线程库（它的某些版本里就有 usleep），直接定义同名符号会撞车。
 void adisplay_usleep(unsigned int microseconds);
 #  ifndef usleep
 #    define usleep adisplay_usleep
