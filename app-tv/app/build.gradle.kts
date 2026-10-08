@@ -99,4 +99,17 @@ dependencies {
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-tooling-preview")
     debugImplementation("androidx.compose.ui:ui-tooling")
+
+    // 播放器（文档 3.2）：DLNA / AirPlay 视频推送过来的是一条 URL
+    // （见 include/adisplay/adisplay.h 的 on_media_url），拉流、解复用、硬解、
+    // 音画同步这一整套交给 Media3，比自己在 JNI 旁边再写一个播放器靠谱得多，
+    // 电视盒子上支持的格式也最全。
+    //
+    // 1.4.1 是 compileSdk 34 还能编的最后一档：1.5.0 起 AAR 元数据里写了
+    // minCompileSdk 35，配这里的 compileSdk 34 会在 checkDebugAarMetadata
+    // 阶段直接失败。将来升 compileSdk 到 35 时这两个版本号可以一起往上走。
+    //
+    // 纯 Java/Kotlin，不带 .so，所以上面 ndk.abiFilters 那条不用动。
+    implementation("androidx.media3:media3-exoplayer:1.4.1")
+    implementation("androidx.media3:media3-ui:1.4.1")
 }

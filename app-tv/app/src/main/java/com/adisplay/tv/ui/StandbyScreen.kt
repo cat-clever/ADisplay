@@ -25,6 +25,34 @@ import androidx.tv.material3.Text
 import com.adisplay.tv.EngineModel
 
 /**
+ * 界面入口：按「有没有媒体在播」在待机页与播放页之间切。
+ *
+ * 不另开 Activity —— 文档 2.3 要求投屏开始时自动全屏并置于最上层、结束后回到
+ * 待机页，同一个 Activity 里换内容比走 Intent 更直接，也少一层「切回来时
+ * 还剩下多少状态」的麻烦。切换的唯一依据是 model.playingMedia：核心说会话
+ * 开着就有媒体在播，说关了就没有，界面不自己猜。
+ */
+@Composable
+fun StandbyScreen(model: EngineModel) {
+    val media = model.playingMedia
+    if (media != null) {
+        PlaybackScreen(
+            model = model,
+            sessionId = media.sessionId,
+            url = media.url,
+            // 「停止接收投屏」停的是整个接收服务：JNI 面上没有「只关掉某一个
+            // 会话」的接口（见 AdDisplayNative），停服务会让核心把会话关掉、
+            // 状态回到待机页 —— 这条路走完界面和核心是一致的，不会留下一个
+            // 核心还当活着、界面已经不管了的会话。用户想再投一次，按一下
+            // 「开启接收服务」重新进入广播即可。
+            onExit = { model.stopService() },
+        )
+    } else {
+        StandbyContent(model)
+    }
+}
+
+/**
  * 待机页。
  *
  * 文档 2.3 的电视端要求：
@@ -39,7 +67,7 @@ import com.adisplay.tv.EngineModel
  * 走到哪一步、SSDP 有没有收到搜索、端口有没有被占用，全凭它显示。
  */
 @Composable
-fun StandbyScreen(model: EngineModel) {
+private fun StandbyContent(model: EngineModel) {
 
     val configuration = LocalConfiguration.current
     val layout = resolveStandbyLayout(configuration.screenWidthDp)

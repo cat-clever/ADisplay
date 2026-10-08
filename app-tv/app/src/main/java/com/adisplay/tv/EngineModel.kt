@@ -6,6 +6,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -13,6 +14,9 @@ import androidx.compose.runtime.setValue
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.receiveAsFlow
 
 /*
  * 以下三个枚举的数值必须与 include/adisplay/adisplay.h 严格对应 ——
@@ -85,6 +89,71 @@ enum class AdResult(val code: Int, val description: String) {
 }
 
 /**
+ * 与 adisplay.h 的 AdTransportState 一一对应。
+ *
+ * 数值必须与 UPnP AVTransport 的 TransportState 一致 —— 手机端拿它决定
+ * 显示播放还是暂停按钮，对不上就会出现「电视在放、手机显示暂停」。
+ * 不带 label：核心那边另有 serviceState / statusText 管界面文字，这份
+ * 状态只用来回报，多一份显示文案就多一处会跟手机端对不上的地方。
+ */
+enum class AdTransportState(val code: Int) {
+    NO_MEDIA_PRESENT(0),
+    STOPPED(1),
+    PLAYING(2),
+    PAUSED(3),
+    TRANSITIONING(4),
+}
+
+/** 与 adisplay.h 的 AdPlaybackCommand 一一对应。value 的含义见各自注释。 */
+enum class AdPlaybackCommand(val code: Int) {
+    PLAY(0),
+    PAUSE(1),
+
+    /** 停止播放，不是结束投屏：媒体还挂着，手机随后可以再发 Play。 */
+    STOP(2),
+
+    /** value 是目标位置（毫秒）。 */
+    SEEK(3),
+
+    /** value 是 0..100。 */
+    SET_VOLUME(4),
+
+    /** value 是 0 或 1。 */
+    SET_MUTE(5);
+
+    companion object {
+        /**
+         * 查不到时返回 null 而不是给个默认值：核心将来加了新命令，这边应该
+         * 原样丢掉，而不是拿一个猜出来的命令去动播放器。
+         */
+        fun of(code: Int): AdPlaybackCommand? {
+            for (command in AdPlaybackCommand.entries) {
+                if (command.code == code) return command
+            }
+            return null
+        }
+    }
+}
+
+/**
+ * 当前正在播的媒体。
+ *
+ * 界面靠它是不是 null 决定显示待机页还是播放页；两个字段都是播放页必需的：
+ * sessionId 用来回报状态（核心按它找会话），url 是拉流地址。
+ */
+@Immutable
+data class PlayingMedia(val sessionId: Int, val url: String)
+
+/**
+ * 一条待执行的播放控制意图。
+ *
+ * 带上 sessionId：命令是核心在会话上转过来的，页面上那个播放器只认自己的
+ * 会话 —— 会话已经换了之后迟到的命令落到新播放器上，会让新视频莫名其妙
+ * 地跳一下进度。
+ */
+data class PlaybackIntent(val sessionId: Int, val command: AdPlaybackCommand, val value: Long)
+
+/**
  * 待机页背后的接收服务。
  *
  * 只做三件事，一行业务判断都没有（协议、会话、播放状态全在核心库里，
@@ -149,6 +218,28 @@ class EngineModel(context: Context) {
     var localAddresses by mutableStateOf("")
         private set
 
+    /**
+     * 当前正在播的媒体，null 表示没有投屏。
+     *
+     * 界面（StandbyScreen 那一层）只按它切页面，不再自己判断服务状态 ——
+     * 两处判就会有两套「什么时候算在投屏」的定义，早晚对不上。
+     */
+    var playingMedia by mutableStateOf<PlayingMedia?>(null)
+        private set
+
+    /**
+     * 播放控制意图的通道，由播放页消费。
+     *
+     * 用带缓冲的 Channel 而不是一个 Compose 状态：命令是有先后的，摊成状态
+     * 就只剩最后一条（先 Stop 再 Play 和反过来结果完全不同）。缓冲还兜住了
+     * 切页面的那几帧 —— 媒体地址刚回调进来时播放页还没组合出来，这期间到的
+     * 命令不该丢。容量给无限：这些命令最多一次一条地进来，攒不出内存问题。
+     */
+    private val intentChannel = Channel<PlaybackIntent>(Channel.UNLIMITED)
+
+    /** 给播放页的意图流。只有播放页一个消费者。 */
+    val playbackIntents: Flow<PlaybackIntent> = intentChannel.receiveAsFlow()
+
     /** 核心库能不能用。装错 ABI 时为 false，界面据此禁用按钮。 */
     val isNativeAvailable: Boolean
         get() = AdDisplayNative.isAvailable
@@ -161,6 +252,14 @@ class EngineModel(context: Context) {
 
     /** 服务运行期间持有的组播锁，没拿到时为 null。 */
     private var multicastLock: WifiManager.MulticastLock? = null
+
+    /**
+     * 上一次回报播放状态失败的错误码，0（AD_OK）表示上次是成功的。
+     *
+     * 回报是每秒一次的，失败也会每秒重复一次。只记错误码变化的那一次，
+     * 否则日志区一秒一行「回报失败」，真正要看的东西立刻被冲走。
+     */
+    private var lastReportError = 0
 
     /**
      * 创建引擎并注册回调。由 Activity 的 onStart 调用。
@@ -246,6 +345,43 @@ class EngineModel(context: Context) {
         if (serviceEnabled) stopService() else startService()
     }
 
+    /**
+     * 把播放页的状态回报给核心。手机端的进度条、音量滑块和播放/暂停按钮
+     * 全部以这份回报为准（核心不自己解码，它只能听界面说）。
+     *
+     * 未知值一律传 -1：positionMs / durationMs 未知是 -1，volume / muted 的 -1
+     * 表示「这项没变」。注意 0 是合法值（音量 0、未静音），不能拿它当「不变」，
+     * 传 0 会把手机上真实的音量冲掉。
+     *
+     * 每秒都会调一次，所以这里不做任何日志格式化的开销以外的事。
+     *
+     * 只从主线程调用（失败时会写日志区，日志区不是线程安全的）。播放页的
+     * 协程本来就跑在主线程上，不需要再 post 一次。
+     */
+    fun reportPlayback(
+        sessionId: Int,
+        transport: AdTransportState,
+        positionMs: Long,
+        durationMs: Long,
+        volume: Int,
+        muted: Int,
+    ) {
+        val handle = engine
+        if (handle == 0L) return
+
+        val result = AdDisplayNative.nativeReportPlayback(
+            handle, sessionId, transport.code, positionMs, durationMs, volume, muted
+        )
+        if (result == AdResult.OK.code) {
+            lastReportError = 0
+            return
+        }
+        if (result != lastReportError) {
+            lastReportError = result
+            appendLog(LogLevel.WARN, "回报播放状态失败：" + AdResult.describe(result))
+        }
+    }
+
     /** 销毁引擎。由 Activity 的 onDestroy 调用。 */
     fun release() {
         stopService()
@@ -318,22 +454,43 @@ class EngineModel(context: Context) {
         }
 
         override fun onMediaUrl(sessionId: Int, url: String) {
-            // 播放器还没接（下一批），但地址先记出来 —— 否则用户看到的是
-            // 「状态跳到投屏中却什么都没发生」，不知道核心到底收没收到。
-            post { appendLog(LogLevel.INFO, "收到媒体地址（会话 " + sessionId + "）：" + url) }
+            post {
+                // 置上 playingMedia 就等于把界面切到播放页，地址先记出来 ——
+                // 否则用户看到的是「状态跳到投屏中却什么都没发生」。
+                playingMedia = PlayingMedia(sessionId, url)
+                appendLog(LogLevel.INFO, "收到媒体地址（会话 " + sessionId + "）：" + url)
+            }
         }
 
         override fun onPlaybackCommand(sessionId: Int, command: Int, value: Long) {
+            val parsed = AdPlaybackCommand.of(command)
             post {
+                if (parsed == null) {
+                    // 核心加了新命令而这边还没跟上，宁可不动播放器也不要猜。
+                    appendLog(LogLevel.WARN, "手机发来未知的播放命令 " + command + "，已忽略")
+                    return@post
+                }
                 appendLog(
                     LogLevel.DEBUG,
                     "手机发来播放命令 " + command + "，值 " + value + "（会话 " + sessionId + "）"
                 )
+                // 用 trySend 而不是挂起的 send：回调线程不能在这里停住，
+                // 缓冲又是无限的，不可能会失败。
+                intentChannel.trySend(PlaybackIntent(sessionId, parsed, value))
             }
         }
 
         override fun onSessionClosed(sessionId: Int, reason: Int) {
-            post { appendLog(LogLevel.INFO, "会话 " + sessionId + " 已关闭，原因 " + reason) }
+            post {
+                appendLog(LogLevel.INFO, "会话 " + sessionId + " 已关闭，原因 " + reason)
+                // 只清被关掉的那个会话。核心在多设备抢占时会先关旧会话，
+                // 不加比对的话会把刚接管上来的新会话一起抹掉，界面就退回待机页、
+                // 把正在放的视频掐了。
+                val current = playingMedia
+                if (current != null && current.sessionId == sessionId) {
+                    playingMedia = null
+                }
+            }
         }
     }
 
@@ -349,6 +506,13 @@ class EngineModel(context: Context) {
         val state = ServiceState.of(code)
         serviceState = state
         statusText = state.label
+
+        // 服务都停了就不可能有媒体在播。这条兜住 onSessionClosed 没到的情况
+        // （核心在停服务时不一定逐个会话回调），否则用户按了「停止接收投屏」
+        // 会卡在播放页上出不来。
+        if (state == ServiceState.STOPPED || state == ServiceState.ERROR) {
+            playingMedia = null
+        }
 
         val handle = engine
         if (handle != 0L) {
