@@ -19,6 +19,8 @@ add_library(adisplay_discovery STATIC
     src/DiscoveryService.cpp
     # SSDP 没有可用的系统服务，是自己实现的一份，一份代码跨平台。
     src/SsdpServer.cpp
+    # SSDP 的报文构建与解析。单独成文件是为了能被单元测试直接覆盖。
+    src/SsdpMessage.cpp
     # mDNS 走各平台系统实现，源文件按平台挑。
     ${ADISPLAY_MDNS_SOURCE}
 )

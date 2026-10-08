@@ -8,6 +8,7 @@ set(ADISPLAY_TEST_SOURCES
     test_byte_order.cpp
     test_device_name.cpp
     test_device_identity.cpp
+    test_ssdp_message.cpp
 )
 
 foreach(test_source IN LISTS ADISPLAY_TEST_SOURCES)
@@ -15,6 +16,14 @@ foreach(test_source IN LISTS ADISPLAY_TEST_SOURCES)
 
     add_executable(${test_name} ${test_source})
     target_link_libraries(${test_name} PRIVATE adisplay_common)
+
+    # SSDP 报文的测试要直接触达 core/discovery/src 下的内部头（SsdpMessage.h）——
+    # 那些纯函数刻意没有放进公开 API，但正是最该被测试覆盖的部分。
+    if(test_name STREQUAL "test_ssdp_message")
+        target_link_libraries(${test_name} PRIVATE adisplay_discovery)
+        target_include_directories(${test_name} PRIVATE
+            "${CMAKE_SOURCE_DIR}/core/discovery/src")
+    endif()
     target_include_directories(${test_name} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
     target_link_libraries(${test_name} PRIVATE adisplay_warnings)
 

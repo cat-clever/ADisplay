@@ -35,9 +35,9 @@
 namespace adisplay::discovery {
 namespace {
 
-// SSDP 的固定组播地址与端口。
-constexpr const char* kSsdpMulticastAddress = "239.255.255.250";
-constexpr uint16_t kSsdpPort = 1900;
+// 报文的构建与解析都在 SsdpMessage.h/.cpp 里 —— 那些是纯函数，
+// 单独放是为了能被单元测试直接覆盖。这里只留收发与线程。
+using namespace ssdp;
 
 // 收到 M-SEARCH 后最多等这么久再回复。UPnP 规范建议在 0..MX 秒内随机延迟，
 // 避免局域网内所有设备同时响应造成拥塞。局域网里设备很少，
@@ -100,145 +100,6 @@ private:
 #endif
 };
 
-std::string to_lower(std::string text) {
-    std::transform(text.begin(), text.end(), text.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    return text;
-}
-
-std::string trim(const std::string& text) {
-    const std::size_t begin = text.find_first_not_of(" \t\r\n");
-    if (begin == std::string::npos) {
-        return std::string();
-    }
-    const std::size_t end = text.find_last_not_of(" \t\r\n");
-    return text.substr(begin, end - begin + 1);
-}
-
-// 从 HTTP 风格的报文里取某个头。SSDP 的头名大小写不敏感。
-std::string header_value(const std::string& message, const std::string& name) {
-    const std::string lower_name = to_lower(name);
-    std::istringstream stream(message);
-    std::string line;
-    bool first_line = true;
-    while (std::getline(stream, line)) {
-        if (!line.empty() && line.back() == '\r') {
-            line.pop_back();
-        }
-        if (first_line) {
-            first_line = false;
-            continue;   // 跳过请求行 / 状态行
-        }
-        const std::size_t colon = line.find(':');
-        if (colon == std::string::npos) {
-            continue;
-        }
-        if (to_lower(line.substr(0, colon)) == lower_name) {
-            return trim(line.substr(colon + 1));
-        }
-    }
-    return std::string();
-}
-
-// RFC 1123 格式的日期，SSDP 的 DATE 头要求这个格式。
-std::string http_date() {
-    const std::time_t now = std::time(nullptr);
-    std::tm utc{};
-#if defined(_WIN32)
-    ::gmtime_s(&utc, &now);
-#else
-    ::gmtime_r(&now, &utc);
-#endif
-    char buffer[64] = {0};
-    std::strftime(buffer, sizeof(buffer), "%a, %d %b %Y %H:%M:%S GMT", &utc);
-    return std::string(buffer);
-}
-
-// 一条通告对应一个 (NT, USN) 组合。rootdevice、uuid、devicetype
-// 以及每个 service type 都要各发一条。
-struct NotificationTarget {
-    std::string nt;
-    std::string usn;
-};
-
-std::vector<NotificationTarget> build_targets(const SsdpAdvertisement& ad) {
-    std::vector<NotificationTarget> targets;
-
-    const auto append = [&targets, &ad](const std::string& nt) {
-        targets.push_back(NotificationTarget{nt, ad.udn + "::" + nt});
-    };
-
-    append("upnp:rootdevice");
-    append(ad.udn);
-    append(ad.device_type);
-    for (const std::string& service : ad.service_types) {
-        append(service);
-    }
-    return targets;
-}
-
-std::string build_alive_message(const SsdpAdvertisement& ad, const NotificationTarget& target) {
-    std::ostringstream out;
-    out << "NOTIFY * HTTP/1.1\r\n"
-        << "HOST: " << kSsdpMulticastAddress << ":" << kSsdpPort << "\r\n"
-        << "CACHE-CONTROL: max-age=" << ad.max_age_seconds << "\r\n"
-        << "LOCATION: " << ad.location << "\r\n"
-        << "NT: " << target.nt << "\r\n"
-        << "NTS: ssdp:alive\r\n"
-        << "SERVER: " << ad.server_header << "\r\n"
-        << "USN: " << target.usn << "\r\n"
-        << "\r\n";
-    return out.str();
-}
-
-// byebye 不带 LOCATION 与 CACHE-CONTROL —— 规范里这个报文只用于注销。
-std::string build_byebye_message(const SsdpAdvertisement& ad, const NotificationTarget& target) {
-    std::ostringstream out;
-    out << "NOTIFY * HTTP/1.1\r\n"
-        << "HOST: " << kSsdpMulticastAddress << ":" << kSsdpPort << "\r\n"
-        << "NT: " << target.nt << "\r\n"
-        << "NTS: ssdp:byebye\r\n"
-        << "USN: " << target.usn << "\r\n"
-        << "\r\n";
-    return out.str();
-}
-
-// 回复 M-SEARCH。必须单播回请求方 —— 用组播回复会让局域网里每台设备
-// 都收到一堆不属于自己的响应，部分手机端会因此显示重复设备。
-std::string build_search_response(const SsdpAdvertisement& ad, const std::string& st) {
-    std::ostringstream out;
-    out << "HTTP/1.1 200 OK\r\n"
-        << "CACHE-CONTROL: max-age=" << ad.max_age_seconds << "\r\n"
-        << "DATE: " << http_date() << "\r\n"
-        // EXT 头是规范要求的，值必须为空。
-        << "EXT:\r\n"
-        << "LOCATION: " << ad.location << "\r\n"
-        << "SERVER: " << ad.server_header << "\r\n"
-        << "ST: " << st << "\r\n"
-        << "USN: " << ad.udn << "::" << st << "\r\n"
-        << "\r\n";
-    return out.str();
-}
-
-// 判断查询的 ST 是否指向我们。ssdp:all 表示「把所有设备都报一遍」。
-bool matches_search_target(const SsdpAdvertisement& ad, const std::string& st) {
-    if (st.empty()) {
-        return false;
-    }
-    if (st == "ssdp:all") {
-        return true;
-    }
-    if (st == "upnp:rootdevice" || st == ad.udn || st == ad.device_type) {
-        return true;
-    }
-    for (const std::string& service : ad.service_types) {
-        if (st == service) {
-            return true;
-        }
-    }
-    return false;
-}
-
 }  // namespace
 
 // ===========================================================================
@@ -293,7 +154,7 @@ struct SsdpServer::Impl {
         // 加入组播组，否则收不到发往 239.255.255.250 的 M-SEARCH。
         ip_mreq membership;
         std::memset(&membership, 0, sizeof(membership));
-        membership.imr_multiaddr.s_addr = ::inet_addr(kSsdpMulticastAddress);
+        membership.imr_multiaddr.s_addr = ::inet_addr(kMulticastAddress);
         membership.imr_interface.s_addr = htonl(INADDR_ANY);
 
 #if defined(_WIN32)
@@ -332,8 +193,8 @@ struct SsdpServer::Impl {
         sockaddr_in target;
         std::memset(&target, 0, sizeof(target));
         target.sin_family = AF_INET;
-        target.sin_addr.s_addr = ::inet_addr(kSsdpMulticastAddress);
-        target.sin_port = htons(kSsdpPort);
+        target.sin_addr.s_addr = ::inet_addr(kMulticastAddress);
+        target.sin_port = htons(kPort);
         send_to(data, target);
     }
 
@@ -372,7 +233,7 @@ struct SsdpServer::Impl {
         const std::string message(data, static_cast<std::size_t>(length));
 
         // 只处理 M-SEARCH。NOTIFY 是别的设备在宣告，接收端不需要理会。
-        if (message.compare(0, 8, "M-SEARCH") != 0) {
+        if (!is_search_request(message)) {
             return;
         }
 
