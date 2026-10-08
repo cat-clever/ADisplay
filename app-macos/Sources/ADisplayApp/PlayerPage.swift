@@ -171,8 +171,10 @@ final class PlayerViewModel: ObservableObject {
         case .setMute:
             player.isMuted = (value != 0)
         case .stop:
-            // 「停止」由 EngineModel 处理：它会直接结束这次投屏，本页随之消失。
-            break
+            // DLNA 的 Stop 是「停止播放」而不是「结束投屏」：媒体还挂着，
+            // 手机随后可以再 Play。所以回到起点并暂停，不销毁会话。
+            player.pause()
+            player.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero)
         }
 
         // 控制条上的状态要立刻反映出来，不能等下一拍上报。

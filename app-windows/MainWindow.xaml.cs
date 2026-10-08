@@ -11,6 +11,8 @@ using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Windows.ApplicationModel.DataTransfer;
+using Windows.Media.Core;
+using Windows.Media.Playback;
 using ADisplay.Windows.Interop;
 
 namespace ADisplay.Windows;
@@ -22,6 +24,12 @@ public sealed partial class MainWindow : Window
 
     private readonly AdEngine _engine = new();
     private readonly DispatcherQueue _dispatcher;
+
+    // 当前投屏会话。0 表示没有在投屏。
+    private uint _castSessionId;
+    // 每秒把播放器状态回报给核心。手机每隔一段时间会拉 GetPositionInfo，
+    // 位置必须持续更新，否则手机上的进度条一直停在起点。
+    private DispatcherTimer? _reportTimer;
     private readonly ObservableCollection<string> _logLines = new();
 
     // 程序化改动 ToggleSwitch.IsOn 时会再次触发 Toggled，
@@ -37,6 +45,9 @@ public sealed partial class MainWindow : Window
 
         _engine.StateChanged += OnEngineStateChanged;
         _engine.LogEmitted += OnEngineLogEmitted;
+        _engine.MediaUrlReceived += OnMediaUrlReceived;
+        _engine.PlaybackCommandReceived += OnPlaybackCommandReceived;
+        _engine.CastingEnded += OnCastingEnded;
 
         Closed += OnWindowClosed;
 
@@ -167,6 +178,155 @@ public sealed partial class MainWindow : Window
     //
     // 回调在核心的工作线程上触发，必须切回 UI 线程再碰控件。
     // ---------------------------------------------------------------------
+
+    // ---------------------------------------------------------------------
+    // 投屏播放（文档 3.2、4.1）
+    //
+    // 核心不播放：DLNA 给的是一条 URL，解码渲染交给系统播放器 ——
+    // MediaPlayerElement 背后是 Media Foundation，硬解与音画同步都是现成的。
+    // 这一层只做三件事：起播、执行手机发来的控制意图、把真实状态回报给核心。
+    //
+    // 第三条是必须的，不是可选优化：核心不碰播放器，手机的 GetTransportInfo /
+    // GetPositionInfo / GetVolume 全靠这份回报作答。
+    // ---------------------------------------------------------------------
+
+    private void OnMediaUrlReceived(uint sessionId, string url)
+    {
+        // 回调在核心的工作线程上触发，控件只能在 UI 线程碰。
+        _dispatcher.TryEnqueue(() => BeginCasting(sessionId, url));
+    }
+
+    private void OnPlaybackCommandReceived(int command, long value)
+    {
+        _dispatcher.TryEnqueue(() => ApplyPlaybackCommand(command, value));
+    }
+
+    private void OnCastingEnded()
+    {
+        _dispatcher.TryEnqueue(EndCasting);
+    }
+
+    private void BeginCasting(uint sessionId, string url)
+    {
+        if (!Uri.TryCreate(url, UriKind.Absolute, out Uri? uri))
+        {
+            AppendLog(AdLogLevel.Error, $"投屏地址无法解析，播放器起不来：{url}");
+            return;
+        }
+
+        _castSessionId = sessionId;
+        AppendLog(AdLogLevel.Info, $"开始拉流：{url}");
+
+        SettingsPanel.Visibility = Visibility.Collapsed;
+        CastingPanel.Visibility = Visibility.Visible;
+        CastingTitleText.Text = "正在接收投屏";
+
+        PlayerElement.Source = MediaSource.CreateFromUri(uri);
+        PlayerElement.MediaPlayer.Volume = 1.0;
+        PlayerElement.MediaPlayer.Play();
+
+        _reportTimer ??= new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+        _reportTimer.Tick -= OnReportTick;
+        _reportTimer.Tick += OnReportTick;
+        _reportTimer.Start();
+
+        ReportPlayback();
+    }
+
+    private void EndCasting()
+    {
+        _reportTimer?.Stop();
+        _castSessionId = 0;
+
+        PlayerElement.Source = null;
+        CastingPanel.Visibility = Visibility.Collapsed;
+        SettingsPanel.Visibility = Visibility.Visible;
+    }
+
+    private void OnStopCastingClick(object sender, RoutedEventArgs e)
+    {
+        // 只结束本地播放：核心那边下次收到推送会重新开会话。
+        EndCasting();
+    }
+
+    private void OnReportTick(object? sender, object e)
+    {
+        ReportPlayback();
+    }
+
+    private void ApplyPlaybackCommand(int command, long value)
+    {
+        MediaPlayer? player = PlayerElement.MediaPlayer;
+        if (player == null)
+        {
+            return;
+        }
+
+        switch ((AdPlaybackCommand)command)
+        {
+            case AdPlaybackCommand.Play:
+                player.Play();
+                break;
+            case AdPlaybackCommand.Pause:
+                player.Pause();
+                break;
+            case AdPlaybackCommand.Seek:
+                player.PlaybackSession.Position = TimeSpan.FromMilliseconds(value);
+                break;
+            case AdPlaybackCommand.SetVolume:
+                player.Volume = Math.Clamp(value, 0, 100) / 100.0;
+                break;
+            case AdPlaybackCommand.SetMute:
+                player.IsMuted = value != 0;
+                break;
+            case AdPlaybackCommand.Stop:
+                // DLNA 的 Stop 是「停止播放」而不是「结束投屏」：媒体还挂着，
+                // 手机随后可以再 Play。所以回到起点并暂停，不销毁会话。
+                player.Pause();
+                player.PlaybackSession.Position = TimeSpan.Zero;
+                break;
+        }
+
+        // 控制结果立刻回报，不等下一拍。
+        ReportPlayback();
+    }
+
+    private void ReportPlayback()
+    {
+        MediaPlayer? player = PlayerElement.MediaPlayer;
+        if (_castSessionId == 0 || player == null)
+        {
+            return;
+        }
+
+        MediaPlaybackSession session = player.PlaybackSession;
+
+        int transport = session.PlaybackState switch
+        {
+            MediaPlaybackState.Playing => (int)AdTransportState.Playing,
+            MediaPlaybackState.Paused => (int)AdTransportState.Paused,
+            MediaPlaybackState.Opening => (int)AdTransportState.Transitioning,
+            MediaPlaybackState.Buffering => (int)AdTransportState.Transitioning,
+            _ => (int)AdTransportState.Stopped,
+        };
+
+        // 直播流的 NaturalDuration 是 0 或者无穷，这种按「未知」(-1) 上报，
+        // 否则手机上会出现一条荒谬的进度条。
+        long durationMs = -1;
+        if (session.NaturalDuration > TimeSpan.Zero &&
+            !double.IsInfinity(session.NaturalDuration.TotalMilliseconds))
+        {
+            durationMs = (long)session.NaturalDuration.TotalMilliseconds;
+        }
+
+        _engine.ReportPlayback(
+            _castSessionId,
+            transport,
+            (long)session.Position.TotalMilliseconds,
+            durationMs,
+            (int)Math.Round(player.Volume * 100),
+            player.IsMuted ? 1 : 0);
+    }
 
     private void OnEngineStateChanged(AdServiceState state)
     {

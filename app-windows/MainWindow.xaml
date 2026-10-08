@@ -13,7 +13,36 @@
         窗口缩小时先压日志区，而不是把某一块挤出可视区域 —— 后者会让
         用户看不到控件却也不知道为什么。
     -->
-    <Grid Padding="28" RowSpacing="20" MinWidth="480" MinHeight="480">
+    <Grid>
+
+        <!--
+            投屏页。手机推来地址时显示，把整个窗口让给画面；停止后回到设置页。
+            与 macOS 端同一套行为。
+        -->
+        <Grid x:Name="CastingPanel" Visibility="Collapsed" Padding="16" RowSpacing="12">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="*" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+
+            <!-- 背后的 Media Foundation 负责拉流、硬解与音画同步，
+                 传输控制条（播放/暂停、进度、音量、全屏）都是现成的。 -->
+            <MediaPlayerElement x:Name="PlayerElement"
+                                Grid.Row="0"
+                                AreTransportControlsEnabled="True"
+                                Stretch="Uniform" />
+
+            <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="12">
+                <TextBlock x:Name="CastingTitleText"
+                           VerticalAlignment="Center"
+                           Style="{StaticResource BodyStrongTextBlockStyle}" />
+                <Button x:Name="StopCastingButton"
+                        Content="停止接收"
+                        Click="OnStopCastingClick" />
+            </StackPanel>
+        </Grid>
+
+        <Grid x:Name="SettingsPanel" Padding="28" RowSpacing="20" MinWidth="480" MinHeight="480">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
@@ -115,6 +144,7 @@
                     </ItemsControl>
                 </ScrollViewer>
             </Border>
+        </Grid>
         </Grid>
     </Grid>
 </Window>

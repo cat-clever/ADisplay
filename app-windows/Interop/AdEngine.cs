@@ -26,15 +26,36 @@ internal sealed class AdEngine : IDisposable
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate void LogCallback(IntPtr userData, int level, IntPtr message);
 
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void MediaUrlCallback(IntPtr userData, uint sessionId, IntPtr url, IntPtr mimeType);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void PlaybackCommandCallback(IntPtr userData, uint sessionId, int command, long value);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void SessionClosedCallback(IntPtr userData, uint sessionId, int reason);
+
     private IntPtr _handle = IntPtr.Zero;
     private bool _disposed;
 
     // 这些字段的唯一作用是让委托活到引擎销毁为止，不要删。
     private StateChangedCallback? _stateChangedCallback;
     private LogCallback? _logCallback;
+    private MediaUrlCallback? _mediaUrlCallback;
+    private PlaybackCommandCallback? _playbackCommandCallback;
+    private SessionClosedCallback? _sessionClosedCallback;
 
     public event Action<AdServiceState>? StateChanged;
     public event Action<AdLogLevel, string>? LogEmitted;
+
+    /// <summary>手机推来了一个媒体地址。界面层据此起播 —— 核心不播放。</summary>
+    public event Action<uint, string>? MediaUrlReceived;
+
+    /// <summary>手机发来的播放控制意图。command 见 AdPlaybackCommand。</summary>
+    public event Action<int, long>? PlaybackCommandReceived;
+
+    /// <summary>这次投屏结束了（手机推来新地址把旧会话抢占，或接收服务停止）。</summary>
+    public event Action? CastingEnded;
 
     public bool IsRunning
     {
@@ -84,12 +105,18 @@ internal sealed class AdEngine : IDisposable
     {
         _stateChangedCallback = OnStateChangedFromCore;
         _logCallback = OnLogFromCore;
+        _mediaUrlCallback = OnMediaUrlFromCore;
+        _playbackCommandCallback = OnPlaybackCommandFromCore;
+        _sessionClosedCallback = OnSessionClosedFromCore;
 
         AdCallbacks callbacks = default;
         callbacks.StructSize = (uint)Marshal.SizeOf<AdCallbacks>();
         callbacks.Reserved = 0;
         callbacks.OnStateChanged = Marshal.GetFunctionPointerForDelegate(_stateChangedCallback);
         callbacks.OnLog = Marshal.GetFunctionPointerForDelegate(_logCallback);
+        callbacks.OnMediaUrl = Marshal.GetFunctionPointerForDelegate(_mediaUrlCallback);
+        callbacks.OnPlaybackCommand = Marshal.GetFunctionPointerForDelegate(_playbackCommandCallback);
+        callbacks.OnSessionClosed = Marshal.GetFunctionPointerForDelegate(_sessionClosedCallback);
 
         AdResult result = AdNative.ad_engine_set_callbacks(_handle, ref callbacks, IntPtr.Zero);
         ThrowIfFailed(result, "注册回调");
@@ -115,6 +142,62 @@ internal sealed class AdEngine : IDisposable
         {
             handler((AdLogLevel)level, text);
         }
+    }
+
+    private void OnMediaUrlFromCore(IntPtr userData, uint sessionId, IntPtr url, IntPtr mimeType)
+    {
+        string text = Marshal.PtrToStringUTF8(url) ?? string.Empty;
+        Action<uint, string>? handler = MediaUrlReceived;
+        if (handler != null)
+        {
+            handler(sessionId, text);
+        }
+    }
+
+    private void OnPlaybackCommandFromCore(IntPtr userData, uint sessionId, int command, long value)
+    {
+        Action<int, long>? handler = PlaybackCommandReceived;
+        if (handler != null)
+        {
+            handler(command, value);
+        }
+    }
+
+    private void OnSessionClosedFromCore(IntPtr userData, uint sessionId, int reason)
+    {
+        Action? handler = CastingEnded;
+        if (handler != null)
+        {
+            handler();
+        }
+    }
+
+    /// <summary>
+    /// 把播放器的真实状态回报给核心。不回报的话手机的 Get*Info 永远停在旧值，
+    /// 进度条不动、音量滑块还会弹回去。
+    ///
+    /// transportState 每次都给真实值即可 —— 核心只在它变化时才给手机推事件。
+    /// volume / muted 传 -1 表示「这项没变」。
+    /// </summary>
+    public void ReportPlayback(uint sessionId, int transportState, long positionMs,
+                               long durationMs, int volume, int muted)
+    {
+        if (_handle == IntPtr.Zero)
+        {
+            return;
+        }
+
+        AdPlaybackStatus status = default;
+        status.StructSize = (uint)Marshal.SizeOf<AdPlaybackStatus>();
+        status.AbiVersion = AdNative.ad_abi_version();
+        status.SessionId = sessionId;
+        status.TransportState = transportState;
+        status.PositionMs = positionMs;
+        status.DurationMs = durationMs;
+        status.Volume = volume;
+        status.Muted = muted;
+
+        AdNative.ad_engine_report_playback(_handle, ref status);
     }
 
     public void Start()

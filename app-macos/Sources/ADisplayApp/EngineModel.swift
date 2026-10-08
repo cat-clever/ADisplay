@@ -287,12 +287,9 @@ final class EngineModel: ObservableObject {
     private func dispatch(command: PlaybackCommand, value: Int64, sessionId: UInt32) {
         guard let media = activeMedia, media.sessionId == sessionId else { return }
 
-        if command == .stop {
-            // 手机的「停止」是结束这次投屏，不只是暂停播放器。
-            activeMedia = nil
-            playbackHandler = nil
-            return
-        }
+        // 「停止」不做特殊处理：DLNA 的 Stop 只是停止播放，媒体仍然挂着，
+        // 手机随后可以再 Play。真正结束会话的是手机推来新地址（旧会话被抢占）
+        // 或者接收服务停止，那两条走 session_closed。
         playbackHandler?(command, value)
     }
 

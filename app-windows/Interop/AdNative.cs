@@ -59,6 +59,27 @@ internal enum AdLogLevel
     Off = 5,
 }
 
+/// <summary>播放状态，对应 C 的 AdTransportState。取值与 UPnP 的 TransportState 一一对应。</summary>
+internal enum AdTransportState
+{
+    NoMediaPresent = 0,
+    Stopped = 1,
+    Playing = 2,
+    Paused = 3,
+    Transitioning = 4,
+}
+
+/// <summary>手机发来的播放控制意图，对应 C 的 AdPlaybackCommand。</summary>
+internal enum AdPlaybackCommand
+{
+    Play = 0,
+    Pause = 1,
+    Stop = 2,
+    Seek = 3,        // value 是目标位置（毫秒）
+    SetVolume = 4,   // value 是 0..100
+    SetMute = 5,     // value 是 0 或 1
+}
+
 [StructLayout(LayoutKind.Sequential)]
 internal struct AdConfig
 {
@@ -112,6 +133,30 @@ internal struct AdCallbacks
     public IntPtr OnLog;
 }
 
+/// <summary>
+/// 界面层播放器的当前状态，对应 C 的 AdPlaybackStatus。
+///
+/// 界面层是播放状态的唯一权威来源：核心不碰播放器，手机的 GetTransportInfo /
+/// GetPositionInfo / GetMediaInfo / GetVolume 全部从这份回报取答案。
+/// 位置与时长填 -1 表示「还不知道」；volume 与 muted 填 -1 表示「这项没变」——
+/// 用 -1 而不是 0，因为 0 是合法值（音量 0、未静音）。
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct AdPlaybackStatus
+{
+    public uint StructSize;
+    public uint AbiVersion;
+
+    public uint SessionId;
+    public uint Reserved;
+
+    public int TransportState;
+    public long PositionMs;
+    public long DurationMs;
+    public int Volume;
+    public int Muted;
+}
+
 internal static class AdNative
 {
     /// <summary>核心库文件名（不含扩展名），Windows 上是 castcore.dll。</summary>
@@ -159,6 +204,9 @@ internal static class AdNative
 
     [DllImport(Library, CallingConvention = Convention)]
     internal static extern AdResult ad_engine_set_callbacks(IntPtr engine, ref AdCallbacks callbacks, IntPtr userData);
+
+    [DllImport(Library, CallingConvention = Convention)]
+    internal static extern AdResult ad_engine_report_playback(IntPtr engine, ref AdPlaybackStatus status);
 
     [DllImport(Library, CallingConvention = Convention)]
     internal static extern AdResult ad_engine_get_last_error(
