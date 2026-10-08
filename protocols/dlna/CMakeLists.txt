@@ -6,6 +6,8 @@ add_library(adisplay_dlna STATIC
     # SOAP 请求解析与应答构建。同样是纯逻辑，必须能被测试覆盖 ——
     # 应答格式错一个元素名，手机端就表现为「点了没反应」。
     src/DlnaSoap.cpp
+    # 媒体地址规范化（回环地址改写）。纯函数，单独成文件便于单元测试。
+    src/DlnaMediaUrl.cpp
     # HTTP 服务端、SOAP 动作分发、GENA 事件订阅。
     src/DlnaRenderer.cpp
 )

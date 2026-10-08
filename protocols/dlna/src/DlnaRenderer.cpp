@@ -9,6 +9,7 @@
 
 #include "DlnaDescription.h"
 #include "DlnaIcon.h"
+#include "DlnaMediaUrl.h"
 #include "DlnaSoap.h"
 
 #include <httplib.h>
@@ -162,25 +163,36 @@ struct DlnaRenderer::Impl {
     using ActionResult = std::vector<std::pair<std::string, std::string>>;
 
     bool dispatch_av_transport(const soap_ns::ActionRequest& request,
+                               const std::string& peer_address,
                                ActionResult* results, int* error_code, std::string* error_text) {
         const std::string& action = request.action_name;
 
         if (action == "SetAVTransportURI") {
-            const std::string uri = request.get("CurrentURI");
+            const std::string raw_uri = request.get("CurrentURI");
             const std::string metadata = request.get("CurrentURIMetaData");
-            if (uri.empty()) {
+            if (raw_uri.empty()) {
                 *error_code = soap_ns::error_code::kInvalidArgs;
                 *error_text = "CurrentURI 为空";
                 return false;
             }
+
+            // 手机可能推来「它自己手机上的本地代理」地址（127.0.0.1:xxxx）。
+            // 那是相对发送端而言的，对我们就是它自己 —— 换成发送端地址才拉得到。
+            const std::string effective_uri =
+                media_url::rewrite_loopback(raw_uri, peer_address);
+            if (effective_uri != raw_uri) {
+                AD_LOG_INFO("手机给的是回环地址，已改写为发送端：{}", effective_uri);
+            }
+
             {
                 std::lock_guard<std::mutex> lock(mutex);
-                current_uri = uri;
+                // 存原始地址：手机的 GetMediaInfo 会拿它跟自己设过的比对。
+                current_uri = raw_uri;
                 current_metadata = metadata;
             }
             AD_LOG_INFO("手机推送媒体：{}", description_ns::extract_title_from_metadata(metadata));
             if (listener != nullptr) {
-                listener->on_set_uri(uri, metadata);
+                listener->on_set_uri(effective_uri, metadata);
             }
             return true;   // 无输出参数
         }
@@ -493,7 +505,8 @@ struct DlnaRenderer::Impl {
 
         bool ok = false;
         if (parsed.service_type == description_ns::kAvTransportType) {
-            ok = dispatch_av_transport(parsed, &results, &error_code, &error_text);
+            ok = dispatch_av_transport(parsed, request.remote_addr, &results, &error_code,
+                                       &error_text);
         } else if (parsed.service_type == description_ns::kRenderingControlType) {
             ok = dispatch_rendering_control(parsed, &results, &error_code, &error_text);
         } else if (parsed.service_type == description_ns::kConnectionManagerType) {

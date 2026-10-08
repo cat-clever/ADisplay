@@ -12,6 +12,7 @@ set(ADISPLAY_TEST_SOURCES
     test_dlna_description.cpp
     test_dlna_soap.cpp
     test_dlna_http.cpp
+    test_dlna_media_url.cpp
 )
 
 foreach(test_source IN LISTS ADISPLAY_TEST_SOURCES)
