@@ -8,12 +8,17 @@
     mc:Ignorable="d"
     Title="ADisplay 投屏接收端">
 
-    <Grid Padding="28" RowSpacing="20">
+    <!--
+        布局策略：前三块按内容取高（Auto），日志区吃掉剩余空间（*）。
+        窗口缩小时先压日志区，而不是把某一块挤出可视区域 —— 后者会让
+        用户看不到控件却也不知道为什么。
+    -->
+    <Grid Padding="28" RowSpacing="20" MinWidth="480" MinHeight="480">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
-            <RowDefinition Height="*" />
+            <RowDefinition Height="*" MinHeight="120" />
         </Grid.RowDefinitions>
 
         <!-- 设备名称（文档 2.4：可随时修改，手机投屏列表里显示的就是它） -->

@@ -13,14 +13,20 @@ struct ContentView: View {
     @State private var isEditingName = false
 
     var body: some View {
+        // 布局策略：前三块按内容取高，日志区吃掉剩余空间。
+        //
+        // 这样窗口缩小时先压日志区，而不是把某一块挤出可视区域 ——
+        // 后者会让用户看不到控件却也不知道为什么。日志区的 minHeight
+        // 与窗口的 minHeight 配合，保证压到极限时仍能显示几行。
         VStack(alignment: .leading, spacing: 20) {
             deviceNameSection
             serviceSection
             infoSection
             logSection
+                .frame(minHeight: 120, maxHeight: .infinity)
         }
         .padding(24)
-        .frame(minWidth: 560, minHeight: 620)
+        .frame(minWidth: 520, minHeight: 520)
     }
 
     // MARK: - 设备名称（文档 2.4）
@@ -142,7 +148,6 @@ struct ContentView: View {
                 }
                 .background(Color(nsColor: .textBackgroundColor).opacity(0.5))
                 .cornerRadius(6)
-                .frame(minHeight: 180)
                 .onChange(of: model.logs.count) { _ in
                     guard let last = model.logs.indices.last else { return }
                     proxy.scrollTo(last, anchor: .bottom)
