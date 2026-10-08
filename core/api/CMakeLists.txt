@@ -25,6 +25,14 @@ target_link_libraries(castcore
         adisplay_dlna
 )
 
+# Android 的 Bionic 缺 fwrite_unlocked，而 vcpkg 交叉编译出的 libspdlog.a
+# 引用了它。补齐的符号必须编进共享库本身，不能放进静态库 —— 静态库成员
+# 只在被引用时才拉进来，而引用它的 libspdlog.a 排在链接行后面，取不到。
+if(ANDROID)
+    target_sources(castcore PRIVATE
+        "${CMAKE_SOURCE_DIR}/platform/android/src/LibcCompat.cpp")
+endif()
+
 # AD_API 在 Windows 上要区分「编译核心库」与「使用核心库」，
 # 这个宏让 adisplay.h 走 dllexport 分支。
 target_compile_definitions(castcore PRIVATE ADISPLAY_CORE_BUILD)
