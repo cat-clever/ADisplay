@@ -170,7 +170,7 @@ jobs:
 
       - uses: ./.github/actions/setup-vcpkg
         with:
-          triplet: x64-windows
+          triplet: x64-windows-static-md
 
       # Ninja 需要 cl.exe 在 PATH 上，这个 action 负责摆好 MSVC 环境变量。
       - uses: ilammy/msvc-dev-cmd@v1
@@ -248,7 +248,7 @@ jobs:
 
       - uses: ./.github/actions/setup-vcpkg
         with:
-          triplet: arm64-windows
+          triplet: arm64-windows-static-md
 
       # amd64_arm64 = x64 宿主 + ARM64 目标。
       # 不能写 arm64：那会让 vcvarsall 配出「ARM64 宿主原生」环境，
