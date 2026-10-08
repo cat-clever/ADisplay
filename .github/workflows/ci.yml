@@ -248,7 +248,29 @@ jobs:
             Copy-Item (Join-Path $crtRoot $dll) "publish\windows-x64\" -Force
           }
           Get-ChildItem "publish\windows-x64\" | Where-Object { $_.Name -like "vcruntime*" -or $_.Name -like "msvcp*" } | Format-Table Name, Length
+          # WinUI 3 的编译产物（含应用自己的 XAML）都在 resources.pri 里。少了它，运行时
+          # LoadComponent("ms-appx:///MainWindow.xaml") 解析不到，报出来是一句没头没尾的
+          # XamlParseException —— 窗口永远不出现、也没有别的提示。
+          # msbuild /t:Publish 这条路的 PublishDir 没把它带过来（包里只有 Windows App SDK
+          # 自己的那两个 pri），所以这里从构建产物里找出来、按运行时认的名字补上。
+          $pri = Get-ChildItem "${{ github.workspace }}\app-windows\bin\x64\Release" -Recurse -Filter "*.pri" -ErrorAction SilentlyContinue |
+                 Where-Object { $_.Name -notlike "Microsoft.*" } |
+                 Select-Object -First 1
+          if (-not $pri) {
+            Write-Error "构建产物里找不到应用自己的 .pri —— WinUI 的 XAML 将无法加载"
+            Get-ChildItem "${{ github.workspace }}\app-windows\bin" -Recurse -Filter "*.pri" -ErrorAction SilentlyContinue | Select-Object FullName
+            exit 1
+          }
+          Write-Host "应用 PRI：$($pri.FullName)（$($pri.Length) 字节）"
+          Copy-Item $pri.FullName "publish\windows-x64\resources.pri" -Force
           Compress-Archive -Path publish/windows-x64/* -DestinationPath adisplay-windows-x64.zip -Force
+
+          # 把「包里有应用 PRI」钉成硬性检查。这一条缺失时程序的表现是「点了没反应、
+          # 没窗口、没日志」，从外面完全看不出是它 —— 所以宁可在打包这一步就炸。
+          if (-not (Test-Path "publish/windows-x64/resources.pri")) {
+            Write-Error "打包目录里没有 resources.pri"
+            exit 1
+          }
 
       - uses: actions/upload-artifact@v4
         with:
@@ -340,6 +362,21 @@ jobs:
             Copy-Item (Join-Path $crtRoot $dll) "publish\windows-arm64\" -Force
           }
           Get-ChildItem "publish\windows-arm64\" | Where-Object { $_.Name -like "vcruntime*" -or $_.Name -like "msvcp*" } | Format-Table Name, Length
+          # WinUI 3 的编译产物（含应用自己的 XAML）都在 resources.pri 里。少了它，运行时
+          # LoadComponent("ms-appx:///MainWindow.xaml") 解析不到，报出来是一句没头没尾的
+          # XamlParseException —— 窗口永远不出现、也没有别的提示。
+          # msbuild /t:Publish 这条路的 PublishDir 没把它带过来（包里只有 Windows App SDK
+          # 自己的那两个 pri），所以这里从构建产物里找出来、按运行时认的名字补上。
+          $pri = Get-ChildItem "${{ github.workspace }}\app-windows\bin\ARM64\Release" -Recurse -Filter "*.pri" -ErrorAction SilentlyContinue |
+                 Where-Object { $_.Name -notlike "Microsoft.*" } |
+                 Select-Object -First 1
+          if (-not $pri) {
+            Write-Error "构建产物里找不到应用自己的 .pri —— WinUI 的 XAML 将无法加载"
+            Get-ChildItem "${{ github.workspace }}\app-windows\bin" -Recurse -Filter "*.pri" -ErrorAction SilentlyContinue | Select-Object FullName
+            exit 1
+          }
+          Write-Host "应用 PRI：$($pri.FullName)（$($pri.Length) 字节）"
+          Copy-Item $pri.FullName "publish\windows-arm64\resources.pri" -Force
           Compress-Archive -Path publish/windows-arm64/* -DestinationPath adisplay-windows-arm64.zip -Force
 
       - uses: actions/upload-artifact@v4
