@@ -279,10 +279,39 @@ jobs:
           lipo -info dist/ADisplay.app/Contents/MacOS/ADisplay
           lipo -info dist/ADisplay.app/Contents/Frameworks/libcastcore.dylib
 
+          # dmg 里同时放 .app 和一个指向 /Applications 的符号链接。
+          #
+          # 少了这个链接，用户打开 dmg 只会看到一个孤零零的 App，
+          # 没有任何拖拽目标 —— 得自己另开一个 Finder 窗口把 App 拖过去。
+          # 这是 macOS 上的分发惯例，Finder 会把它显示成一个「应用程序」
+          # 文件夹快捷方式。
+          ln -sfn /Applications dist/Applications
+
           hdiutil create -volname "ADisplay" \
-            -srcfolder dist/ADisplay.app \
+            -srcfolder dist \
             -ov -format UDZO \
             adisplay-macos-universal.dmg
+
+          # 校验 dmg 里确实有这两样，避免又发出一个装不进去的包。
+          MOUNT_POINT="$(hdiutil attach adisplay-macos-universal.dmg -nobrowse -readonly \
+            | grep -o '/Volumes/.*' | head -n 1)"
+          if [ -z "${MOUNT_POINT}" ]; then
+            echo "dmg 挂载失败，无法校验内容" >&2
+            exit 1
+          fi
+          echo "挂载点：${MOUNT_POINT}"
+          ls -la "${MOUNT_POINT}"
+          if [ ! -d "${MOUNT_POINT}/ADisplay.app" ]; then
+            echo "dmg 里缺少 ADisplay.app" >&2
+            hdiutil detach "${MOUNT_POINT}" || true
+            exit 1
+          fi
+          if [ ! -L "${MOUNT_POINT}/Applications" ]; then
+            echo "dmg 里缺少 Applications 快捷方式" >&2
+            hdiutil detach "${MOUNT_POINT}" || true
+            exit 1
+          fi
+          hdiutil detach "${MOUNT_POINT}"
 
       - uses: actions/upload-artifact@v4
         with:
