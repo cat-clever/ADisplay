@@ -44,6 +44,8 @@ final class PlayerViewModel: ObservableObject {
 
     private var timeObserver: Any?
     private var volumeObserver: NSKeyValueObservation?
+    private var endObserver: NSObjectProtocol?
+    private var failureObserver: NSObjectProtocol?
 
     // 上一次回报过的状态与时长。相同就不重复回报 —— 位置变化很频繁，
     // 但状态和时长只在真变了时才值得回报，否则核心会推一串无意义的事件。
@@ -81,18 +83,50 @@ final class PlayerViewModel: ObservableObject {
         let interval = CMTime(seconds: 1, preferredTimescale: 600)
         timeObserver = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) {
             [weak self] _ in
-            // 这里刻意用 Task 而不是 MainActor.assumeIsolated ——
-            // 后者要 macOS 14 起才有，而本项目最低支持 macOS 12。
+            // 先 guard let 复制成 let 再进 Task。直接写 self?.report() 会报
+            // "reference to captured var 'self' in concurrently-executing code" ——
+            // [weak self] 捕出来的是个 var，而这两个闭包是 @Sendable 的。
+            //
+            // 用 Task 而不是 MainActor.assumeIsolated，是因为后者要 macOS 14
+            // 起才有，而本项目最低支持 macOS 12。
+            guard let self = self else { return }
             Task { @MainActor in
-                self?.report()
+                self.report()
             }
         }
 
         // 音量也可能被用户直接拖控制条改掉，改了要回报给手机。
         volumeObserver = player.observe(\.volume, options: [.initial, .new]) { [weak self] player, _ in
             let percent = Int32((player.volume * 100).rounded())
+            guard let self = self else { return }
             Task { @MainActor in
-                self?.report(volumeOverride: percent)
+                self.report(volumeOverride: percent)
+            }
+        }
+
+        // 播完或者拉流失败都要回报一次，否则手机上会一直停在「播放中」。
+        endObserver = NotificationCenter.default.addObserver(
+            forName: AVPlayerItem.didPlayToEndTimeNotification,
+            object: player.currentItem,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self = self else { return }
+            Task { @MainActor in
+                self.report(forceState: .stopped)
+            }
+        }
+
+        failureObserver = NotificationCenter.default.addObserver(
+            forName: AVPlayerItem.failedToPlayToEndTimeNotification,
+            object: player.currentItem,
+            queue: .main
+        ) { [weak self] note in
+            let reason = (note.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error)?
+                .localizedDescription ?? "未知原因"
+            guard let self = self else { return }
+            Task { @MainActor in
+                self.engine?.log("拉流失败：\(reason)", level: .error)
+                self.report(forceState: .stopped)
             }
         }
 
@@ -105,6 +139,13 @@ final class PlayerViewModel: ObservableObject {
             timeObserver = nil
         }
         volumeObserver = nil
+        for observer in [endObserver, failureObserver] {
+            if let observer = observer {
+                NotificationCenter.default.removeObserver(observer)
+            }
+        }
+        endObserver = nil
+        failureObserver = nil
         engine?.setPlaybackHandler(nil)
         player.pause()
         player.replaceCurrentItem(with: nil)
@@ -140,10 +181,10 @@ final class PlayerViewModel: ObservableObject {
 
     // MARK: - 回报状态
 
-    private func report(volumeOverride: Int32? = nil) {
+    private func report(volumeOverride: Int32? = nil, forceState: PlaybackState? = nil) {
         guard let engine = engine, sessionId != 0 else { return }
 
-        let state = currentState()
+        let state = forceState ?? currentState()
         let durationMs = durationMilliseconds()
 
         engine.reportPlayback(
