@@ -546,7 +546,8 @@ AdResult AD_CALL ad_engine_start(AdEngine* engine) {
         dlna_config.device_name = engine->device_name;
         dlna_config.uuid = engine->identity.uuid();
         dlna_config.http_port = dlna_port;
-        dlna_config.server_header = std::string("UPnP/1.0 ADisplay/") + ADISPLAY_VERSION;
+        // 这里不设 SERVER 头：那是 SSDP 通告的字段（由 DiscoveryService 负责），
+        // DLNA 的设备描述里没有它。
 
         engine->dlna_renderer = std::make_unique<dlna::DlnaRenderer>();
 
