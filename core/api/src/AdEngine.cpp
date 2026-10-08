@@ -13,6 +13,7 @@
 #include <adisplay/common/Config.h>
 #include <adisplay/discovery/DiscoveryService.h>
 #include <adisplay/dlna/DlnaRenderer.h>
+#include <adisplay/pipeline/MediaRelay.h>
 #include <adisplay/common/DeviceIdentity.h>
 #include <adisplay/common/DeviceName.h>
 #include <adisplay/common/Log.h>
@@ -35,6 +36,7 @@ namespace {
 namespace common = adisplay::common;
 namespace discovery = adisplay::discovery;
 namespace dlna = adisplay::dlna;
+namespace pipeline = adisplay::pipeline;
 
 constexpr uint16_t kDefaultAirplayPort = 7000;
 constexpr uint16_t kDefaultDlnaPort    = 49152;
@@ -146,6 +148,14 @@ struct AdEngine {
 
     // DLNA 渲染器：提供设备描述与 SOAP 控制端点（文档 3.2）。
     std::unique_ptr<dlna::DlnaRenderer> dlna_renderer;
+
+    // 本地换封装中转（文档 4.1 的媒体管线）。平台播放器吃不下某些封装，
+    // 典型是 HEVC-in-MPEG-TS —— Apple 的 HLS 规范要求 HEVC 用 fMP4，AVPlayer
+    // 遇到 HEVC-in-TS 会丢掉视频轨（现象是进度条能拖、有声音、没画面）。
+    //
+    // 它只是按需介入：不是 HLS、或者拉下列表发现分片本来就是 fMP4，都会原样
+    // 放行。所以留着它对别的片源没有代价。
+    std::unique_ptr<pipeline::MediaRelay> media_relay;
 
     // DLNA 回调 -> C ABI 的桥，批次 3 接入。
     std::unique_ptr<DlnaBridge> dlna_bridge;
@@ -363,9 +373,21 @@ public:
         session_id_.store(session);
 
         engine_->notify_session_opened(session, AD_STREAM_MEDIA_URL);
+
+        // 交给界面层之前先过一道本地中转。这一步只做字符串拼接、不发网络请求
+        // —— 它在 SOAP 的 SetAVTransportURI 应答路径上，在这里拉远端内容会让
+        // 手机等不到应答而判超时。要不要真换封装，等播放器来拉播放列表时再判。
+        std::string playback_url = url;
+        if (engine_->media_relay) {
+            playback_url = engine_->media_relay->resolve_for_playback(url);
+            if (playback_url != url) {
+                AD_LOG_INFO("该片源可能需要在本地换封装，已改走中转：{}", playback_url);
+            }
+        }
+
         // mime_type 留空：准确类型在 DIDL-Lite 的 protocolInfo 里，那要再解一层
         // 转义过的 XML；平台播放器自己会嗅探容器，给空比给错更诚实。
-        engine_->notify_media_url(session, url, std::string());
+        engine_->notify_media_url(session, playback_url, std::string());
     }
 
     // ---- 手机的控制意图：核心不执行，转给界面层的播放器 ----------------------
@@ -906,6 +928,15 @@ AdResult AD_CALL ad_engine_start(AdEngine* engine) {
         engine->dlna_bridge = std::make_unique<DlnaBridge>(engine);
         engine->dlna_renderer->set_listener(engine->dlna_bridge.get());
 
+        // 中转起不来不该让整个接收服务失败：绝大多数片源不需要它，只是那一类
+        // 片源会没画面。所以这里只记警告，把原因留在日志里。
+        engine->media_relay = std::make_unique<pipeline::MediaRelay>();
+        std::string relay_error;
+        if (!engine->media_relay->start(&relay_error)) {
+            AD_LOG_WARN("本地换封装中转启动失败，部分片源可能没有画面：{}", relay_error);
+            engine->media_relay.reset();
+        }
+
         dlna_port = engine->dlna_renderer->port();
     }
 
@@ -996,6 +1027,13 @@ void AD_CALL ad_engine_stop(AdEngine* engine) {
     if (engine->dlna_bridge) {
         engine->dlna_bridge->reset();
         engine->dlna_bridge.reset();
+    }
+
+    // 放在渲染器拆完之后：上面 dlna_renderer->stop() 已经 join 掉 HTTP 线程，
+    // 此刻不会再有 on_set_uri 在跑，所以可以安全地释放中转。
+    if (engine->media_relay) {
+        engine->media_relay->stop();
+        engine->media_relay.reset();
     }
 
     engine->change_state(AD_STATE_STOPPED);

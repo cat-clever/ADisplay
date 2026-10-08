@@ -23,6 +23,8 @@ target_link_libraries(castcore
         adisplay_common
         adisplay_discovery
         adisplay_dlna
+        # 本地换封装中转（媒体管线）。
+        adisplay_pipeline
 )
 
 # Android 的 Bionic 缺 fwrite_unlocked，而 vcpkg 交叉编译出的 libspdlog.a
