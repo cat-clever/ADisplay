@@ -138,7 +138,9 @@ public:
         }
 
         const DWORD status = ::DnsServiceRegister(&request_, &cancel_handle_);
-        if (status != DNS_REQUEST_PENDING && status != ERROR_SUCCESS) {
+        if (status == DNS_REQUEST_PENDING || status == ERROR_SUCCESS) {
+            has_cancel_handle_ = true;
+        } else {
             const std::string message =
                 "mDNS 注册失败（错误码 " + std::to_string(static_cast<unsigned long>(status)) +
                 "）。Windows 的 DNS-SD 需要 Windows 10 1703 以上，且 DNS Client 服务在运行。";
@@ -162,9 +164,9 @@ public:
             return;
         }
 
-        if (cancel_handle_ != nullptr) {
+        if (has_cancel_handle_) {
             ::DnsServiceDeRegister(&request_, &cancel_handle_);
-            cancel_handle_ = nullptr;
+            has_cancel_handle_ = false;
         }
 
         std::lock_guard<std::mutex> lock(mutex_);
@@ -204,7 +206,10 @@ private:
     std::unique_ptr<WideStringPool> pool_;
     DNS_SERVICE_INSTANCE instance_{};
     DNS_SERVICE_REGISTER_REQUEST request_{};
-    DNS_SERVICE_CANCEL cancel_handle_ = nullptr;
+    // DNS_SERVICE_CANCEL 是 struct（内含一个 PVOID），不是指针 ——
+    // 不能拿它和 nullptr 比较，所以另用一个标志位记「有没有注册句柄」。
+    DNS_SERVICE_CANCEL cancel_handle_{};
+    bool has_cancel_handle_ = false;
     wchar_t* instance_name_ = nullptr;
     std::vector<wchar_t*> keys_;
     std::vector<wchar_t*> values_;

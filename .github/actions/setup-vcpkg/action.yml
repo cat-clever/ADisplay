@@ -33,11 +33,29 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        if [ ! -d "${VCPKG_ROOT}/.git" ]; then
-          # --filter=blob:none：vcpkg 仓库很大，只拉提交与目录树，
-          # 文件按需下载，能把克隆时间从几分钟压到十几秒。
-          git clone --filter=blob:none https://github.com/microsoft/vcpkg.git "${VCPKG_ROOT}"
+
+        # 已经克隆好且内容完整就直接用。
+        if [ -f "${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" ]; then
+          exit 0
         fi
+
+        # --filter=blob:none：vcpkg 仓库很大，只拉提交与目录树，文件按需下载。
+        # 代价是 checkout 时还要再联一次网，那一步失败会留下一个「克隆成功但
+        # 检出失败」的半成品目录 —— 所以每次重试都先清干净，并用一个 vcpkg
+        # 必需的脚本文件判断完整性，而不是只看 .git 在不在。
+        for attempt in 1 2 3; do
+          rm -rf "${VCPKG_ROOT}"
+          if git clone --filter=blob:none \
+               https://github.com/microsoft/vcpkg.git "${VCPKG_ROOT}" \
+             && [ -f "${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" ]; then
+            exit 0
+          fi
+          echo "第 ${attempt} 次克隆 vcpkg 未成功，5 秒后重试"
+          sleep 5
+        done
+
+        echo "克隆 vcpkg 连续失败三次" >&2
+        exit 1
 
     - name: 引导 vcpkg（Unix）
       if: runner.os != 'Windows'
@@ -53,9 +71,19 @@ runs:
       if: runner.os == 'Windows'
       shell: pwsh
       run: |
-        if (-not (Test-Path "$env:VCPKG_ROOT\.git")) {
+        if (Test-Path "$env:VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake") { exit 0 }
+
+        for ($attempt = 1; $attempt -le 3; $attempt++) {
+          if (Test-Path "$env:VCPKG_ROOT") { Remove-Item -Recurse -Force "$env:VCPKG_ROOT" }
           git clone --filter=blob:none https://github.com/microsoft/vcpkg.git "$env:VCPKG_ROOT"
+          if ($LASTEXITCODE -eq 0 -and (Test-Path "$env:VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake")) {
+            exit 0
+          }
+          Write-Host "第 $attempt 次克隆 vcpkg 未成功，5 秒后重试"
+          Start-Sleep -Seconds 5
         }
+        Write-Error "克隆 vcpkg 连续失败三次"
+        exit 1
 
     - name: 引导 vcpkg（Windows）
       if: runner.os == 'Windows'
