@@ -614,7 +614,10 @@ AdResult AD_CALL ad_engine_start(AdEngine* engine) {
         discovery_config.enable_airplay = engine->enable_airplay;
         discovery_config.enable_dlna = engine->enable_dlna;
         discovery_config.enable_castpc = engine->enable_castpc;
-        discovery_config.server_header = std::string("UPnP/1.0 ADisplay/") + ADISPLAY_VERSION;
+        // SERVER 头按 UPnP 规范拼全：<OS>/<版本> UPnP/1.0 <产品>/<版本>。
+        // 只写后半截的话，部分客户端解析失败会直接跳过这个设备。
+        discovery_config.server_header = std::string(common::operating_system_name())
+                                             + " UPnP/1.0 ADisplay/" + ADISPLAY_VERSION;
 
         engine->discovery = std::make_unique<discovery::DiscoveryService>();
 

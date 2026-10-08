@@ -38,8 +38,14 @@ struct DiscoveryConfig {
     std::string airplay_model = "AppleTV6,2";
     std::string airplay_srcvers = "220.68";
 
-    // SSDP 的 SERVER 头。UPnP/1.0 这个标记不能少，部分手机端靠它识别。
-    std::string server_header = "UPnP/1.0 ADisplay/0.1.0";
+    // SSDP 的 SERVER 头。
+    //
+    // 格式是「<OS>/<版本> UPnP/1.0 <产品>/<版本>」，三部分都不能少：
+    //   * UPnP/1.0 是能力标记，缺了多数客户端直接忽略这个设备
+    //   * 开头的 OS 部分是 UPnP 规范要求的，缺了部分客户端（实测有国产
+    //     浏览器）会解析失败并跳过设备
+    // 由 AdEngine 在启动时填入真实的系统信息。
+    std::string server_header;
 
     bool enable_airplay = true;
     bool enable_dlna = true;

@@ -20,6 +20,7 @@
 #  include <net/if.h>
 #  include <netinet/in.h>
 #  include <sys/socket.h>
+#  include <sys/utsname.h>   // uname，拼 SSDP 的 SERVER 头
 #  include <unistd.h>
 #endif
 
@@ -169,6 +170,29 @@ bool contains_ci(const std::string& haystack, const char* needle) {
 }
 
 }  // namespace
+
+std::string operating_system_name() {
+#if defined(_WIN32)
+    // 不用 RtlGetVersion：那需要 winternl.h 里的 RTL_OSVERSIONINFOW，
+    // 而目标平台是 Windows 10 / 11，写死版本号反而更省事也更可靠 ——
+    // 这个头只用于让客户端满意 SERVER 头的格式，不影响功能。
+    return "Windows/10.0";
+#elif defined(__APPLE__)
+    // uname 的 release 是 Darwin 内核版本，与 macOS 版本号不同，
+    // 但 UPnP 的 SERVER 头里用它更常见（Upnp/1.0 时代的惯例）。
+    struct utsname info;
+    if (::uname(&info) == 0 && info.release[0] != '\0') {
+        return std::string("Darwin/") + info.release;
+    }
+    return "Darwin";
+#else
+    struct utsname info;
+    if (::uname(&info) == 0 && info.release[0] != '\0') {
+        return std::string("Linux/") + info.release;
+    }
+    return "Linux";
+#endif
+}
 
 bool is_virtual_interface(const std::string& interface_name) {
     if (interface_name.empty()) {

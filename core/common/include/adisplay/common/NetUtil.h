@@ -50,4 +50,9 @@ std::string primary_local_ipv4();
 // 判断网卡名是否像虚拟网卡。
 bool is_virtual_interface(const std::string& interface_name);
 
+// 返回形如 "Darwin/24.6.0"、"Windows/10.0"、"Linux/6.8" 的系统标识，
+// 用于 SSDP 的 SERVER 头。UPnP 规范要求这个头带上操作系统，
+// 缺了部分客户端会跳过设备。
+std::string operating_system_name();
+
 }  // namespace adisplay::common
