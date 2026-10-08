@@ -1,0 +1,57 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    ADisplay Windows 界面：C# + WinUI 3（Windows App SDK）。
+    文档 v2 第 5.2 节选型。
+
+    打包形态是 unpackaged + self-contained：
+      * unpackaged —— 不走 MSIX，不需要签名证书，贴合文档 1.1「仅个人自用、
+        不上架应用商店、不需要正式签名」以及 5 节「绿色版 exe 或简易安装包」。
+      * self-contained —— 把 Windows App SDK 运行时一起带上，用户机器上
+        不需要预装 Runtime，解压即用。
+  -->
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
+    <RootNamespace>ADisplay.Windows</RootNamespace>
+    <AssemblyName>ADisplay</AssemblyName>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <Platforms>x64;ARM64</Platforms>
+    <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
+    <UseWinUI>true</UseWinUI>
+    <EnableMsixTooling>true</EnableMsixTooling>
+    <WindowsPackageType>None</WindowsPackageType>
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- 界面上的中文文案直接写在 XAML 里，要求源码按 UTF-8 处理。 -->
+    <CodePage>65001</CodePage>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.7.*" />
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.26100.*" />
+  </ItemGroup>
+
+  <!--
+    核心库 castcore.dll 由 CMake 单独构建（见 .github/workflows/ci.yml），
+    不参与 msbuild。这里用 AdDisplayCoreDir 指过去，构建后拷到输出目录。
+  -->
+  <PropertyGroup>
+    <AdDisplayCoreDir Condition="'$(AdDisplayCoreDir)' == ''">$(MSBuildThisFileDirectory)..\build\bin</AdDisplayCoreDir>
+  </PropertyGroup>
+
+  <Target Name="CopyCastCore" AfterTargets="Build">
+    <ItemGroup>
+      <CastCoreFiles Include="$(AdDisplayCoreDir)\castcore.dll" />
+    </ItemGroup>
+    <Copy SourceFiles="@(CastCoreFiles)"
+          DestinationFolder="$(OutDir)"
+          SkipUnchangedFiles="true"
+          Condition="Exists('$(AdDisplayCoreDir)\castcore.dll')" />
+  </Target>
+
+</Project>

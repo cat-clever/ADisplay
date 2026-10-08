@@ -1,0 +1,83 @@
+name: 发布
+
+# 打一个 v* 的 tag 就出全平台安装包，并挂到 Release 上。
+#
+# 构建部分直接复用 ci.yml（workflow_call），保证发出去的包与 CI 上验证过的
+# 是同一套流程产出的 —— 不会出现「CI 绿了但发布的包是另一套参数编的」。
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 已存在的 tag 名（如 v0.1.0）
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    name: 汇总产物并发布
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: 下载全部构建产物
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          # 把各 job 的产物平铺到一个目录，方便一次性挂上去。
+          merge-multiple: true
+
+      - name: 清点产物
+        run: |
+          set -euo pipefail
+          find artifacts -type f -printf '%s\t%p\n' | sort -k2
+
+          # 任何一个平台的包缺失都算发布失败 —— 宁可这一步红掉，
+          # 也不要发出一个「看起来正常但少了某个平台」的 Release。
+          for expected in \
+            adisplay-windows-x64.zip \
+            adisplay-windows-arm64.zip \
+            adisplay-macos-universal.dmg \
+            adisplay-android-tv.apk
+          do
+            if [ ! -f "artifacts/${expected}" ]; then
+              echo "缺少产物：${expected}" >&2
+              exit 1
+            fi
+          done
+          echo "四个平台的产物都在。"
+
+      - name: 发布 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          append_body: true
+          body: |
+
+            ---
+
+            ## 各平台怎么装
+
+            仅个人自用，没有正式签名与公证，系统会提示「来源不明」，按下面放行即可。
+
+            | 平台 | 文件 | 安装 |
+            | --- | --- | --- |
+            | Windows x64 | `adisplay-windows-x64.zip` | 解压后运行 `ADisplay.exe`。首次运行若被 SmartScreen 拦截，点「更多信息 → 仍要运行」。**需要放行防火墙**，否则手机搜不到设备。 |
+            | Windows ARM64 | `adisplay-windows-arm64.zip` | 同上。适用于骁龙 X 系列等 ARM 笔记本，原生运行，不经过 x64 转译。 |
+            | macOS（Apple Silicon + Intel） | `adisplay-macos-universal.dmg` | 打开 dmg 拖进「应用程序」。首次启动会被 Gatekeeper 拦下，去「系统设置 → 隐私与安全性」点「仍要打开」。**首次启动会请求本地网络权限，必须允许**，否则手机上根本看不到这台电脑。 |
+            | Android TV / 电视盒子 | `adisplay-android-tv.apk` | 用 U 盘或 `adb install` 侧载。 |
+
+            ## 当前进度
+
+            这是**批次 0**（工程骨架与构建链路）：核心库、三端界面、四平台构建与发布已就绪，
+            界面可以启动并显示设备信息与日志。
+
+            协议功能按文档第 9 节的顺序推进：
+            设备发现（mDNS / SSDP）→ DLNA 接收 → 媒体管线与渲染 → AirPlay 镜像 → 电视端功能 → 体验与安全。

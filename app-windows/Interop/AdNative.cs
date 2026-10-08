@@ -1,0 +1,213 @@
+// ADisplay —— castcore 的 P/Invoke 声明
+//
+// 这一层与 include/adisplay/adisplay.h 严格一一对应。改任何一边都必须同步改另一边，
+// 结构体的字段顺序、类型宽度、对齐方式都要对上，否则会在运行期读到垃圾数据 ——
+// 而且往往不崩溃，只是行为诡异，非常难查。
+//
+// 注意：C 侧用 __cdecl（AD_CALL），所以这里的 CallingConvention 必须是 Cdecl。
+// 默认的 Winapi 在 x64 上恰好也是同一套调用约定，但在 ARM64 上不是，必须显式写。
+
+using System;
+using System.Runtime.InteropServices;
+
+namespace ADisplay.Windows.Interop;
+
+/// <summary>返回码，对应 C 的 AdResult。</summary>
+internal enum AdResult
+{
+    Ok = 0,
+    InvalidArg = 1,
+    NotInitialized = 2,
+    AlreadyRunning = 3,
+    NotRunning = 4,
+    PortInUse = 5,
+    PermissionDenied = 6,
+    Network = 7,
+    Unsupported = 8,
+    BufferTooSmall = 9,
+    NotFound = 10,
+    Internal = 11,
+}
+
+/// <summary>接收服务状态，对应 C 的 AdServiceState。</summary>
+internal enum AdServiceState
+{
+    Stopped = 0,
+    Starting = 1,
+    Running = 2,
+    Streaming = 3,
+    Stopping = 4,
+    Error = 5,
+}
+
+/// <summary>画质档位，对应 C 的 AdQualityPreset。</summary>
+internal enum AdQualityPreset
+{
+    Smooth = 0,
+    Balanced = 1,
+    Sharp = 2,
+}
+
+/// <summary>日志级别，对应 C 的 AdLogLevel。</summary>
+internal enum AdLogLevel
+{
+    Trace = 0,
+    Debug = 1,
+    Info = 2,
+    Warn = 3,
+    Error = 4,
+    Off = 5,
+}
+
+[StructLayout(LayoutKind.Sequential)]
+internal struct AdConfig
+{
+    public uint StructSize;
+    public uint AbiVersion;
+
+    [MarshalAs(UnmanagedType.LPUTF8Str)]
+    public string? DeviceName;
+
+    public ushort AirplayPort;
+    public ushort DlnaPort;
+    public ushort CastpcPort;
+
+    public int EnableAirplay;
+    public int EnableDlna;
+    public int EnableCastpc;
+
+    public int QualityPreset;
+    public int RequireConfirmation;
+    public int LogLevel;
+
+    [MarshalAs(UnmanagedType.LPUTF8Str)]
+    public string? LogFilePath;
+
+    [MarshalAs(UnmanagedType.LPUTF8Str)]
+    public string? ConfigFilePath;
+
+    public IntPtr BindInterfaces;
+    public uint BindInterfaceCount;
+}
+
+/// <summary>
+/// 事件回调。用 IntPtr 而不是委托类型，由调用方保证委托实例在注册期间不被回收 ——
+/// 委托被 GC 掉之后再回调就是访问已释放内存，Windows 上通常表现为闪退。
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct AdCallbacks
+{
+    public uint StructSize;
+    public uint Reserved;
+
+    public IntPtr OnStateChanged;
+    public IntPtr OnConnectRequest;
+    public IntPtr OnSessionOpened;
+    public IntPtr OnSessionClosed;
+    public IntPtr OnVideoFrame;
+    public IntPtr OnAudioFrame;
+    public IntPtr OnMediaUrl;
+    public IntPtr OnPlaybackState;
+    public IntPtr OnLog;
+}
+
+internal static class AdNative
+{
+    /// <summary>核心库文件名（不含扩展名），Windows 上是 castcore.dll。</summary>
+    private const string Library = "castcore";
+
+    private const CallingConvention Convention = CallingConvention.Cdecl;
+
+    // ---------------------------------------------------------------------
+    // 版本与工具
+    // ---------------------------------------------------------------------
+
+    [DllImport(Library, CallingConvention = Convention)]
+    internal static extern IntPtr ad_version_string();
+
+    [DllImport(Library, CallingConvention = Convention)]
+    internal static extern uint ad_abi_version();
+
+    [DllImport(Library, CallingConvention = Convention)]
+    internal static extern IntPtr ad_result_string(AdResult result);
+
+    [DllImport(Library, CallingConvention = Convention)]
+    internal static extern void ad_string_free(IntPtr text);
+
+    // ---------------------------------------------------------------------
+    // 生命周期
+    // ---------------------------------------------------------------------
+
+    [DllImport(Library, CallingConvention = Convention)]
+    internal static extern AdResult ad_engine_get_default_config(ref AdConfig config);
+
+    [DllImport(Library, CallingConvention = Convention)]
+    internal static extern AdResult ad_engine_create(ref AdConfig config, out IntPtr engine);
+
+    [DllImport(Library, CallingConvention = Convention)]
+    internal static extern void ad_engine_destroy(IntPtr engine);
+
+    [DllImport(Library, CallingConvention = Convention)]
+    internal static extern AdResult ad_engine_start(IntPtr engine);
+
+    [DllImport(Library, CallingConvention = Convention)]
+    internal static extern void ad_engine_stop(IntPtr engine);
+
+    [DllImport(Library, CallingConvention = Convention)]
+    internal static extern AdResult ad_engine_get_state(IntPtr engine, out int state);
+
+    [DllImport(Library, CallingConvention = Convention)]
+    internal static extern AdResult ad_engine_set_callbacks(IntPtr engine, ref AdCallbacks callbacks, IntPtr userData);
+
+    [DllImport(Library, CallingConvention = Convention)]
+    internal static extern AdResult ad_engine_get_last_error(
+        IntPtr engine, [Out] byte[] buffer, UIntPtr bufferSize, out UIntPtr outLength);
+
+    // ---------------------------------------------------------------------
+    // 配置与设备名称
+    // ---------------------------------------------------------------------
+
+    [DllImport(Library, CallingConvention = Convention)]
+    internal static extern AdResult ad_device_name_validate(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? name, [Out] byte[] reason, UIntPtr reasonSize);
+
+    [DllImport(Library, CallingConvention = Convention)]
+    internal static extern AdResult ad_engine_set_device_name(
+        IntPtr engine, [MarshalAs(UnmanagedType.LPUTF8Str)] string name);
+
+    [DllImport(Library, CallingConvention = Convention)]
+    internal static extern AdResult ad_engine_get_device_name(
+        IntPtr engine, [Out] byte[] buffer, UIntPtr bufferSize, out UIntPtr outLength);
+
+    [DllImport(Library, CallingConvention = Convention)]
+    internal static extern AdResult ad_engine_set_quality_preset(IntPtr engine, int preset);
+
+    [DllImport(Library, CallingConvention = Convention)]
+    internal static extern AdResult ad_engine_save_config(IntPtr engine);
+
+    // ---------------------------------------------------------------------
+    // 会话
+    // ---------------------------------------------------------------------
+
+    [DllImport(Library, CallingConvention = Convention)]
+    internal static extern AdResult ad_engine_respond_connect_request(
+        IntPtr engine, uint requestId, int allow, int remember);
+
+    [DllImport(Library, CallingConvention = Convention)]
+    internal static extern AdResult ad_engine_disconnect_session(IntPtr engine, uint sessionId);
+
+    [DllImport(Library, CallingConvention = Convention)]
+    internal static extern AdResult ad_engine_get_session_count(IntPtr engine, out uint count);
+
+    // ---------------------------------------------------------------------
+    // 本地信息
+    // ---------------------------------------------------------------------
+
+    [DllImport(Library, CallingConvention = Convention)]
+    internal static extern AdResult ad_engine_get_local_addresses(
+        IntPtr engine, [Out] byte[] buffer, UIntPtr bufferSize, out UIntPtr outLength);
+
+    [DllImport(Library, CallingConvention = Convention)]
+    internal static extern AdResult ad_engine_get_device_id(
+        IntPtr engine, [Out] byte[] buffer, UIntPtr bufferSize, out UIntPtr outLength);
+}

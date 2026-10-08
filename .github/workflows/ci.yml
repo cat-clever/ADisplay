@@ -1,0 +1,288 @@
+name: 构建与测试
+
+# 这个 workflow 既直接响应 push / PR，也被 release.yml 通过 workflow_call 复用 ——
+# 发版时的产物与 CI 上验证过的产物是同一套构建流程，不会出现
+# 「CI 绿了但发出去的包是另一套参数编的」这种事。
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+  workflow_call:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  VCPKG_ROOT: ${{ github.workspace }}/vcpkg
+  VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}/vcpkg-cache,readwrite
+  VCPKG_DISABLE_METRICS: 1
+  # 核心库与界面源码里有大量中文注释与文案，统一按 UTF-8 处理。
+  LANG: C.UTF-8
+
+jobs:
+  # =========================================================================
+  # Linux：文档把 Linux 桌面端标为 P2「暂缓」，所以这里只构建核心库并跑单元测试，
+  # 用来及早发现跨平台的编译问题（Linux 上用的是 GCC，与 macOS 的 Clang、
+  # Windows 的 MSVC 是三个不同的编译器，能覆盖大部分可移植性问题）。
+  # =========================================================================
+  linux-core:
+    name: Linux 核心库与测试
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装构建工具
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build
+
+      - uses: ./.github/actions/setup-vcpkg
+        with:
+          triplet: x64-linux
+
+      - name: 配置
+        run: cmake --preset linux-x64
+
+      - name: 构建
+        run: cmake --build --preset linux-x64
+
+      - name: 单元测试
+        run: ctest --preset linux-x64
+
+  # =========================================================================
+  # Windows x64：核心库（vcpkg x64-windows）+ WinUI 3 界面（.NET）
+  # =========================================================================
+  windows-x64:
+    name: Windows x64
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-vcpkg
+        with:
+          triplet: x64-windows
+
+      # Ninja 需要 cl.exe 在 PATH 上，这个 action 负责摆好 MSVC 环境变量。
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: 确认 Ninja 可用
+        shell: pwsh
+        run: |
+          if (-not (Get-Command ninja -ErrorAction SilentlyContinue)) {
+            choco install ninja -y --no-progress
+          }
+          ninja --version
+
+      - name: 配置核心库
+        run: cmake --preset windows-x64
+
+      - name: 构建核心库
+        run: cmake --build --preset windows-x64
+
+      - name: 单元测试
+        run: ctest --preset windows-x64
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: 构建 WinUI 3 界面
+        run: >
+          dotnet publish app-windows/ADisplay.Windows.csproj
+          -c Release -r win-x64 -p:Platform=x64
+          -o publish/windows-x64
+          -p:AdDisplayCoreDir="${{ github.workspace }}\build\windows-x64\bin"
+
+      - name: 打包
+        shell: pwsh
+        run: |
+          Compress-Archive -Path publish/windows-x64/* -DestinationPath adisplay-windows-x64.zip -Force
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: adisplay-windows-x64
+          path: adisplay-windows-x64.zip
+          if-no-files-found: error
+
+  # =========================================================================
+  # Windows ARM64：文档 2.5 要求骁龙 X 系列笔记本上原生运行，不依赖 x64 转译。
+  # 在 x64 runner 上用 vcpkg 的 arm64-windows 三元组交叉编译，
+  # 不依赖 GitHub 是否提供 ARM64 的 Windows runner。
+  # =========================================================================
+  windows-arm64:
+    name: Windows ARM64
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-vcpkg
+        with:
+          triplet: arm64-windows
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: arm64
+
+      - name: 确认 Ninja 可用
+        shell: pwsh
+        run: |
+          if (-not (Get-Command ninja -ErrorAction SilentlyContinue)) {
+            choco install ninja -y --no-progress
+          }
+          ninja --version
+
+      - name: 配置核心库
+        run: cmake --preset windows-arm64
+
+      - name: 构建核心库
+        run: cmake --build --preset windows-arm64
+
+      # 单元测试不在这里跑：runner 是 x64，跑不了 ARM64 的测试可执行文件。
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: 构建 WinUI 3 界面
+        run: >
+          dotnet publish app-windows/ADisplay.Windows.csproj
+          -c Release -r win-arm64 -p:Platform=ARM64
+          -o publish/windows-arm64
+          -p:AdDisplayCoreDir="${{ github.workspace }}\build\windows-arm64\bin"
+
+      - name: 打包
+        shell: pwsh
+        run: |
+          Compress-Archive -Path publish/windows-arm64/* -DestinationPath adisplay-windows-arm64.zip -Force
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: adisplay-windows-arm64
+          path: adisplay-windows-arm64.zip
+          if-no-files-found: error
+
+  # =========================================================================
+  # macOS Universal：文档 2.5 要求一个包同时覆盖 Apple Silicon 与 Intel。
+  # 依赖走自定义三元组 arm64-osx-universal，让每个库都编成通用二进制。
+  # =========================================================================
+  macos-universal:
+    name: macOS Universal
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 确认 Ninja 可用
+        run: |
+          if ! command -v ninja >/dev/null 2>&1; then
+            brew install ninja
+          fi
+          ninja --version
+
+      - uses: ./.github/actions/setup-vcpkg
+        with:
+          triplet: arm64-osx-universal
+          host-triplet: arm64-osx
+          overlay-triplets: ${{ github.workspace }}/triplets
+
+      - name: 配置核心库
+        run: cmake --preset macos-universal
+
+      - name: 构建核心库
+        run: cmake --build --preset macos-universal
+
+      - name: 单元测试
+        run: ctest --preset macos-universal
+
+      - name: 确认核心库确实是通用二进制
+        run: |
+          lipo -info build/macos-universal/lib/libcastcore.dylib
+          lipo -info build/macos-universal/lib/libcastcore.dylib | grep -q "arm64" || exit 1
+          lipo -info build/macos-universal/lib/libcastcore.dylib | grep -q "x86_64" || exit 1
+
+      - name: 构建 SwiftUI 界面
+        run: |
+          set -euo pipefail
+          # 让链接器能找到刚编出来的通用版核心库。
+          export LIBRARY_PATH="${PWD}/build/macos-universal/lib:${LIBRARY_PATH:-}"
+          cd app-macos
+          swift build -c release --arch arm64 --arch x86_64
+
+      - name: 组装 .app 并打 dmg
+        run: |
+          set -euo pipefail
+
+          # universal 构建的产物落在 .build/apple/Products/Release 下，
+          # 单架构在 .build/release，两种都兜住。
+          EXECUTABLE="$(find app-macos/.build -type f -name ADisplay -perm -u+x | head -n 1)"
+          if [ -z "${EXECUTABLE}" ]; then
+            echo "找不到 Swift 构建产物" >&2
+            find app-macos/.build -maxdepth 4 -type d >&2 || true
+            exit 1
+          fi
+          echo "可执行文件：${EXECUTABLE}"
+          lipo -info "${EXECUTABLE}" || true
+
+          ./app-macos/build-app.sh \
+            "${EXECUTABLE}" \
+            "${PWD}/build/macos-universal/lib/libcastcore.dylib" \
+            "${PWD}/dist"
+
+          # 验证包内每个 Mach-O 都是通用二进制，避免发出只能跑一半机器的包。
+          lipo -info dist/ADisplay.app/Contents/MacOS/ADisplay
+          lipo -info dist/ADisplay.app/Contents/Frameworks/libcastcore.dylib
+
+          hdiutil create -volname "ADisplay" \
+            -srcfolder dist/ADisplay.app \
+            -ov -format UDZO \
+            adisplay-macos-universal.dmg
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: adisplay-macos-universal
+          path: adisplay-macos-universal.dmg
+          if-no-files-found: error
+
+  # =========================================================================
+  # Android TV：文档 2.3 与 4.5 的电视端要求。
+  # 批次 0 只出界面骨架（尚未接 JNI），先把 Gradle 构建链路打通。
+  # =========================================================================
+  android-tv:
+    name: Android TV
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: 构建 APK
+        working-directory: app-tv
+        run: gradle assembleRelease --no-daemon --stacktrace
+
+      - name: 重命名产物
+        run: |
+          set -euo pipefail
+          APK="$(find app-tv/app/build/outputs/apk/release -name '*.apk' | head -n 1)"
+          if [ -z "${APK}" ]; then
+            echo "没有产出 APK" >&2
+            exit 1
+          fi
+          cp "${APK}" adisplay-android-tv.apk
+          ls -lh adisplay-android-tv.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: adisplay-android-tv
+          path: adisplay-android-tv.apk
+          if-no-files-found: error

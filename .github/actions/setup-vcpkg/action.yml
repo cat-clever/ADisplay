@@ -1,0 +1,80 @@
+name: 准备 vcpkg
+description: 克隆并引导 vcpkg，恢复二进制缓存，让各平台的依赖编译结果可以复用
+
+inputs:
+  triplet:
+    description: vcpkg 目标三元组（如 x64-windows、arm64-osx-universal）
+    required: true
+  host-triplet:
+    description: vcpkg 宿主三元组，留空表示与目标相同
+    required: false
+    default: ''
+  overlay-triplets:
+    description: 自定义三元组目录（绝对路径），留空表示不使用
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    # 二进制缓存是这套方案能用的前提：vcpkg 要源码编译 FFmpeg / OpenSSL 这类重库，
+    # 没有缓存的话每次 CI 都要多花几十分钟。缓存文件放在工作区，由 actions/cache 托管。
+    - name: 恢复 vcpkg 二进制缓存
+      uses: actions/cache@v4
+      with:
+        path: ${{ github.workspace }}/vcpkg-cache
+        key: vcpkg-${{ runner.os }}-${{ inputs.triplet }}-${{ hashFiles('vcpkg.json') }}
+        restore-keys: |
+          vcpkg-${{ runner.os }}-${{ inputs.triplet }}-
+          vcpkg-${{ runner.os }}-
+
+    - name: 克隆 vcpkg（Unix）
+      if: runner.os != 'Windows'
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [ ! -d "${VCPKG_ROOT}/.git" ]; then
+          # --filter=blob:none：vcpkg 仓库很大，只拉提交与目录树，
+          # 文件按需下载，能把克隆时间从几分钟压到十几秒。
+          git clone --filter=blob:none https://github.com/microsoft/vcpkg.git "${VCPKG_ROOT}"
+        fi
+
+    - name: 引导 vcpkg（Unix）
+      if: runner.os != 'Windows'
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [ ! -x "${VCPKG_ROOT}/vcpkg" ]; then
+          "${VCPKG_ROOT}/bootstrap-vcpkg.sh" -disableMetrics
+        fi
+        "${VCPKG_ROOT}/vcpkg" version
+
+    - name: 克隆 vcpkg（Windows）
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        if (-not (Test-Path "$env:VCPKG_ROOT\.git")) {
+          git clone --filter=blob:none https://github.com/microsoft/vcpkg.git "$env:VCPKG_ROOT"
+        }
+
+    - name: 引导 vcpkg（Windows）
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        if (-not (Test-Path "$env:VCPKG_ROOT\vcpkg.exe")) {
+          & "$env:VCPKG_ROOT\bootstrap-vcpkg.bat" -disableMetrics
+        }
+        & "$env:VCPKG_ROOT\vcpkg.exe" version
+
+    - name: 记录三元组配置
+      shell: bash
+      run: |
+        {
+          echo "VCPKG_TARGET_TRIPLET=${{ inputs.triplet }}"
+          if [ -n "${{ inputs.host-triplet }}" ]; then
+            echo "VCPKG_HOST_TRIPLET=${{ inputs.host-triplet }}"
+          fi
+          if [ -n "${{ inputs.overlay-triplets }}" ]; then
+            echo "VCPKG_OVERLAY_TRIPLETS=${{ inputs.overlay-triplets }}"
+          fi
+        } >> "$GITHUB_ENV"

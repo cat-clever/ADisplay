@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>ADisplay</string>
+    <key>CFBundleDisplayName</key>
+    <string>ADisplay 投屏接收端</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.adisplay.receiver</string>
+    <key>CFBundleExecutable</key>
+    <string>ADisplay</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>12.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+
+    <!--
+        文档 4.5：较新的 macOS 访问本地网络需要用户授权，
+        Info.plist 中需声明 NSLocalNetworkUsageDescription 与 NSBonjourServices。
+        少了这两项，mDNS 广播会被系统静默拦掉 —— 表现是手机根本搜不到设备，
+        而且日志里看不出任何异常，非常难查。
+    -->
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>ADisplay 需要访问本地网络，才能被手机发现并接收投屏画面。</string>
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_airplay._tcp</string>
+        <string>_raop._tcp</string>
+        <string>_castpc._tcp</string>
+    </array>
+</dict>
+</plist>

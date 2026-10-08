@@ -1,0 +1,103 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Window
+    x:Class="ADisplay.Windows.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d"
+    Title="ADisplay 投屏接收端">
+
+    <Grid Padding="28" RowSpacing="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <!-- 设备名称（文档 2.4：可随时修改，手机投屏列表里显示的就是它） -->
+        <StackPanel Grid.Row="0" Spacing="8">
+            <TextBlock Text="设备名称" Style="{StaticResource BodyStrongTextBlockStyle}" />
+            <Grid ColumnSpacing="8">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBox x:Name="DeviceNameBox"
+                         Grid.Column="0"
+                         MaxLength="32"
+                         PlaceholderText="例如：客厅电脑"
+                         TextChanged="OnDeviceNameTextChanged" />
+                <Button x:Name="ApplyNameButton"
+                        Grid.Column="1"
+                        Content="保存"
+                        Style="{StaticResource AccentButtonStyle}"
+                        Click="OnApplyNameClick" />
+            </Grid>
+            <TextBlock x:Name="NameHintText"
+                       Foreground="{ThemeResource SystemFillColorCriticalBrush}"
+                       Style="{StaticResource CaptionTextBlockStyle}"
+                       Visibility="Collapsed" />
+        </StackPanel>
+
+        <!-- 服务开关与状态 -->
+        <StackPanel Grid.Row="1" Spacing="10">
+            <TextBlock Text="接收服务" Style="{StaticResource BodyStrongTextBlockStyle}" />
+            <StackPanel Orientation="Horizontal" Spacing="12">
+                <ToggleSwitch x:Name="ServiceToggle"
+                              OnContent="已开启"
+                              OffContent="已关闭"
+                              Toggled="OnServiceToggled" />
+                <TextBlock x:Name="StatusText"
+                           VerticalAlignment="Center"
+                           Style="{StaticResource BodyTextBlockStyle}" />
+            </StackPanel>
+        </StackPanel>
+
+        <!-- 本机信息：电视端待机页也要显示这些（文档 2.3） -->
+        <StackPanel Grid.Row="2" Spacing="6">
+            <TextBlock Text="本机信息" Style="{StaticResource BodyStrongTextBlockStyle}" />
+            <TextBlock Style="{StaticResource CaptionTextBlockStyle}">
+                <Run Text="局域网地址：" />
+                <Run x:Name="AddressRun" />
+            </TextBlock>
+            <TextBlock Style="{StaticResource CaptionTextBlockStyle}">
+                <Run Text="设备标识：" />
+                <Run x:Name="DeviceIdRun" />
+            </TextBlock>
+            <TextBlock Style="{StaticResource CaptionTextBlockStyle}">
+                <Run Text="核心版本：" />
+                <Run x:Name="VersionRun" />
+            </TextBlock>
+        </StackPanel>
+
+        <!-- 日志 -->
+        <Grid Grid.Row="3" RowSpacing="8">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
+            <TextBlock Grid.Row="0" Text="日志" Style="{StaticResource BodyStrongTextBlockStyle}" />
+            <Border Grid.Row="1"
+                    CornerRadius="4"
+                    Padding="8"
+                    Background="{ThemeResource LayerFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1">
+                <ScrollViewer x:Name="LogScrollViewer" VerticalScrollBarVisibility="Auto">
+                    <ItemsControl x:Name="LogList">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <TextBlock Text="{Binding}"
+                                           FontFamily="Consolas"
+                                           FontSize="12"
+                                           TextWrapping="Wrap" />
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </ScrollViewer>
+            </Border>
+        </Grid>
+    </Grid>
+</Window>

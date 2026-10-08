@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 应用图标：一个投屏到屏幕的简笔示意图。 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- 屏幕外框 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M18,28 h72 a4,4 0 0 1 4,4 v40 a4,4 0 0 1 -4,4 h-72 a4,4 0 0 1 -4,-4 v-40 a4,4 0 0 1 4,-4 z M22,36 v32 h64 v-32 z" />
+
+    <!-- 底座 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M44,80 h20 v6 h-20 z" />
+
+    <!-- 投屏信号波纹 -->
+    <path
+        android:fillColor="#4FC3F7"
+        android:pathData="M54,52 m-8,0 a8,8 0 1,0 16,0 a8,8 0 1,0 -16,0" />
+    <path
+        android:fillColor="#4FC3F7"
+        android:pathData="M40,52 a14,14 0 0 1 0,-0.1 z" />
+</vector>
