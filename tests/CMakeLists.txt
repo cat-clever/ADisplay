@@ -11,6 +11,7 @@ set(ADISPLAY_TEST_SOURCES
     test_ssdp_message.cpp
     test_dlna_description.cpp
     test_dlna_soap.cpp
+    test_dlna_http.cpp
 )
 
 foreach(test_source IN LISTS ADISPLAY_TEST_SOURCES)
@@ -27,11 +28,18 @@ foreach(test_source IN LISTS ADISPLAY_TEST_SOURCES)
             "${CMAKE_SOURCE_DIR}/core/discovery/src")
     endif()
 
-    # DLNA 的两组测试同样要触达 protocols/dlna/src 下的内部头。
+    # DLNA 的测试同样要触达 protocols/dlna/src 下的内部头。
     if(test_name MATCHES "^test_dlna_")
         target_link_libraries(${test_name} PRIVATE adisplay_dlna)
         target_include_directories(${test_name} PRIVATE
             "${CMAKE_SOURCE_DIR}/protocols/dlna/src")
+    endif()
+
+    # HTTP 端点那条集成测试要自己起客户端发 SUBSCRIBE / UNSUBSCRIBE
+    # （httplib 的客户端写请求行时不校验方法名），所以得单独链接 httplib —— 
+    # adisplay_dlna 是 PRIVATE 链接它，头文件传不出来。
+    if(test_name STREQUAL "test_dlna_http")
+        target_link_libraries(${test_name} PRIVATE httplib::httplib)
     endif()
     target_include_directories(${test_name} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
     target_link_libraries(${test_name} PRIVATE adisplay_warnings)

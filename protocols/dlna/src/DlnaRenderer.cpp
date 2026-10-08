@@ -587,22 +587,9 @@ struct DlnaRenderer::Impl {
         //     或 SERVER 头不合它的口味）
         //   * 有日志但没继续 → 看它请求了什么、我们回了什么
         server.set_pre_routing_handler(
-            [this](const httplib::Request& request, httplib::Response& response) {
+            [](const httplib::Request& request, httplib::Response&) {
                 AD_LOG_INFO("HTTP {} {} ← {} [{}]", request.method, request.path,
                             request.remote_addr, request.get_header_value("User-Agent"));
-
-                // SUBSCRIBE / UNSUBSCRIBE 是 WebDAV/UPnP 的扩展方法，
-                // cpp-httplib 没有对应的注册接口，只能在这里接手。
-                if (request.path == "/event") {
-                    if (request.method == "SUBSCRIBE") {
-                        handle_subscribe(request, response);
-                        return httplib::Server::HandlerResponse::Handled;
-                    }
-                    if (request.method == "UNSUBSCRIBE") {
-                        handle_unsubscribe(request, response);
-                        return httplib::Server::HandlerResponse::Handled;
-                    }
-                }
                 return httplib::Server::HandlerResponse::Unhandled;
             });
 
@@ -643,6 +630,28 @@ struct DlnaRenderer::Impl {
         server.Get("/event", [](const httplib::Request&, httplib::Response& response) {
             response.status = 405;
         });
+
+        // GENA 事件订阅 / 退订。
+        //
+        // 必须走 CustomRoute 注册。cpp-httplib 对内置方法表（GET/HEAD/POST/
+        // PUT/DELETE/OPTIONS/PATCH）之外的方法，在「解析请求行」阶段就直接
+        // 回 400，请求根本到不了处理器 —— 连上面那行访问日志都不会打，
+        // 所以日志里完全看不到 SUBSCRIBE 的踪迹。
+        //
+        // 这不是锦上添花：Cling 系控制点（天际视频用的正是它）要求先订阅
+        // AVTransport 事件、拿到 200 + SID + TIMEOUT 才算订阅建立，然后在
+        // 「连接成功」回调里才发 SetAVTransportURI。订阅被回 400，它就只
+        // 显示「投屏失败」，且全程不发任何 POST /control；而 B 站 / 夸克
+        // 那类不订阅、直接发 SOAP 的客户端不受影响，所以问题只在一部分
+        // App 上暴露。
+        server.CustomRoute("SUBSCRIBE", "/event",
+                           [this](const httplib::Request& request, httplib::Response& response) {
+                               handle_subscribe(request, response);
+                           });
+        server.CustomRoute("UNSUBSCRIBE", "/event",
+                           [this](const httplib::Request& request, httplib::Response& response) {
+                               handle_unsubscribe(request, response);
+                           });
     }
 };
 
