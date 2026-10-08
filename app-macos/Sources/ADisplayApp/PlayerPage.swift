@@ -46,6 +46,7 @@ final class PlayerViewModel: ObservableObject {
     private var volumeObserver: NSKeyValueObservation?
     private var endObserver: NSObjectProtocol?
     private var failureObserver: NSObjectProtocol?
+    private var itemStatusObserver: NSKeyValueObservation?
 
     // 上一次回报过的状态与时长。相同就不重复回报 —— 位置变化很频繁，
     // 但状态和时长只在真变了时才值得回报，否则核心会推一串无意义的事件。
@@ -104,6 +105,21 @@ final class PlayerViewModel: ObservableObject {
             }
         }
 
+        // 拉流起不来的话，AVPlayer 既不播完也不触发 failedToPlayToEndTime ——
+        // 它就那么挂着。只观察那两个通知的话，我们会一直回报 TRANSITIONING，
+        // 手机那边看到的就是「投屏中但进度条不动」，而且永远不结束。
+        // 所以必须盯 item.status。
+        itemStatusObserver = player.currentItem?.observe(\.status, options: [.initial, .new]) {
+            [weak self] item, _ in
+            guard item.status == .failed else { return }
+            let reason = item.error?.localizedDescription ?? "未知原因"
+            guard let self = self else { return }
+            Task { @MainActor in
+                self.engine?.log("拉流失败：\(reason)", level: .error)
+                self.report(forceState: .stopped)
+            }
+        }
+
         // 播完或者拉流失败都要回报一次，否则手机上会一直停在「播放中」。
         endObserver = NotificationCenter.default.addObserver(
             forName: AVPlayerItem.didPlayToEndTimeNotification,
@@ -139,6 +155,7 @@ final class PlayerViewModel: ObservableObject {
             timeObserver = nil
         }
         volumeObserver = nil
+        itemStatusObserver = nil
         for observer in [endObserver, failureObserver] {
             if let observer = observer {
                 NotificationCenter.default.removeObserver(observer)

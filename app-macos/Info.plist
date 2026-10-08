@@ -25,6 +25,21 @@
     <true/>
 
     <!--
+        DLNA 给的是明文 http:// 地址 —— 局域网媒体服务器、B 站这类 CDN 都是，
+        而 App Transport Security 默认只放行 https。
+
+        不开这个开关，AVPlayer 会直接拒绝加载，而且不会给出任何错误：
+        手机那边显示正在投屏、接收端日志里也有「开始拉流」，唯独屏幕上
+        永远没有画面，手机会一直轮询 GetPositionInfo。投屏接收端天然要
+        拉明文流，这个开关是必需的。
+    -->
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsArbitraryLoads</key>
+        <true/>
+    </dict>
+
+    <!--
         文档 4.5：较新的 macOS 访问本地网络需要用户授权，
         Info.plist 中需声明 NSLocalNetworkUsageDescription 与 NSBonjourServices。
         少了这两项，mDNS 广播会被系统静默拦掉 —— 表现是手机根本搜不到设备，
