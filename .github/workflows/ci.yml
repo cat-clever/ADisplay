@@ -170,7 +170,7 @@ jobs:
 
       - uses: ./.github/actions/setup-vcpkg
         with:
-          triplet: x64-windows-static-md
+          triplet: x64-windows-static
 
       # Ninja 需要 cl.exe 在 PATH 上，这个 action 负责摆好 MSVC 环境变量。
       - uses: ilammy/msvc-dev-cmd@v1
@@ -207,12 +207,16 @@ jobs:
       - name: 构建 WinUI 3 界面
         shell: pwsh
         run: |
+          # SelfContained 必须显式给：.NET 6 起 /t:Publish 带 RuntimeIdentifier 时默认
+          # 是「依赖框架」，也就是不打包运行时本体 —— 那正是这份包一直打不开的原因之一
+          # （机器上没装 .NET 8 就起不来）。计划里说的「免装 runtime」靠的就是这个开关。
           msbuild app-windows\ADisplay.Windows.csproj `
             /restore `
             /t:Publish `
             /p:Configuration=Release `
             /p:Platform=x64 `
             /p:RuntimeIdentifier=win-x64 `
+            /p:SelfContained=true `
             /p:PublishDir="${{ github.workspace }}\publish\windows-x64\" `
             /p:AdDisplayCoreDir="${{ github.workspace }}\build\windows-x64\bin"
 
@@ -248,7 +252,7 @@ jobs:
 
       - uses: ./.github/actions/setup-vcpkg
         with:
-          triplet: arm64-windows-static-md
+          triplet: arm64-windows-static
 
       # amd64_arm64 = x64 宿主 + ARM64 目标。
       # 不能写 arm64：那会让 vcvarsall 配出「ARM64 宿主原生」环境，
@@ -289,6 +293,7 @@ jobs:
             /p:Configuration=Release `
             /p:Platform=ARM64 `
             /p:RuntimeIdentifier=win-arm64 `
+            /p:SelfContained=true `
             /p:PublishDir="${{ github.workspace }}\publish\windows-arm64\" `
             /p:AdDisplayCoreDir="${{ github.workspace }}\build\windows-arm64\bin"
 
