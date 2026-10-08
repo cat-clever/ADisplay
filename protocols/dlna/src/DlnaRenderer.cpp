@@ -539,6 +539,38 @@ struct DlnaRenderer::Impl {
     }
 
     void register_routes() {
+        // 记录每一个进来的 HTTP 请求（方法、路径、来源、User-Agent），
+        // 并在同一个处理器里接手 SUBSCRIBE / UNSUBSCRIBE。
+        //
+        // cpp-httplib 只允许一个 pre-routing handler，所以两件事必须合并 —— 
+        // 分成两个的话后者会覆盖前者，日志或订阅会静默失效。
+        //
+        // 排查「某个 App 搜不到设备」时，这是最关键的一条线索：
+        // SSDP 那层只能证明「我们回了响应」，但客户端收到之后有没有兴趣
+        // 来拉设备描述，只有这里看得到。
+        //   * 完全没日志 → 客户端收到响应后直接跳过了我们（多半是描述字段
+        //     或 SERVER 头不合它的口味）
+        //   * 有日志但没继续 → 看它请求了什么、我们回了什么
+        server.set_pre_routing_handler(
+            [this](const httplib::Request& request, httplib::Response& response) {
+                AD_LOG_INFO("HTTP {} {} ← {} [{}]", request.method, request.path,
+                            request.remote_addr, request.get_header_value("User-Agent"));
+
+                // SUBSCRIBE / UNSUBSCRIBE 是 WebDAV/UPnP 的扩展方法，
+                // cpp-httplib 没有对应的注册接口，只能在这里接手。
+                if (request.path == "/event") {
+                    if (request.method == "SUBSCRIBE") {
+                        handle_subscribe(request, response);
+                        return httplib::Server::HandlerResponse::Handled;
+                    }
+                    if (request.method == "UNSUBSCRIBE") {
+                        handle_unsubscribe(request, response);
+                        return httplib::Server::HandlerResponse::Handled;
+                    }
+                }
+                return httplib::Server::HandlerResponse::Unhandled;
+            });
+
         server.Get("/description.xml", [this](const httplib::Request&, httplib::Response& response) {
             handle_description(response);
         });
@@ -551,27 +583,6 @@ struct DlnaRenderer::Impl {
         server.Post("/control", [this](const httplib::Request& request, httplib::Response& response) {
             handle_control(request, response);
         });
-
-        // 订阅与续订都走 SUBSCRIBE，取消走 UNSUBSCRIBE。
-        //
-        // cpp-httplib 只支持标准 HTTP 方法，SUBSCRIBE / UNSUBSCRIBE 属于
-        // WebDAV/UPnP 的扩展方法，没有对应的注册接口。所以用 pre-routing
-        // 处理器在路由之前拦截 —— 返回 Handled 表示已处理，库不会再往下走。
-        server.set_pre_routing_handler(
-            [this](const httplib::Request& request, httplib::Response& response) {
-                if (request.path != "/event") {
-                    return httplib::Server::HandlerResponse::Unhandled;
-                }
-                if (request.method == "SUBSCRIBE") {
-                    handle_subscribe(request, response);
-                    return httplib::Server::HandlerResponse::Handled;
-                }
-                if (request.method == "UNSUBSCRIBE") {
-                    handle_unsubscribe(request, response);
-                    return httplib::Server::HandlerResponse::Handled;
-                }
-                return httplib::Server::HandlerResponse::Unhandled;
-            });
 
         // 手机有时会先 GET 一下事件地址探测可用性。
         server.Get("/event", [](const httplib::Request&, httplib::Response& response) {
