@@ -14,6 +14,7 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <cerrno>   // errno，setsockopt / sendto 失败时要打错误码
 #include <cstring>
 #include <ctime>
 #include <functional>
@@ -287,12 +288,28 @@ struct SsdpServer::Impl {
 
     // ---- 发送 --------------------------------------------------------------
 
-    void send_to(const std::string& data, const sockaddr_in& target) {
+    // 返回是否发送成功。
+    //
+    // 原来的返回值直接丢掉了 —— 广播发不出去（权限、网络不可达、接口选错）
+    // 时不会有任何痕迹，程序看起来一切正常，而手机那头什么都收不到。
+    bool send_to(const std::string& data, const sockaddr_in& target) {
         if (socket_handle == kInvalidSocket) {
-            return;
+            return false;
         }
-        ::sendto(socket_handle, data.data(), static_cast<int>(data.size()), 0,
-                 reinterpret_cast<const sockaddr*>(&target), sizeof(target));
+        const int sent = ::sendto(socket_handle, data.data(),
+                                  static_cast<int>(data.size()), 0,
+                                  reinterpret_cast<const sockaddr*>(&target),
+                                  sizeof(target));
+        if (sent < 0) {
+#if defined(_WIN32)
+            const int code = ::WSAGetLastError();
+#else
+            const int code = errno;
+#endif
+            AD_LOG_WARN("SSDP 发送失败（错误码 {}）", code);
+            return false;
+        }
+        return true;
     }
 
     // 逐块网卡发送组播。
@@ -302,8 +319,10 @@ struct SsdpServer::Impl {
     //
     // 一个 socket 只能设一个组播出接口，所以要发一轮、换一次接口。
     // 不这么做的话，只有默认路由那块网卡上的设备能收到。
-    void send_multicast_per_interface(
+    // 返回成功发出的网卡数，便于调用方判断广播是否真的出去了。
+    std::size_t send_multicast_per_interface(
         const std::function<std::string(const std::string& address)>& builder) {
+        std::size_t sent_count = 0;
         sockaddr_in target;
         std::memset(&target, 0, sizeof(target));
         target.sin_family = AF_INET;
@@ -321,8 +340,11 @@ struct SsdpServer::Impl {
                                    "IP_MULTICAST_IF", nullptr)) {
                 continue;
             }
-            send_to(builder(binding.address), target);
+            if (send_to(builder(binding.address), target)) {
+                ++sent_count;
+            }
         }
+        return sent_count;
     }
 
     // 判断两个 IPv4 地址是否在同一网段。
@@ -370,14 +392,20 @@ struct SsdpServer::Impl {
 
         // 逐块网卡发，且每块网卡用各自的 LOCATION —— 手机从哪个网段收到，
         // 就用哪个网段的地址去拉设备描述。
-        send_multicast_per_interface([&snapshot, &targets](const std::string& address) {
-            std::string payload;
-            const std::string location = location_for(snapshot, address);
-            for (const NotificationTarget& target : targets) {
-                payload += build_alive_message(snapshot, target, location);
-            }
-            return payload;
-        });
+        const std::size_t sent = send_multicast_per_interface(
+            [&snapshot, &targets](const std::string& address) {
+                std::string payload;
+                const std::string location = location_for(snapshot, address);
+                for (const NotificationTarget& target : targets) {
+                    payload += build_alive_message(snapshot, target, location);
+                }
+                return payload;
+            });
+
+        if (sent == 0) {
+            AD_LOG_ERROR("SSDP 广播一条都没发出去（{} 块网卡全部失败）",
+                         interfaces_.size());
+        }
 
         last_announce = std::chrono::steady_clock::now();
     }
@@ -423,20 +451,33 @@ struct SsdpServer::Impl {
             return;
         }
 
+        // 请求方的地址。日志里要打，也用来挑同网段的网卡。
+        char peer_text[INET_ADDRSTRLEN] = {0};
+        ::inet_ntop(AF_INET, &sender.sin_addr, peer_text, sizeof(peer_text));
+
         // UPnP 建议在 0..MX 秒内随机延迟后回复，避免所有设备同时响应。
         const int delay_ms = static_cast<int>(common::random_below(kMaxResponseDelayMs));
         std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
 
         // 用与请求方同网段的那块网卡的地址拼 LOCATION。
-        char peer_text[INET_ADDRSTRLEN] = {0};
-        ::inet_ntop(AF_INET, &sender.sin_addr, peer_text, sizeof(peer_text));
         const InterfaceBinding* binding = interface_for_peer(peer_text);
         const std::string address = (binding != nullptr) ? binding->address : std::string();
 
-        send_to(build_search_response(snapshot, st, location_for(snapshot, address)), sender);
-        responded_count.fetch_add(1, std::memory_order_relaxed);
+        const bool replied = send_to(
+            build_search_response(snapshot, st, location_for(snapshot, address)), sender);
+        const uint64_t total = responded_count.fetch_add(1, std::memory_order_relaxed) + 1;
 
-        AD_LOG_DEBUG("已回复 M-SEARCH（ST={}）", st);
+        // 收到查询就记一条，但做限流：头三条全记，之后每 20 条记一条。
+        //
+        // 这条日志是排查「手机搜不到设备」时最关键的分界线：
+        //   * 一条都没有 → 手机根本没发查询，或者我们收不到（网络/组播问题）
+        //   * 收到了但手机不显示 → 我们的响应报文有问题
+        // 之前只有 DEBUG 级别，默认看不到，等于没有。
+        if (total <= 3 || total % 20 == 0) {
+            AD_LOG_INFO("收到 M-SEARCH（来源 {}，ST={}，累计 {} 次）{}",
+                        peer_text, st, total,
+                        replied ? "" : "，但回复发送失败");
+        }
     }
 
     void run_loop() {
