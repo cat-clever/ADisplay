@@ -580,6 +580,35 @@ jobs:
       # 自动打进 APK 的 lib/<ABI>/，build.gradle.kts 里一行配置都不用写。
       # 目录名必须和 ABI 名逐字对上 —— 写成 arm64 而不是 arm64-v8a 的话，
       # Gradle 只会安静地忽略掉它们，产出一个没有 .so 的 APK。
+      # 剥掉调试符号。
+      #
+      # NDK 的 toolchain 默认给编译加 -g（与构建类型无关），而我们没走 AGP 的
+      # externalNativeBuild，所以 AGP 那套剥离任务不会碰这两个 .so。实测不剥的话
+      # libcastcore.so 有 120 MB、整个 APK 128 MB —— FFmpeg 的静态库再大也不该是
+      # 这个量级，多出来的全是调试信息与符号表。
+      #
+      # --strip-unneeded 只去调试信息与局部符号，.dynsym 保留，所以 JNI 那边靠
+      # dlsym 找 Java_xxx 不受影响。
+      - name: 剥离调试符号
+        run: |
+          set -euo pipefail
+          STRIP="$(ls "${ANDROID_NDK_HOME}"/toolchains/llvm/prebuilt/*/bin/llvm-strip | head -1)"
+          if [ -z "${STRIP}" ]; then
+            echo "在 NDK 里找不到 llvm-strip" >&2
+            exit 1
+          fi
+          for NAME in libcastcore.so libadisplay_jni.so; do
+            TARGET="$(find build/android-arm64 -name "${NAME}" | head -1)"
+            if [ -z "${TARGET}" ]; then
+              echo "找不到 ${NAME}" >&2
+              exit 1
+            fi
+            BEFORE="$(stat -c%s "${TARGET}")"
+            "${STRIP}" --strip-unneeded "${TARGET}"
+            AFTER="$(stat -c%s "${TARGET}")"
+            echo "${NAME}：${BEFORE} → ${AFTER} 字节"
+          done
+
       - name: 摆好 jniLibs
         run: |
           set -euo pipefail

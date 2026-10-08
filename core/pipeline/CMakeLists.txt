@@ -6,19 +6,44 @@
 #
 # 依赖同样收窄：只用 libavformat / libavcodec / libavutil（解复用 + 换封装），
 # 不要 avfilter / swscale / swresample，也不要任何编码器 —— 不做解码就不需要它们。
+# 要不要编「本地换封装」这部分。
+#
+# Android 不编：电视端的 ExoPlayer + MediaCodec 本来就能直接放 HEVC-in-TS ——
+# 这套换封装是为 macOS 的 AVPlayer 准备的（它拒绝 HEVC-in-TS）。在电视上先把 TS
+# 重封装成 fMP4、再交给一个能直接吃 TS 的播放器，是净亏：多一次拷贝、多一份
+# CPU，画质不会有任何提升。
+#
+# 代价还很大：FFmpeg 的 libavcodec + libavformat 静态链进来让 libcastcore.so
+# 涨到 120 MB 左右（APK 从 ~30 MB 变成 128 MB），而这些代码在电视上根本不会
+# 被执行。所以这里按平台挑源文件，与 core/discovery 挑 mDNS 实现是同一种做法。
+set(ADISPLAY_PIPELINE_WITH_REMUX ON)
+if(ANDROID)
+    set(ADISPLAY_PIPELINE_WITH_REMUX OFF)
+endif()
+
+if(ADISPLAY_PIPELINE_WITH_REMUX)
+    set(ADISPLAY_PIPELINE_REMUX_SOURCES
+        # 远端拉取（HTTP 客户端），播放列表与分片都要用它。
+        src/HttpFetch.cpp
+        # TS 分片 → fMP4 的换封装。只依赖 libavformat。
+        src/Mp4Remuxer.cpp
+        # 一次中转会话：分片的按需生产与缓存，以及那套并发模型。
+        src/RelaySession.cpp
+        # 本地 HTTP 中转服务与对外接口。
+        src/MediaRelay.cpp
+    )
+else()
+    # 同一套接口的「本平台不需要」实现，让调用方无需条件编译。
+    set(ADISPLAY_PIPELINE_REMUX_SOURCES src/MediaRelayUnsupported.cpp)
+endif()
+
 add_library(adisplay_pipeline STATIC
     # 媒体源形态判断。纯函数，单独成文件便于单元测试。
     src/MediaSource.cpp
     # 本地 HLS 播放列表的改写。同样是纯函数，必须能被单元测试直接覆盖。
+    # Android 上也要跑单测，所以不放上面的条件里。
     src/HlsPlaylist.cpp
-    # 远端拉取（HTTP 客户端），播放列表与分片都要用它。
-    src/HttpFetch.cpp
-    # TS 分片 → fMP4 的换封装。只依赖 libavformat。
-    src/Mp4Remuxer.cpp
-    # 一次中转会话：分片的按需生产与缓存，以及那套并发模型。
-    src/RelaySession.cpp
-    # 本地 HTTP 中转服务与对外接口。
-    src/MediaRelay.cpp
+    ${ADISPLAY_PIPELINE_REMUX_SOURCES}
 )
 
 target_include_directories(adisplay_pipeline
@@ -37,6 +62,8 @@ target_include_directories(adisplay_pipeline
 #   4. 手工 find_path + find_library（最后兜底）
 # 少一个库都会在链接期炸掉，所以这里找不到就直接 FATAL_ERROR，不要留到运行期。
 # ---------------------------------------------------------------------------
+# 不编换封装的平台连找都不用找 —— 找不到也没有意义。
+if(ADISPLAY_PIPELINE_WITH_REMUX)
 find_package(FFMPEG CONFIG QUIET)
 if(NOT TARGET FFMPEG::avformat)
     find_package(ffmpeg CONFIG QUIET)
@@ -93,14 +120,22 @@ if(NOT ADISPLAY_FFMPEG_LIBS)
         "找不到 FFmpeg 的 libavformat / libavcodec / libavutil。"
         "媒体管线的换封装需要它们（vcpkg.json 里声明了 ffmpeg 的 avcodec + avformat）。")
 endif()
+endif()   # ADISPLAY_PIPELINE_WITH_REMUX
 
 target_link_libraries(adisplay_pipeline
     PRIVATE
         adisplay_common
         adisplay_warnings
-        httplib::httplib
-        ${ADISPLAY_FFMPEG_LIBS}
 )
+
+# 远端拉取用 httplib，换封装用 FFmpeg —— 只有编那部分的平台才需要。
+if(ADISPLAY_PIPELINE_WITH_REMUX)
+    target_link_libraries(adisplay_pipeline
+        PRIVATE
+            httplib::httplib
+            ${ADISPLAY_FFMPEG_LIBS}
+    )
+endif()
 
 set_target_properties(adisplay_pipeline PROPERTIES
     CXX_VISIBILITY_PRESET hidden
