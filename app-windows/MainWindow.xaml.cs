@@ -38,7 +38,13 @@ public sealed partial class MainWindow : Window
 
     public MainWindow()
     {
+        StartupLog.Enter("MainWindow 构造函数");
+
+        // XAML 解析失败是「进程活着却没有窗口」的头号嫌疑，这一对进入/离开
+        // 正好把它圈出来：日志停在「进入」而没有「离开」，就是解析这一步炸了。
+        StartupLog.Enter("MainWindow.InitializeComponent()");
         InitializeComponent();
+        StartupLog.Leave("MainWindow.InitializeComponent()");
 
         _dispatcher = DispatcherQueue.GetForCurrentThread();
         LogList.ItemsSource = _logLines;
@@ -53,17 +59,27 @@ public sealed partial class MainWindow : Window
 
         Closed += OnWindowClosed;
 
+        // 创建核心引擎要加载 castcore.dll 及其原生依赖，是启动路上第二容易出事的地方。
+        StartupLog.Enter("InitializeEngine");
         InitializeEngine();
+        StartupLog.Leave("InitializeEngine");
+
+        StartupLog.Leave("MainWindow 构造函数");
     }
 
     private void InitializeEngine()
     {
         try
         {
+            // 核心自带一套日志（adisplay.log，默认落在 %APPDATA%\ADisplay），
+            // 但它要等 Create 成功之后才开写。这里的启动日志比它早，负责的是
+            // 「引擎还没起来、或压根起不来」的那一段，两者不重复也不共用文件。
+            StartupLog.Enter("_engine.Create");
             _engine.Create(
                 deviceName: string.Empty,   // 空表示由核心取主机名作为默认设备名
                 logFilePath: string.Empty,  // 空表示用平台默认日志路径
                 configFilePath: string.Empty);
+            StartupLog.Leave("_engine.Create");
 
             DeviceNameBox.Text = _engine.DeviceName;
             DeviceIdRun.Text = _engine.DeviceId;
@@ -74,6 +90,7 @@ public sealed partial class MainWindow : Window
         }
         catch (Exception ex)
         {
+            StartupLog.Failed("_engine.Create", ex);
             StatusText.Text = ex.Message;
             AppendLog(AdLogLevel.Error, ex.Message);
             ServiceToggle.IsEnabled = false;
@@ -237,7 +254,11 @@ public sealed partial class MainWindow : Window
 
     private void EndCasting()
     {
-        _reportTimer?.Stop();
+        // 项目约定不用 ?. 空条件运算符，写成显式判断。
+        if (_reportTimer != null)
+        {
+            _reportTimer.Stop();
+        }
         _castSessionId = 0;
 
         PlayerElement.Source = null;
