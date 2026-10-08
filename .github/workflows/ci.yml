@@ -394,6 +394,50 @@ jobs:
   # Android TV：文档 2.3 与 4.5 的电视端要求。
   # 批次 0 只出界面骨架（尚未接 JNI），先把 Gradle 构建链路打通。
   # =========================================================================
+  # 电视端要的核心库。APK 由 Gradle 那边构建，这里只验证 castcore 能被
+  # NDK 交叉编译出来 —— 这一环不通，后面接 JNI、接播放器都无从谈起。
+  android-core:
+    name: Android 核心库（arm64-v8a）
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-vcpkg
+        with:
+          triplet: arm64-android
+
+      # vcpkg 的 android 三元组要知道 NDK 在哪。runner 上可能装了不止一个
+      # 版本，取版本号最大的那个（android-tv 任务用的是同一套 NDK）。
+      - name: 定位 NDK
+        run: |
+          set -euo pipefail
+          NDK_DIR="$(ls -d "${ANDROID_HOME}"/ndk/* 2>/dev/null | sort -V | tail -1 || true)"
+          if [ -z "${NDK_DIR}" ]; then
+            echo "runner 上没有 NDK" >&2
+            exit 1
+          fi
+          echo "用 NDK：${NDK_DIR}"
+          echo "ANDROID_NDK_HOME=${NDK_DIR}" >> "$GITHUB_ENV"
+
+      - name: 配置
+        run: cmake --preset android-arm64
+
+      - name: 构建
+        run: cmake --build --preset android-arm64
+
+      # 产物路径由顶层 CMakeLists 决定，不写死 —— 写死了以后调整输出目录
+      # 就会变成一个看不懂的失败。
+      - name: 校验产物
+        run: |
+          set -euo pipefail
+          SO="$(find build/android-arm64 -name 'libcastcore.so' | head -1)"
+          if [ -z "${SO}" ]; then
+            echo "没找到 libcastcore.so" >&2
+            exit 1
+          fi
+          ls -la "${SO}"
+          file "${SO}"
+
   android-tv:
     name: Android TV
     runs-on: ubuntu-22.04

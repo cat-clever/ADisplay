@@ -9,6 +9,12 @@ if(APPLE)
 elseif(WIN32)
     set(ADISPLAY_MDNS_SOURCE
         "${CMAKE_SOURCE_DIR}/platform/windows/src/MdnsPublisherWindows.cpp")
+elseif(ANDROID)
+    # Android 的 mDNS 由电视端用 NsdManager 发布（Java 层，C++ 够不到），
+    # 这份实现如实报告「核心不支持」，避免落到下面 Linux 的 Avahi 分支上 ——
+    # Android 上没有 Avahi，落到那里是链接期就会炸。
+    set(ADISPLAY_MDNS_SOURCE
+        "${CMAKE_SOURCE_DIR}/platform/android/src/MdnsPublisherAndroid.cpp")
 else()
     set(ADISPLAY_MDNS_SOURCE
         "${CMAKE_SOURCE_DIR}/platform/linux/src/MdnsPublisherLinux.cpp")
