@@ -21,6 +21,7 @@ target_include_directories(castcore
 target_link_libraries(castcore
     PRIVATE
         adisplay_common
+        adisplay_discovery
 )
 
 # AD_API 在 Windows 上要区分「编译核心库」与「使用核心库」，

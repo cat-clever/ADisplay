@@ -30,6 +30,14 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
+# Windows 的 <windows.h> 默认定义 max / min 两个宏，会把标准库的
+# std::max / std::min 展开成语法垃圾（error C2589: illegal token on right
+# side of '::'）。NOMINMAX 关掉它们，WIN32_LEAN_AND_MEAN 顺带裁掉一批
+# 用不到的旧头文件（winsock.h 尤其麻烦，它会和 winsock2.h 打架）。
+if(WIN32)
+    add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN)
+endif()
+
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
 include(AdDisplayOptions)

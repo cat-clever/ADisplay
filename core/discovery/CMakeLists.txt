@@ -15,6 +15,8 @@ else()
 endif()
 
 add_library(adisplay_discovery STATIC
+    # 统一管理 mDNS 与 SSDP，并处理网卡变化（文档 4.2）。
+    src/DiscoveryService.cpp
     # SSDP 没有可用的系统服务，是自己实现的一份，一份代码跨平台。
     src/SsdpServer.cpp
     # mDNS 走各平台系统实现，源文件按平台挑。

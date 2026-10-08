@@ -11,6 +11,7 @@
 #include <adisplay/version.h>   // 由 CMake 生成
 
 #include <adisplay/common/Config.h>
+#include <adisplay/discovery/DiscoveryService.h>
 #include <adisplay/common/DeviceIdentity.h>
 #include <adisplay/common/DeviceName.h>
 #include <adisplay/common/Log.h>
@@ -126,6 +127,11 @@ struct AdEngine {
     bool require_confirmation = true;
 
     std::string last_error;
+
+    // 服务发现：mDNS 广播 + SSDP 应答（文档 4.2）。
+    // 用 unique_ptr 是因为 DiscoveryService 不可拷贝且构造较重，
+    // 而 AdEngine 会用 new 直接分配。
+    std::unique_ptr<discovery::DiscoveryService> discovery;
 
     // 取出用户数据与回调的快照，供锁外调用。
     void notify_state_changed(int new_state) {
@@ -505,9 +511,45 @@ AdResult AD_CALL ad_engine_start(AdEngine* engine) {
         engine->castpc_port  = castpc_port;
     }
 
+    // ---- 启动服务发现 ----------------------------------------------------
+    // 端口都确认可用了，开始广播。手机在投屏列表里能不能看到我们，
+    // 完全取决于这一步有没有成功。
+    //
+    // 这里不加锁：start / stop / set_device_name 都由界面线程调用，
+    // 三者不会并发。回调可能从 discovery 的工作线程触发，但那些回调
+    // 不碰 AdEngine 的成员。
+    {
+        discovery::DiscoveryConfig discovery_config;
+        discovery_config.device_name = engine->device_name;
+        discovery_config.device_id = engine->identity.device_id();
+        discovery_config.uuid = engine->identity.uuid();
+        discovery_config.airplay_port = airplay_port;
+        discovery_config.dlna_port = dlna_port;
+        discovery_config.castpc_port = castpc_port;
+        discovery_config.enable_airplay = engine->enable_airplay;
+        discovery_config.enable_dlna = engine->enable_dlna;
+        discovery_config.enable_castpc = engine->enable_castpc;
+        discovery_config.server_header = std::string("UPnP/1.0 ADisplay/") + ADISPLAY_VERSION;
+
+        engine->discovery = std::make_unique<discovery::DiscoveryService>();
+
+        std::string discovery_error;
+        if (!engine->discovery->start(discovery_config, &discovery_error)) {
+            const std::string message = "广播启动失败：" + discovery_error;
+            engine->set_last_error(message);
+            AD_LOG_ERROR("{}", message);
+            engine->discovery.reset();
+            engine->change_state(AD_STATE_ERROR);
+            return AD_ERR_NETWORK;
+        }
+        // 部分协议失败不算致命 —— 比如 AirPlay 的 mDNS 没注册上，
+        // DLNA 通常还是能用的。记下来让界面能提示，但不阻塞启动。
+        if (!discovery_error.empty()) {
+            engine->set_last_error(discovery_error);
+        }
+    }
+
     // ---- 状态流转 --------------------------------------------------------
-    // 批次 0：协议服务（mDNS / SSDP / AirPlay / DLNA）尚未接入，
-    // 这里只完成端口探测与状态机。投屏功能随批次 1、2、4 接入。
     const std::string local_ip = common::primary_local_ipv4();
     AD_LOG_INFO("接收服务已启动：设备名「{}」{}，AirPlay {} / DLNA {} / 自研 {}",
                 engine->device_name,
@@ -532,7 +574,12 @@ void AD_CALL ad_engine_stop(AdEngine* engine) {
 
     engine->change_state(AD_STATE_STOPPING);
 
-    // 批次 0 没有真实服务要停。批次 1 起在这里注销 mDNS 与 SSDP、关闭监听。
+    if (engine->discovery) {
+        // stop 里会发出 mDNS 的 goodbye 与 SSDP 的 byebye，
+        // 手机端列表里会立刻看到设备消失，而不是等超时。
+        engine->discovery->stop();
+        engine->discovery.reset();
+    }
 
     engine->change_state(AD_STATE_STOPPED);
     AD_LOG_INFO("接收服务已停止");
@@ -653,9 +700,17 @@ AdResult AD_CALL ad_engine_set_device_name(AdEngine* engine, const char* utf8_na
     }
 
     // 文档 2.4「即时生效」：注销并重新注册 mDNS / SSDP，无需重启软件，
-    // deviceid 与已配对记录保持不变。批次 1 接入 DiscoveryService 后，
-    // 这里会调用它做重注册。批次 0 先落盘。
-    AD_LOG_INFO("设备名称已改为「{}」，将重新注册广播", validation.normalized);
+    // deviceid 与已配对记录保持不变 —— 已连接过的手机不需要重新配对。
+    AD_LOG_INFO("设备名称已改为「{}」，正在重新注册广播", validation.normalized);
+
+    if (engine->discovery) {
+        std::string discovery_error;
+        if (!engine->discovery->set_device_name(validation.normalized, &discovery_error)) {
+            // 改名失败不回滚内存里的名字：名称本身是合法的，失败的只是广播。
+            // 下次启停服务时会用新名字重新注册。
+            AD_LOG_WARN("广播改名失败：{}", discovery_error);
+        }
+    }
 
     return engine->persist();
 }
