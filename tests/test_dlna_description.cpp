@@ -60,12 +60,24 @@ AD_TEST(设备描述含必需元素, "description.xml 的必需元素齐全") {
     const std::string xml = build_device_description(config, "http://192.168.1.20:49152");
 
     check_contains(xml, "<?xml version=\"1.0\" encoding=\"utf-8\"?>");
-    check_contains(xml, "<root xmlns=\"urn:schemas-upnp-org:device-1-0\">");
+    // root 上现在同时声明了 DLNA 的命名空间（给 X_DLNADOC 用）
+    check_contains(xml, "urn:schemas-upnp-org:device-1-0");
+    check_contains(xml, "xmlns:dlna=\"urn:schemas-dlna-org:device-1-0\"");
     check_contains(xml, "<deviceType>urn:schemas-upnp-org:device:MediaRenderer:1</deviceType>");
     check_contains(xml, "<friendlyName>客厅电脑</friendlyName>");
     check_contains(xml, "<specVersion><major>1</major><minor>0</minor></specVersion>");
     // UDN 的 "uuid:" 前缀不能少，少了手机认不出这是 UPnP 设备。
     check_contains(xml, "<UDN>uuid:550e8400-e29b-41d4-a716-446655440000</UDN>");
+}
+
+AD_TEST(设备描述含DLNA认证标记, "设备描述带 X_DLNADOC 认证标记") {
+    const DlnaConfig config = make_config();
+    const std::string xml = build_device_description(config, "http://192.168.1.20:49152");
+
+    // 少了这个标记，部分国产视频 App 会认为这不是合格的 DLNA 设备，
+    // 直接不列出来 —— 表现是「B 站能搜到、另一个 App 搜不到」。
+    check_contains(xml, "<dlna:X_DLNADOC>DMR-1.50</dlna:X_DLNADOC>");
+    check_contains(xml, "xmlns:dlna=\"urn:schemas-dlna-org:device-1-0\"");
 }
 
 AD_TEST(设备描述声明三个必需服务, "三个 DLNA 必需服务都声明了") {

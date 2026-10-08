@@ -249,7 +249,9 @@ std::string build_device_description(const DlnaConfig& config, const std::string
 
     std::ostringstream out;
     out << "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
-        << "<root xmlns=\"urn:schemas-upnp-org:device-1-0\">\n"
+        // dlna 命名空间必须声明在 root 上：下面要用 dlna:X_DLNADOC。
+        << "<root xmlns=\"urn:schemas-upnp-org:device-1-0\" "
+        << "xmlns:dlna=\"urn:schemas-dlna-org:device-1-0\">\n"
         << "  <specVersion><major>1</major><minor>0</minor></specVersion>\n"
         << "  <device>\n"
         << "    <deviceType>urn:schemas-upnp-org:device:MediaRenderer:1</deviceType>\n"
@@ -263,6 +265,10 @@ std::string build_device_description(const DlnaConfig& config, const std::string
         << "    <modelNumber>" << escaped_model_number << "</modelNumber>\n"
         << "    <modelURL></modelURL>\n"
         << "    <serialNumber></serialNumber>\n"
+        // DLNA 认证标记。少了它，部分国产视频 App 会认为这不是一台合格的
+        // DLNA 设备，直接不列出来 —— 表现就是「B 站能搜到、另一个 App 搜不到」。
+        // DMR-1.50 表示符合 DLNA Media Renderer 1.5 规范。
+        << "    <dlna:X_DLNADOC>DMR-1.50</dlna:X_DLNADOC>\n"
         // UDN 里的 "uuid:" 前缀不能少，少了手机端认不出这是个 UPnP 设备。
         << "    <UDN>uuid:" << escaped_uuid << "</UDN>\n"
         << "    <serviceList>\n";
