@@ -129,7 +129,7 @@
         "rhs": "Linux"
       },
       "cacheVariables": {
-        "VCPKG_TARGET_TRIPLET": "x64-linux-pic",
+        "VCPKG_TARGET_TRIPLET": "x64-linux-dynamic",
         "VCPKG_OVERLAY_TRIPLETS": "${sourceDir}/triplets",
         "ADISPLAY_BUILD_TESTS": "ON"
       }

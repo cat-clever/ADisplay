@@ -6,46 +6,19 @@
 #
 # 依赖同样收窄：只用 libavformat / libavcodec / libavutil（解复用 + 换封装），
 # 不要 avfilter / swscale / swresample，也不要任何编码器 —— 不做解码就不需要它们。
-# 要不要编「本地换封装」这部分。
-#
-# Linux 上不编：FFmpeg 的部分 x86 汇编目标文件（libavcodec.a 里的 vc1dsp_mmx.o
-# 等）不是位置无关代码，而 NASM 那一步拿不到 --enable-pic，链进 libcastcore.so
-# 时报 "relocation R_X86_64_PC32 ... recompile with -fPIC"。Windows/macOS 那边
-# vcpkg 的 port 会带上 --enable-pic，所以没这个问题。
-#
-# 不为它 patch 第三方 port，也不给产物加 -z,notext（允许文本重定位，能链上但
-# 丢掉一部分加固）：文档把 Linux 桌面端标为 P2「暂缓」，它只在 CI 里编核心库
-# 并跑单元测试、不是交付平台，那些代价是为不存在的需求付的。
-#
-# 判断只认 "Linux"：Android 的 CMAKE_SYSTEM_NAME 是 "Android"，不该被这条排除。
-set(ADISPLAY_PIPELINE_WITH_REMUX ON)
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    set(ADISPLAY_PIPELINE_WITH_REMUX OFF)
-endif()
-
-if(ADISPLAY_PIPELINE_WITH_REMUX)
-    set(ADISPLAY_PIPELINE_REMUX_SOURCES
-        # 远端拉取（HTTP 客户端），播放列表与分片都要用它。
-        src/HttpFetch.cpp
-        # TS 分片 → fMP4 的换封装。只依赖 libavformat。
-        src/Mp4Remuxer.cpp
-        # 一次中转会话：分片的按需生产与缓存，以及那套并发模型。
-        src/RelaySession.cpp
-        # 本地 HTTP 中转服务与对外接口。
-        src/MediaRelay.cpp
-    )
-else()
-    # 同一套接口的「本平台不提供」实现，让调用方无需条件编译。
-    set(ADISPLAY_PIPELINE_REMUX_SOURCES src/MediaRelayUnsupported.cpp)
-endif()
-
 add_library(adisplay_pipeline STATIC
     # 媒体源形态判断。纯函数，单独成文件便于单元测试。
     src/MediaSource.cpp
     # 本地 HLS 播放列表的改写。同样是纯函数，必须能被单元测试直接覆盖。
-    # 两个平台都用得上（Linux 上单测也要跑），所以不放进上面的条件里。
     src/HlsPlaylist.cpp
-    ${ADISPLAY_PIPELINE_REMUX_SOURCES}
+    # 远端拉取（HTTP 客户端），播放列表与分片都要用它。
+    src/HttpFetch.cpp
+    # TS 分片 → fMP4 的换封装。只依赖 libavformat。
+    src/Mp4Remuxer.cpp
+    # 一次中转会话：分片的按需生产与缓存，以及那套并发模型。
+    src/RelaySession.cpp
+    # 本地 HTTP 中转服务与对外接口。
+    src/MediaRelay.cpp
 )
 
 target_include_directories(adisplay_pipeline
@@ -115,9 +88,7 @@ else()
     endif()
 endif()
 
-# 没找到就要报错，但只在本平台真的要编换封装时 —— 否则将来谁把 ffmpeg 从
-# vcpkg.json 里挪走，Linux 会因为一个它根本不链接的依赖而在配置期失败。
-if(NOT ADISPLAY_FFMPEG_LIBS AND ADISPLAY_PIPELINE_WITH_REMUX)
+if(NOT ADISPLAY_FFMPEG_LIBS)
     message(FATAL_ERROR
         "找不到 FFmpeg 的 libavformat / libavcodec / libavutil。"
         "媒体管线的换封装需要它们（vcpkg.json 里声明了 ffmpeg 的 avcodec + avformat）。")
@@ -127,18 +98,9 @@ target_link_libraries(adisplay_pipeline
     PRIVATE
         adisplay_common
         adisplay_warnings
+        httplib::httplib
+        ${ADISPLAY_FFMPEG_LIBS}
 )
-
-# 远端拉取用 httplib，换封装用 FFmpeg —— 只有真要编那部分的平台才需要。
-# 在 Linux 上把 FFmpeg 的静态库放进链接行正是那个 PIC 问题的来源，所以这里
-# 一并跳过；不编的源文件也不会引用它们。
-if(ADISPLAY_PIPELINE_WITH_REMUX)
-    target_link_libraries(adisplay_pipeline
-        PRIVATE
-            httplib::httplib
-            ${ADISPLAY_FFMPEG_LIBS}
-    )
-endif()
 
 set_target_properties(adisplay_pipeline PROPERTIES
     CXX_VISIBILITY_PRESET hidden
