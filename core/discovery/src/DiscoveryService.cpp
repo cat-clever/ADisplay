@@ -5,6 +5,7 @@
 #include <adisplay/common/Log.h>
 #include <adisplay/common/NetUtil.h>
 
+#include <adisplay/discovery/AirplayAdvert.h>
 #include <adisplay/discovery/MdnsPublisher.h>
 #include <adisplay/discovery/SsdpServer.h>
 
@@ -25,12 +26,11 @@ namespace {
 // 3 秒对「切换 Wi-Fi 后几秒内恢复」这个体验目标是够的，且行为跨平台一致。
 constexpr int kNetworkPollSeconds = 3;
 
-// AirPlay 的能力位（features）。
+// AirPlay 广播的内容（TXT 记录）统一由 AirplayAdvert 提供。
 //
-// 这个值决定 iPhone 是否在控制中心里显示「屏幕镜像」入口 —— 位不对的话
-// 设备能出现在列表里但点不动，是 AirPlay 对接最容易卡住的地方。
-// 这里用的是公开实现普遍采用的一组值，批次 4 接镜像流时会按实际协议行为校准。
-constexpr const char* kAirplayFeatures = "0x5A7FFFF7,0x1E";
+// 不在这里自己拼一份的理由很实在：mDNS 通告与协议层的 /info 应答必须字字一致，
+// 分开写就一定会漂移，而漂移的表现恰好是「列表里看得到、点下去连不上」——
+// 一个看上去像网络故障的协议故障。取值与理由见 AirplayAdvert.h。
 
 // 期望在局域网里被看到的服务类型。
 constexpr const char* kAirplayServiceType = "_airplay._tcp";
@@ -52,39 +52,16 @@ std::string raop_instance_name(const DiscoveryConfig& config) {
     return name;
 }
 
-std::vector<TxtRecord> build_airplay_txt(const DiscoveryConfig& config) {
-    return {
-        {"deviceid", config.device_id},
-        {"features", kAirplayFeatures},
-        {"model", config.airplay_model},
-        {"srcvers", config.airplay_srcvers},
-        {"pi", config.uuid},
-        // flags 的 bit 2（0x4）表示「支持音频」。留 0 会让部分 iOS 版本
-        // 认为这个接收端只能收视频。
-        {"flags", "0x4"},
-        {"vv", "2"},
-    };
-}
-
-std::vector<TxtRecord> build_raop_txt(const DiscoveryConfig& config) {
-    return {
-        // ch=2 立体声；cn 是支持的音频编码（0=PCM, 1=ALAC, 2=AAC, 3=AAC-ELD）。
-        {"ch", "2"},
-        {"cn", "0,1,2,3"},
-        {"et", "0,3,5"},
-        {"ft", kAirplayFeatures},
-        {"md", "0,1,2"},
-        {"am", config.airplay_model},
-        {"tp", "UDP"},
-        {"vv", "2"},
-        {"vs", config.airplay_srcvers},
-        {"sr", "44100"},
-        {"ss", "16"},
-        // pw=false：不用密码。首连确认由我们自己的 PIN 流程负责（文档 6.2），
-        // 不走 AirPlay 自带的密码机制。
-        {"pw", "false"},
-        {"vn", "65537"},
-    };
+// 组装广播所需的设备身份。公钥与设备 id 都由协议层给出 —— 见 AdEngine 的
+// 启动流程：它先起 AirPlay 接收端，拿到这两个值，再带着它们来广播。
+airplay::Advert make_airplay_advert(const DiscoveryConfig& config) {
+    airplay::Advert advert;
+    advert.name = config.device_name;
+    advert.device_id = config.device_id;
+    advert.public_key = config.airplay_pk;
+    advert.model = config.airplay_model;
+    advert.srcvers = config.airplay_srcvers;
+    return advert;
 }
 
 std::vector<TxtRecord> build_castpc_txt(const DiscoveryConfig& config) {
@@ -158,11 +135,12 @@ struct DiscoveryService::Impl {
         };
 
         if (config.enable_airplay) {
+            const airplay::Advert advert = make_airplay_advert(config);
             add_publisher(kAirplayServiceType, config.device_name,
-                          config.airplay_port, build_airplay_txt(config));
+                          config.airplay_port, airplay::airplay_txt(advert));
             // _raop._tcp 与 _airplay._tcp 用同一个端口，但实例名格式不同。
             add_publisher(kRaopServiceType, raop_instance_name(config),
-                          config.airplay_port, build_raop_txt(config));
+                          config.airplay_port, airplay::raop_txt(advert));
         }
         if (config.enable_castpc) {
             add_publisher(kCastpcServiceType, config.device_name,
