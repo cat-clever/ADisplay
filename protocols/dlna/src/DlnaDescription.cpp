@@ -76,6 +76,21 @@ const ServiceSpec kAvTransportSpec = {
           <argument><name>InstanceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_InstanceID</relatedStateVariable></argument>
         </argumentList>
       </action>
+      <action><name>GetTransportSettings</name>
+        <argumentList>
+          <argument><name>InstanceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_InstanceID</relatedStateVariable></argument>
+          <argument><name>PlayMode</name><direction>out</direction><relatedStateVariable>PlayMode</relatedStateVariable></argument>
+          <argument><name>RecQualityMode</name><direction>out</direction><relatedStateVariable>RecordQualityMode</relatedStateVariable></argument>
+        </argumentList>
+      </action>
+      <action><name>GetDeviceCapabilities</name>
+        <argumentList>
+          <argument><name>InstanceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_InstanceID</relatedStateVariable></argument>
+          <argument><name>PlayMedia</name><direction>out</direction><relatedStateVariable>PossiblePlaybackStorageMedia</relatedStateVariable></argument>
+          <argument><name>RecMedia</name><direction>out</direction><relatedStateVariable>PossibleRecordStorageMedia</relatedStateVariable></argument>
+          <argument><name>RecQualityModes</name><direction>out</direction><relatedStateVariable>PossibleRecordQualityModes</relatedStateVariable></argument>
+        </argumentList>
+      </action>
       <action><name>GetCurrentTransportActions</name>
         <argumentList>
           <argument><name>InstanceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_InstanceID</relatedStateVariable></argument>
@@ -120,6 +135,15 @@ const ServiceSpec kAvTransportSpec = {
       <stateVariable sendEvents="no"><name>RelativeTimePosition</name><dataType>string</dataType></stateVariable>
       <stateVariable sendEvents="no"><name>AbsoluteTimePosition</name><dataType>string</dataType></stateVariable>
       <stateVariable sendEvents="no"><name>CurrentTransportActions</name><dataType>string</dataType></stateVariable>
+      <stateVariable sendEvents="no"><name>PlayMode</name><dataType>string</dataType>
+        <allowedValueList><allowedValue>NORMAL</allowedValue></allowedValueList>
+      </stateVariable>
+      <stateVariable sendEvents="no"><name>RecordQualityMode</name><dataType>string</dataType>
+        <allowedValueList><allowedValue>NOT_IMPLEMENTED</allowedValue></allowedValueList>
+      </stateVariable>
+      <stateVariable sendEvents="no"><name>PossiblePlaybackStorageMedia</name><dataType>string</dataType></stateVariable>
+      <stateVariable sendEvents="no"><name>PossibleRecordStorageMedia</name><dataType>string</dataType></stateVariable>
+      <stateVariable sendEvents="no"><name>PossibleRecordQualityModes</name><dataType>string</dataType></stateVariable>
       <stateVariable sendEvents="no"><name>RelativeCounterPosition</name><dataType>i4</dataType></stateVariable>
       <stateVariable sendEvents="no"><name>AbsoluteCounterPosition</name><dataType>i4</dataType></stateVariable>
       <stateVariable sendEvents="no"><name>NumberOfTracks</name><dataType>ui4</dataType></stateVariable>

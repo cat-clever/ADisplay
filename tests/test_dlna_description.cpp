@@ -163,14 +163,14 @@ AD_TEST(三个服务的必需动作都在, "UPnP 规范的必需动作一个都�
 
     struct Expectation {
         const char* service_type;
-        const char* actions[10];
+        const char* actions[12];
     };
 
     const Expectation expectations[] = {
         {kAvTransportType,
          {"SetAVTransportURI", "GetMediaInfo", "GetTransportInfo", "GetPositionInfo",
           "GetCurrentTransportActions", "GetTransportSettings", "GetDeviceCapabilities",
-          "Play", "Pause", "Stop"}},
+          "Play", "Pause", "Stop", "Seek"}},
         {kRenderingControlType,
          {"GetVolume", "SetVolume", "GetMute", "SetMute", "ListPresets", "SelectPreset"}},
         {kConnectionManagerType,
