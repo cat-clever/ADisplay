@@ -83,7 +83,19 @@
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="*" />
             </Grid.RowDefinitions>
-            <TextBlock Grid.Row="0" Text="日志" Style="{StaticResource BodyStrongTextBlockStyle}" />
+            <Grid Grid.Row="0">
+                <TextBlock Text="日志" Style="{StaticResource BodyStrongTextBlockStyle}" />
+                <!--
+                    日志区每行是独立的 TextBlock（便于虚拟化），代价是只能
+                    一行行选。想贴给别人时很不方便，所以给个一键复制的入口。
+                -->
+                <Button x:Name="CopyLogButton"
+                        Content="复制全部"
+                        HorizontalAlignment="Right"
+                        Padding="8,2"
+                        FontSize="11"
+                        Click="OnCopyLogClick" />
+            </Grid>
             <Border Grid.Row="1"
                     CornerRadius="4"
                     Padding="8"

@@ -10,6 +10,7 @@ using System.Runtime.InteropServices;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Windows.ApplicationModel.DataTransfer;
 using ADisplay.Windows.Interop;
 
 namespace ADisplay.Windows;
@@ -237,6 +238,20 @@ public sealed partial class MainWindow : Window
         {
             LogScrollViewer.ChangeView(null, LogScrollViewer.ScrollableHeight, null);
         });
+    }
+
+    // 日志区每行是独立的 TextBlock，只能一行行选。这个按钮把全部日志
+    // 一次性放进剪贴板，方便贴到别处排查。
+    private void OnCopyLogClick(object sender, RoutedEventArgs e)
+    {
+        if (_logLines.Count == 0)
+        {
+            return;
+        }
+
+        DataPackage package = new DataPackage();
+        package.SetText(string.Join(Environment.NewLine, _logLines));
+        Clipboard.SetContent(package);
     }
 
     private void OnWindowClosed(object sender, WindowEventArgs args)

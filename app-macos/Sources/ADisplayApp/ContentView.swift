@@ -3,6 +3,7 @@
 // 与 Windows 端保持同样的信息结构：设备名称、服务开关、本机信息、日志。
 // 界面本身不做任何协议相关的判断，全部状态来自 castcore。
 
+import AppKit
 import SwiftUI
 
 struct ContentView: View {
@@ -128,10 +129,31 @@ struct ContentView: View {
 
     // MARK: - 日志
 
+    private func copyAllLogs() {
+        let text = model.logs.joined(separator: "\n")
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
+    }
+
     private var logSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("日志")
-                .font(.headline)
+            HStack {
+                Text("日志")
+                    .font(.headline)
+
+                Spacer()
+
+                // 日志区每行是独立的 Text（为了能懒加载、不一次渲染几百行），
+                // 代价是只能一行一行选。想贴给别人时很不方便，所以给个
+                // 一键复制全部的入口。
+                Button("复制全部") {
+                    copyAllLogs()
+                }
+                .buttonStyle(.borderless)
+                .font(.caption)
+                .disabled(model.logs.isEmpty)
+            }
 
             ScrollViewReader { proxy in
                 ScrollView {
