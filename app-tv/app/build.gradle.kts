@@ -17,8 +17,8 @@ android {
         // 规则固定下来，升级时不用每次临时决定该加多少。
         // 它必须随版本递增 —— 不变的话 Android 会认为是同一个包，
         // 覆盖安装时不会更新。
-        versionCode = 403
-        versionName = "0.4.3"
+        versionCode = 404
+        versionName = "0.4.4"
 
         // 自用项目，全 ABI 打进一个 APK 即可（文档 2.5）。
         ndk {
