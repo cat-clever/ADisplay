@@ -13,6 +13,11 @@
 #include <windows.h>
 #include <windns.h>
 
+// CoTaskMemAlloc / CoTaskMemFree 声明在这里。
+// 必须显式包含：项目全局开了 WIN32_LEAN_AND_MEAN（见顶层 CMakeLists），
+// 它会把 <windows.h> 里的 COM 头一并裁掉，这两个函数就找不到了。
+#include <combaseapi.h>
+
 #include <atomic>
 #include <cstring>   // memcpy / memset
 #include <memory>
