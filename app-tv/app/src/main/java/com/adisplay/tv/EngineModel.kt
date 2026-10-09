@@ -11,6 +11,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -194,6 +195,19 @@ class EngineModel(context: Context) {
     private val appContext = context.applicationContext
 
     /**
+     * 配置文件路径 —— 设备名称与 AirPlay 配对密钥都落在它旁边。
+     *
+     * 必须显式给出，不能用核心的平台默认值：那个默认是 $HOME/.config/adisplay，
+     * 而 Android 上 HOME 是 /data，应用写不进去。后果有两条 —— 改完设备名不保存；
+     * AirPlay 配对密钥也存不下来，每次投屏 iPhone 都要重新配对一遍（日志里那条
+     * 「AirPlay 密钥目录创建失败」的 WARN 说的就是这件事）。
+     *
+     * filesDir 是 /data/data/<包名>/files，只有本应用能读写，正是该放的地方。
+     */
+    private val configPath: String =
+        File(appContext.filesDir, "adisplay/config.json").absolutePath
+
+    /**
      * mDNS 广播。核心在桌面上自己发（macOS 用系统 Bonjour、Windows 用 DNS-SD），
      * Android 上发不了 —— NsdManager 只在 Java 层，NDK 里没有等价接口。所以这条
      * 路由界面层接手，而**内容**仍由核心给（见 MdnsAdvertiser 的文件头）。
@@ -324,7 +338,7 @@ class EngineModel(context: Context) {
             return
         }
 
-        val handle = AdDisplayNative.nativeCreate(null, null, null)
+        val handle = AdDisplayNative.nativeCreate(null, null, configPath)
         if (handle == 0L) {
             // 句柄为 0 时没有引擎可查 last_error，只能给一句笼统的。
             statusText = "创建引擎失败"

@@ -93,6 +93,10 @@ object AdDisplayNative {
      *
      * 三个字符串传 null 表示「用核心的默认值」：设备名取设备型号、
      * 日志只走回调不落盘（电视上没法从应用目录里取文件，落盘没意义）。
+     *
+     * configFilePath 是例外，**不能**传 null：核心的默认值在 Android 上指向
+     * /data/.config/adisplay，应用写不进去 —— 设备名与配对密钥都会丢。
+     * 具体路径见 EngineModel.configPath。
      */
     external fun nativeCreate(deviceName: String?, logFilePath: String?, configFilePath: String?): Long
 

@@ -4,9 +4,10 @@
 // 好消息是 Android TV 在聚焦输入框时会自己弹出系统输入法，遥控器就能操作 ——
 // 所以这里只需要一个普通的输入框，不必自己做软键盘。
 //
-// 尺寸刻意与日志区一致：这块地方是**借用**日志区的位置（见 StandbyScreen），
-// 借用而不新开一块，是因为电视的布局是算着屏幕高度放的，多长出来会把上面的
-// 按钮挤出可视区。
+// 高度用 layout.editorHeight，**不跟日志区共用**。早先图省事复用了日志区的高度，
+// 结果标题、输入框、两个按钮加起来比那几行等宽小字高得多，放不下：按钮那一行
+// 被挤到屏幕外。遥控器还能靠焦点选中那个看不见的按钮再按确定，触屏就完全点不到
+// —— 表现是「名字改完没法保存」。输入区该多大就多大。
 
 package com.adisplay.tv.ui
 
@@ -22,6 +23,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
@@ -32,6 +35,8 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
@@ -51,23 +56,47 @@ fun NameEditor(model: EngineModel, layout: StandbyLayout) {
         fieldFocus.requestFocus()
     }
 
+    val canSave = draft.isNotEmpty() && problem.isEmpty()
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .height(layout.logHeight)
+            .height(layout.editorHeight)
             .clip(RoundedCornerShape(8.dp))
             .background(MaterialTheme.colorScheme.surfaceVariant)
             .border(1.dp, Color.White.copy(alpha = 0.18f), RoundedCornerShape(8.dp))
-            .padding(horizontal = 18.dp, vertical = 14.dp),
+            .padding(horizontal = 18.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.Center,
     ) {
-        Text(
-            text = "设备名称",
-            style = MaterialTheme.typography.titleMedium,
-            color = Color.White.copy(alpha = 0.9f),
-        )
+        // 标题与校验提示同一行，而且提示限一行。
+        //
+        // 这样这块的高度是**恒定**的：提示另起一行、或者折成两行的话，名称一不
+        // 合法整块就长高，把下面的按钮又挤出屏幕 —— 而名称不合法正是用户最需要
+        // 看到按钮的时候。
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text(
+                text = "设备名称",
+                style = layout.bodyStyle,
+                color = Color.White.copy(alpha = 0.9f),
+            )
 
-        Spacer(modifier = Modifier.height(10.dp))
+            Spacer(modifier = Modifier.weight(1f))
+
+            if (problem.isNotEmpty()) {
+                Text(
+                    text = problem,
+                    style = layout.bodyStyle,
+                    color = Color(0xFFFF8A80),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
 
         BasicTextField(
             value = draft,
@@ -75,6 +104,14 @@ fun NameEditor(model: EngineModel, layout: StandbyLayout) {
             singleLine = true,
             textStyle = layout.actionStyle.copy(color = Color.White),
             cursorBrush = SolidColor(Color.White),
+            // 触屏上打完字直接按键盘的「完成」就保存，不必再去够下面的按钮 ——
+            // 软键盘弹起来占掉半屏，够按钮这件事本来就别扭。
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+            keyboardActions = KeyboardActions(onDone = {
+                if (canSave) {
+                    model.applyRename()
+                }
+            }),
             modifier = Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(4.dp))
@@ -84,31 +121,23 @@ fun NameEditor(model: EngineModel, layout: StandbyLayout) {
                 .focusRequester(fieldFocus),
         )
 
-        // 输入时就给提示，而不是等按了保存才报错 —— 遥控器上打字很慢，
-        // 越早说越好。
-        if (problem.isNotEmpty()) {
-            Spacer(modifier = Modifier.height(8.dp))
-            Text(
-                text = problem,
-                style = MaterialTheme.typography.bodySmall,
-                color = Color(0xFFFF8A80),
-            )
-        }
-
-        Spacer(modifier = Modifier.height(12.dp))
+        Spacer(modifier = Modifier.height(10.dp))
 
         Row(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.Center,
             modifier = Modifier.fillMaxWidth(),
         ) {
+            // 两个按钮用 weight 等分，不用固定宽度：固定宽度在手机竖屏上加起来
+            // 比这块地方还宽，「取消」会被切掉一半（同 StandbyScreen 那三个按钮）。
             ActionButton(
                 text = "保存",
                 textStyle = layout.actionStyle,
-                minWidth = layout.buttonMinWidth,
+                minWidth = 0.dp,
+                modifier = Modifier.weight(1f),
                 focusRequester = saveFocus,
                 // 名称不合法时压暗：一眼看出还不能保存。
-                enabled = draft.isNotEmpty() && problem.isEmpty(),
+                enabled = canSave,
                 onClick = { model.applyRename() },
             )
 
@@ -117,7 +146,8 @@ fun NameEditor(model: EngineModel, layout: StandbyLayout) {
             ActionButton(
                 text = "取消",
                 textStyle = layout.actionStyle,
-                minWidth = layout.buttonMinWidth,
+                minWidth = 0.dp,
+                modifier = Modifier.weight(1f),
                 focusRequester = cancelFocus,
                 onClick = { model.cancelRename() },
             )
