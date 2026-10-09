@@ -36,6 +36,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -72,6 +73,12 @@ private const val CONTROLS_TIMEOUT_MS = 4000L
  *
  * @param title 顶部状态条左侧的文字，调用方给（一般是「设备名 · 正在做什么」）。
  * @param onShowLog 打开日志抽屉。日志在投屏中才最该看，所以这里也留一个入口。
+ * @param captureTouches 画面自己处理触摸时传 false（DLNA 那路用 PlayerView 自带的
+ *   控制条：进度、快进快退）。我们绝不能在它上面再盖一层接触摸的东西 —— 那样点击
+ *   会被我们抢走，播放器的控制条永远出不来，而**拖动进度条必须让触摸落到播放器
+ *   上**。镜像那路画面是个纯 Surface，不处理触摸，所以默认 true（点画面唤出控件）。
+ * @param showToken 外部信号：每递增一次就把控件亮出来一遍。播放器把控制条亮出来时
+ *   由它递增，于是「点画面」一次就让播放器的进度条和我们的悬浮条一起出现。
  * @param content 画面本身：镜像是一条 Surface，DLNA 是一个 PlayerView。
  */
 @Composable
@@ -79,6 +86,8 @@ fun PlaybackFullScreen(
     title: String,
     onExit: () -> Unit,
     onShowLog: () -> Unit,
+    captureTouches: Boolean = true,
+    showToken: Int = 0,
     content: @Composable BoxScope.() -> Unit,
 ) {
     val view = LocalView.current
@@ -119,6 +128,13 @@ fun PlaybackFullScreen(
         controlsVisible = false
     }
 
+    // 画面那边把控制条亮出来了（见 showToken）。跟着亮一次。
+    LaunchedEffect(showToken) {
+        if (showToken > 0) {
+            showRequest += 1
+        }
+    }
+
     val catchFocus = remember { FocusRequester() }
     val logFocus = remember { FocusRequester() }
     val stopFocus = remember { FocusRequester() }
@@ -136,25 +152,32 @@ fun PlaybackFullScreen(
     Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
         content()
 
-        // 接键 / 触摸层。盖满整屏，声明在画面之后，命中顺序在画面之上。
+        // 触摸层。只在画面自己不处理触摸时铺（镜像那条）。
         //
-        // 这一层必须单独存在，不能只靠外层的 clickable：DLNA 播放页里的
-        // PlayerView 自己消费触摸（它要用触摸开关控制条），事件传不到父节点。
+        // 交互源与 indication 都留空：这是「点哪儿都显示控件」，不该闪波纹。
+        if (captureTouches) {
+            Box(
+                modifier = Modifier
+                    .matchParentSize()
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = { showRequest++ },
+                    )
+            )
+        }
+
+        // 接键层：只接遥控器的按键，**一点触摸面积都不占**。
         //
-        // clickable 在前、focusable 在后，与 ActionButton 同一套写法：触摸走
-        // 前者，遥控器的焦点与按键走后者，互不干扰。
+        // 这一层以前是铺满屏幕的，于是把点击从播放器手里抢走了 —— DLNA 那路的
+        // 进度条与快进快退就此永远出不来。焦点不需要面积：1dp 的节点一样能被
+        // focusRequester 选中、一样收得到按键。
         Box(
             modifier = Modifier
-                .matchParentSize()
-                .clickable(
-                    // 交互源与 indication 都留空：这是「点哪儿都显示控件」，
-                    // 不该在画面上闪波纹。
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = null,
-                    onClick = { showRequest++ },
-                )
-                .focusable()
+                .align(Alignment.Center)
+                .size(1.dp)
                 .focusRequester(catchFocus)
+                .focusable()
                 .onKeyEvent { event ->
                     // 只在抬起时响应，否则按下与抬起各触发一次。
                     if (event.type != KeyEventType.KeyUp) {
@@ -214,6 +237,9 @@ fun PlaybackFullScreen(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
+                    // 播放器的控制条（进度、快进快退）就在屏幕最下面，我们这条
+                    // 往上让开它 —— 两条叠在一起既看不清也点不准。
+                    .padding(bottom = if (captureTouches) 0.dp else 104.dp)
                     .background(Color.Black.copy(alpha = 0.55f))
                     .padding(horizontal = 24.dp, vertical = 14.dp),
                 verticalAlignment = Alignment.CenterVertically,

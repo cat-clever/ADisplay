@@ -17,6 +17,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import android.view.View
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.C
@@ -114,6 +115,9 @@ fun PlaybackScreen(
     // 大码率的片子（4K、B 站的高清源）起播前要拉一大段，这段时间画面是黑的 ——
     // 用户看到的就是「投屏没反应」。所以缓冲期间把速度摆出来：一眼能看出它在动、
     // 动得多快，而不是对着黑屏猜。
+    // 播放器把控制条亮出来时递增，让我们的悬浮条跟着一起出现。
+    var controlsToken by remember { mutableStateOf(0) }
+
     var buffering by remember { mutableStateOf(false) }
     var speedBytesPerSecond by remember { mutableStateOf(0L) }
 
@@ -152,6 +156,10 @@ fun PlaybackScreen(
         title = model.deviceName + " · 正在播放",
         onExit = onExit,
         onShowLog = onShowLog,
+        // 触摸归播放器：点画面出它的进度条与快进快退，拖进度条也落在它身上。
+        // 我们只跟着它的控制条一起亮相（见 showToken）。
+        captureTouches = false,
+        showToken = controlsToken,
     ) {
         AndroidView(
             factory = { ctx ->
@@ -159,10 +167,17 @@ fun PlaybackScreen(
                     // 画面按屏幕适应：整幅可见，多出来的边留黑。
                     // 用 ZOOM 会把画面裁掉一块，投屏看的就是完整画面。
                     resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
-                    // 控制条留着：万一焦点落在播放器上，遥控器按「确定」还能
-                    // 调出播放/暂停与进度。常态下焦点在我们的接键层上。
+                    // 控制条交给播放器自己：进度条、快进快退、播放/暂停都在
+                    // 这里。点画面出它、拖进度条也拖它。
                     useController = true
                     controllerAutoShow = true
+                    // 它一亮，我们的悬浮条（日志 / 停止接收投屏）跟着亮 ——
+                    // 一次点击两样都出来，用户不用分两次点。
+                    setControllerVisibilityListener { visibility ->
+                        if (visibility == View.VISIBLE) {
+                            controlsToken += 1
+                        }
+                    }
                     // 起播缓冲时转圈。电视上拉流慢是常事，黑屏和「正在缓冲」
                     // 在用户眼里是两回事。
                     setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING)
