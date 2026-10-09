@@ -81,12 +81,15 @@ public sealed class MirrorStreamSource
         List<byte[]> units = SplitAnnexB(annexB);
         if (units.Count == 0)
         {
-            RaiseNoticeOnce(ref _noticedNoNalu, true,
-                "镜像渲染：收到一帧，但里面切不出 NALU。");
+            RaiseNotice(TakeNoticeOnce(ref _noticedNoNalu,
+                "镜像渲染：收到一帧，但里面切不出 NALU。"));
             return;
         }
 
         bool firstFrame = false;
+        bool waitingForParameters = false;
+        // 提示消息在锁内只取不报：这个类回调出去会打到界面层，绝不能持着锁调用。
+        string? pendingNotice = null;
         lock (_lock)
         {
             if (!_isReadyLocked())
@@ -95,14 +98,23 @@ public sealed class MirrorStreamSource
                 {
                     // 还没有编码参数，这一帧解不了。核心会给每个关键帧补齐参数集，
                     // 所以正常情况下这里最多等到下一个关键帧。
-                    RaiseNoticeOnce(ref _noticedNoParameterSets, true,
+                    pendingNotice = TakeNoticeOnce(ref _noticedNoParameterSets,
                         "镜像渲染：还没有拿到编码参数（SPS/PPS），等待下一个关键帧。");
-                    return;
+                    waitingForParameters = true;
                 }
-                _isH265 = isH265;
-                BuildSourceLocked(sps!, pps!, width, height);
-                firstFrame = true;
+                else
+                {
+                    _isH265 = isH265;
+                    BuildSourceLocked(sps!, pps!, width, height);
+                    firstFrame = true;
+                }
             }
+        }
+
+        RaiseNotice(pendingNotice);
+        if (waitingForParameters)
+        {
+            return;
         }
 
         if (firstFrame)
@@ -122,10 +134,10 @@ public sealed class MirrorStreamSource
             return;
         }
         bool keyFrame = ContainsKeyFrame(units, isH265);
-        if (keyFrame)
+        if (keyFrame && !_noticedFirstSample)
         {
-            RaiseNoticeOnce(ref _noticedFirstSample, true,
-                "镜像渲染：首个关键帧已交给媒体管线。");
+            _noticedFirstSample = true;
+            RaiseNotice("镜像渲染：已收到首个关键帧，开始向媒体管线送帧。");
         }
 
         MediaStreamSourceSampleRequest? request = null;
@@ -193,13 +205,23 @@ public sealed class MirrorStreamSource
 
     // 同类提示只报一次。长跑时每次丢弃都报会把日志窗口刷满，
     // 真正要看的那一行反而被埋掉。
-    private void RaiseNoticeOnce(ref bool alreadyRaised, bool raise, string message)
+    // 分成「取」与「发」两步，是为了让调用点能在锁内取、锁外发。
+    private static string? TakeNoticeOnce(ref bool alreadyRaised, string message)
     {
-        if (!raise || alreadyRaised)
+        if (alreadyRaised)
+        {
+            return null;
+        }
+        alreadyRaised = true;
+        return message;
+    }
+
+    private void RaiseNotice(string? message)
+    {
+        if (message == null)
         {
             return;
         }
-        alreadyRaised = true;
         Action<string>? handler = Notice;
         if (handler != null)
         {
