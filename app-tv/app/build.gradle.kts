@@ -17,8 +17,8 @@ android {
         // 规则固定下来，升级时不用每次临时决定该加多少。
         // 它必须随版本递增 —— 不变的话 Android 会认为是同一个包，
         // 覆盖安装时不会更新。
-        versionCode = 544
-        versionName = "0.5.44"
+        versionCode = 545
+        versionName = "0.5.45"
 
         // 只打 arm64-v8a。
         //
@@ -36,28 +36,45 @@ android {
         }
     }
 
-    // 固定密钥签名。
+    // 签名：三级优先。
     //
-    // 之前用 debug 签名 —— 而 debug 密钥库是**每台机器各自生成**的，CI 每次都是
-    // 全新的 runner，于是每个版本的 APK 签名都不同，装新版必须先卸载。这个缺陷
-    // 在真机上撞到过：adb install -r 报 INSTALL_FAILED_UPDATE_INCOMPATIBLE。
+    //   1. 环境变量（CI 里由仓库 Secrets 提供）—— 你自己的私有密钥
+    //   2. 仓库里那份**公开的兜底密钥** —— 给 fork 用的
+    //   3. debug 签名 —— 兜底中的兜底，正常不会走到
     //
-    // 密钥从环境变量来（CI 那边由仓库 Secrets 还原成文件）。本机没配就退回
-    // debug 签名 —— 至少还能编出来，不会因为缺密钥让整个构建失败。
-    val keystoreFile = System.getenv("ADISPLAY_KEYSTORE_FILE")
-    val hasReleaseKey = !keystoreFile.isNullOrEmpty() && File(keystoreFile).exists()
+    // 为什么必须给 fork 一份兜底密钥：GitHub 的 Secrets **不会**复制到 fork
+    // （fork 也读不到原仓库的），所以别人 fork 之后那几个环境变量是空的。
+    // 没有兜底的话，他们的包每次都落到 debug 签名 —— 而 debug 密钥库是每台
+    // 机器各自生成的，CI 每次都是全新 runner，于是每个版本签名都不同，装新版
+    // 必须先卸载，卸载又会清掉配置与配对密钥。
+    //
+    // 兜底密钥是公开的（就在 app-tv/fallback-signing.p12，口令写在下面），
+    // 所以它证明不了发布者身份。但签名在这里的作用本来就是「同一台设备上能
+    // 覆盖升级」，不是身份认证 —— 何况所有 fork 用同一个包名 com.adisplay.tv，
+    // 本来也只能装一个。想要私有密钥，把那四个 Secrets 配上即会自动优先。
+    val fallbackKeystore = File(project.projectDir, "fallback-signing.p12")
+    val secretKeystorePath = System.getenv("ADISPLAY_KEYSTORE_FILE")
+    val useSecretKey = !secretKeystorePath.isNullOrEmpty() && File(secretKeystorePath).exists()
+    val useFallbackKey = !useSecretKey && fallbackKeystore.exists()
 
     signingConfigs {
-        if (hasReleaseKey) {
-            create("release") {
-                storeFile = File(keystoreFile)
+        create("release") {
+            if (useSecretKey) {
+                storeFile = File(secretKeystorePath)
                 storePassword = System.getenv("ADISPLAY_KEYSTORE_PASSWORD")
                 keyAlias = System.getenv("ADISPLAY_KEY_ALIAS")
                 keyPassword = System.getenv("ADISPLAY_KEY_PASSWORD")
-                // 密钥库是 openssl 生成的 PKCS12。显式写出来：默认值随 JDK
-                // 版本变过，写死更稳。
-                storeType = "PKCS12"
+            } else if (useFallbackKey) {
+                storeFile = fallbackKeystore
+                // 公开的兜底口令，刻意写在代码里而不是藏起来 —— 它本来就是
+                // 仓库的一部分，装作保密只会让人误以为它能证明身份。
+                storePassword = "adisplay-fallback"
+                keyAlias = "adisplay"
+                keyPassword = "adisplay-fallback"
             }
+            // 两种密钥库都是 openssl 生成的 PKCS12。显式写出来：默认值随 JDK
+            // 版本变过，写死更稳。
+            storeType = "PKCS12"
         }
     }
 
@@ -65,7 +82,7 @@ android {
         release {
             // 侧载自用，不需要混淆；出问题时要看得懂堆栈（文档 1.1）。
             isMinifyEnabled = false
-            signingConfig = if (hasReleaseKey) {
+            signingConfig = if (useSecretKey || useFallbackKey) {
                 signingConfigs.getByName("release")
             } else {
                 signingConfigs.getByName("debug")

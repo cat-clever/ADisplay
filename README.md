@@ -90,6 +90,24 @@ ADisplay/
 声音的，那条路走 ALAC（`ct=2`），而目前只解镜像伴音的 AAC-ELD（`ct=8`）；
 **唇音同步未做** —— 伴音按到达顺序播放，与画面各自独立。
 
+## fork 之后自己构建
+
+Android 的签名按三级优先级：
+
+1. **本仓库的 Secrets** —— 若配了，用你的私有密钥
+2. **仓库里那份公开的兜底密钥**（`app-tv/fallback-signing.p12`）
+3. debug 签名 —— 正常不会走到
+
+GitHub 的 Secrets **不会**复制到 fork，所以别人 fork 之后那几个环境变量是空的，
+构建会自动落到第 2 级。这一点是刻意做的：没有兜底的话，每次构建都会用当次
+runner 全新生成的 debug 密钥，于是**每个版本的 APK 签名都不同，装新版必须先
+卸载**，而卸载会清掉配置与和设备配对用的密钥。
+
+兜底密钥是公开的（口令就写在 `app-tv/app/build.gradle.kts` 里），所以它**证明
+不了发布者身份** —— 公开的东西做不到这件事。它保证的是「同一台设备上能覆盖
+升级」。想要私有密钥，生成一个密钥库，把 base64 与口令放进本仓库的四个 Secrets
+（名称见 `.github/workflows/ci.yml` 的「还原签名密钥」那一步），构建时会自动优先。
+
 ## 安装
 
 各平台安装包见 [Releases](https://github.com/cat-clever/ADisplay/releases)。
