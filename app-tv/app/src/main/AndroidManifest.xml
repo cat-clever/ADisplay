@@ -48,7 +48,8 @@
             android:name=".MainActivity"
             android:exported="true"
             android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|smallestScreenSize|uiMode"
-            android:launchMode="singleTask">
+            android:launchMode="singleTask"
+            android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <!-- LEANBACK_LAUNCHER 是电视桌面上的入口（文档 4.5）。 -->
@@ -56,6 +57,14 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!--
+            MainActivity 用 adjustResize（见上面 activity 的 windowSoftInputMode）：
+            软键盘弹出时窗口跟着收缩，底部的抽屉就自然浮到键盘之上。
+            默认的 adjustUnspecified 在这台机器上落到了 adjustPan —— 窗口不缩、
+            只把内容整体上推，于是改名抽屉被键盘整个盖住，输入框和保存/取消都
+            看不见。adjustResize 是 Compose 里输入框的常规选择。
+        -->
 
         <!--
             接收服务的前台服务外壳：只负责让进程在后台活着（见 ReceiverService）。
