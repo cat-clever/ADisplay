@@ -20,6 +20,9 @@ import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.view.Surface
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import java.util.ArrayDeque
 import java.util.concurrent.TimeUnit
 // withLock 在 kotlin.concurrent 里，不在默认导入的那几个包里。
@@ -55,6 +58,16 @@ class MirrorVideoPlayer(private val onNotice: (String) -> Unit) {
     private var worker: Thread? = null
     private var running = false
 
+    /**
+     * 解码器报出来的画面尺寸。null 表示还没解出第一帧。
+     *
+     * 界面层拿它做信箱式留边 —— 少了这一步，SurfaceView 铺满父容器，
+     * 而解码器是**按 Surface 的宽高比拉伸画面**的，比例就错了（竖屏手机上
+     * 会把画面横向拉宽四成）。它是 Compose 状态，界面据此重排。
+     */
+    var videoSize by mutableStateOf<Pair<Int, Int>?>(null)
+        private set
+
     // 只有 worker 线程碰这几个。
     private var codec: MediaCodec? = null
     private var codecH265 = false
@@ -82,6 +95,11 @@ class MirrorVideoPlayer(private val onNotice: (String) -> Unit) {
         releaseCodec()
     }
 
+    /** 会话结束、重新开始时清掉上一路的尺寸，免得沿用旧比例。 */
+    fun forgetVideoSize() {
+        videoSize = null
+    }
+
     /** 收一帧（Annex B，核心交过来的原始形态）。由核心的工作线程调用。 */
     fun push(data: ByteArray, isH265: Int, width: Int, height: Int, ptsUs: Long) {
         lock.withLock {
@@ -103,6 +121,8 @@ class MirrorVideoPlayer(private val onNotice: (String) -> Unit) {
             surface = null
             hasFrame.signalAll()
         }
+        // 清掉尺寸：下一个会话可能是别的分辨率，沿用旧比例就会留错边。
+        forgetVideoSize()
         val thread = worker
         if (thread != null) {
             try {
@@ -232,8 +252,19 @@ class MirrorVideoPlayer(private val onNotice: (String) -> Unit) {
         val current = codec ?: return
         while (true) {
             val index = current.dequeueOutputBuffer(info, 0)
+            if (index == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                // 解码器此刻才报出真正的画面尺寸（可能与 configure 时给的
+                // 建议值不同）。界面用它做留边。
+                val format = current.outputFormat
+                val width = format.getInteger(MediaFormat.KEY_WIDTH)
+                val height = format.getInteger(MediaFormat.KEY_HEIGHT)
+                if (width > 0 && height > 0) {
+                    videoSize = Pair(width, height)
+                }
+                continue
+            }
             if (index < 0) {
-                return   // 还要么没数据、要么换了格式，都会在下一轮再来
+                return   // 还没数据，下一轮再来
             }
             // true = 直接送到 Surface 上显示。
             current.releaseOutputBuffer(index, true)

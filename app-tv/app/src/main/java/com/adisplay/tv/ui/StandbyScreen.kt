@@ -140,7 +140,11 @@ private fun StandbyContent(model: EngineModel) {
                     ActionButton(
                         text = if (model.serviceEnabled) "关闭接收服务" else "开启接收服务",
                         textStyle = layout.actionStyle,
-                        minWidth = layout.buttonMinWidth,
+                        // minWidth 交给 weight：三个按钮等分整行宽度。之前用固定的
+                        // buttonMinWidth，三个加起来超过了屏宽，第三个（修改名称）
+                        // 被挤出可视区 —— 表现就是「改不了设备名」。
+                        minWidth = 0.dp,
+                        modifier = Modifier.weight(1f),
                         focusRequester = buttonFocus,
                         // 核心库没加载起来时按钮压暗且不可聚焦：让用户看出是这一块
                         // 坏了，而不是对着一个按了没反应的按钮猜网络。
@@ -153,7 +157,8 @@ private fun StandbyContent(model: EngineModel) {
                     ActionButton(
                         text = "清除日志",
                         textStyle = layout.actionStyle,
-                        minWidth = layout.buttonMinWidth,
+                        minWidth = 0.dp,
+                        modifier = Modifier.weight(1f),
                         focusRequester = clearLogFocus,
                         // 没有日志时压暗：一眼看出这一项此刻没意义。
                         enabled = model.logs.isNotEmpty(),
@@ -167,7 +172,8 @@ private fun StandbyContent(model: EngineModel) {
                     ActionButton(
                         text = "修改名称",
                         textStyle = layout.actionStyle,
-                        minWidth = layout.buttonMinWidth,
+                        minWidth = 0.dp,
+                        modifier = Modifier.weight(1f),
                         focusRequester = renameFocus,
                         onClick = { model.beginRename() },
                     )

@@ -2,7 +2,9 @@ package com.adisplay.tv
 
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import android.view.WindowManager
 import androidx.activity.compose.setContent
+import androidx.compose.runtime.LaunchedEffect
 import com.adisplay.tv.ui.ADisplayTvTheme
 import com.adisplay.tv.ui.StandbyScreen
 
@@ -30,6 +32,18 @@ class MainActivity : ComponentActivity() {
         setContent {
             ADisplayTvTheme {
                 StandbyScreen(model)
+
+                // 投屏期间别让屏幕自动息屏 —— 用户看的就是画面，中途黑掉等于
+                // 中断。只在真的在投（镜像会话或媒体会话）时加这个标志：
+                // 待机时该省电还是省电，电视盒子常年开着，这一条对它也重要。
+                val casting = model.mirrorSessionId != null || model.playingMedia != null
+                LaunchedEffect(casting) {
+                    if (casting) {
+                        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                    } else {
+                        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                    }
+                }
             }
         }
     }

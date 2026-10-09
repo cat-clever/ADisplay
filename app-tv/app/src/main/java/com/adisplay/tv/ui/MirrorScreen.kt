@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
@@ -37,11 +38,22 @@ fun MirrorScreen(model: EngineModel, onExit: () -> Unit) {
 
     Column(modifier = Modifier.fillMaxSize().background(Color.Black)) {
         // 画面吃掉剩下的全部高度；控制条按内容取高。
-        Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
-            MirrorSurface(
-                player = model.mirrorPlayer,
-                modifier = Modifier.fillMaxSize(),
-            )
+        Box(
+            modifier = Modifier.fillMaxWidth().weight(1f),
+            contentAlignment = Alignment.Center,
+        ) {
+            // 按解码器报出来的尺寸做信箱式留边。
+            //
+            // 少了这一步，SurfaceView 铺满父容器，而解码器是**按 Surface 的
+            // 宽高比拉伸画面**的 —— 竖屏设备上会把画面横向拉宽四成，看起来
+            // 就是「比例不对」。等它报出尺寸之前先铺满，报出来再收紧。
+            val size = model.mirrorPlayer.videoSize
+            val shape = if (size != null && size.first > 0 && size.second > 0) {
+                Modifier.aspectRatio(size.first.toFloat() / size.second.toFloat())
+            } else {
+                Modifier.fillMaxSize()
+            }
+            MirrorSurface(player = model.mirrorPlayer, modifier = shape)
         }
 
         Row(
