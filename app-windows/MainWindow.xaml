@@ -22,8 +22,10 @@
         <!--
             投屏页：画面满幅，四周不留边距也不留边框。
 
-            投屏时用户看的就是画面，任何一圈留白都是白扔的像素。控制条紧贴在
-            画面下方，画面本身仍然被内容包住，不需要额外的框。
+            投屏时用户看的就是画面，任何一圈留白都是白扔的像素。
+
+            控件**浮在画面上**，不占画面的高度 —— 独占一行会把画面压扁一块，
+            而那块地方本来该全是画面。
         -->
         <Grid x:Name="CastingPanel" Visibility="Collapsed">
             <!-- 全屏时按 Esc 退出。挂在整块投屏面板上，比绑在按钮上精确：
@@ -33,37 +35,63 @@
                 <KeyboardAccelerator Key="Escape" Invoked="OnEscapeInvoked" />
             </Grid.KeyboardAccelerators>
 
-            <Grid.RowDefinitions>
-                <RowDefinition Height="*" />
-                <RowDefinition Height="Auto" />
-            </Grid.RowDefinitions>
-
             <!-- 黑底：画面比例与窗口不一致时，留出来的是黑边而不是主题色的
-                 一块，看起来才像播放器。 -->
+                 一块，看起来才像播放器。Stretch=Uniform 是按屏幕适应：整幅可见，
+                 多出来的边留黑。
+                  注意不要写注释在标签属性之间 —— xml 解析会直接失败。 -->
             <MediaPlayerElement x:Name="PlayerElement"
-                                Grid.Row="0"
                                 Background="Black"
                                 AreTransportControlsEnabled="True"
                                 Stretch="Uniform" />
 
-            <StackPanel x:Name="ControlBar"
-                        Grid.Row="1"
-                        Orientation="Horizontal"
-                        Spacing="12"
-                        Padding="12,8">
-                <TextBlock x:Name="CastingTitleText"
-                           VerticalAlignment="Center"
-                           Style="{StaticResource BodyStrongTextBlockStyle}" />
-                <Button x:Name="ShowLogButton"
-                        Content="查看日志"
-                        Click="OnShowLogClick" />
-                <Button x:Name="FullScreenButton"
-                        Content="全屏"
-                        Click="OnToggleFullScreenClick" />
-                <Button x:Name="StopCastingButton"
-                        Content="停止接收"
-                        Click="OnStopCastingClick" />
-            </StackPanel>
+            <!--
+                悬浮控件：盖在画面上，不占画面高度。
+
+                默认整块收起，鼠标在窗口里一动（以及刚进投屏时）才显示，几秒后
+                自动收起 —— 逻辑在 MainWindow.xaml.cs 的 ShowCastingControls。
+
+                中间一行刻意留空且不给背景：空处不参与命中判定，点击照旧落到下面
+                的播放器上，它自带的传输控件与进度条还能用。
+            -->
+            <Grid x:Name="CastingOverlay" Visibility="Collapsed">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+
+                <StackPanel Grid.Row="0"
+                            Orientation="Horizontal"
+                            Spacing="12"
+                            Padding="16,10"
+                            Background="#99000000">
+                    <TextBlock x:Name="CastingTitleText"
+                               VerticalAlignment="Center"
+                               Foreground="White"
+                               Style="{StaticResource BodyStrongTextBlockStyle}" />
+                    <TextBlock VerticalAlignment="Center"
+                               Foreground="#CCFFFFFF"
+                               Style="{StaticResource CaptionTextBlockStyle}"
+                               Text="移动鼠标可再显示控件" />
+                </StackPanel>
+
+                <Grid Grid.Row="2" Padding="16,12" Background="#99000000">
+                    <StackPanel x:Name="ControlBar"
+                                Orientation="Horizontal"
+                                Spacing="12"
+                                HorizontalAlignment="Center">
+                        <Button x:Name="ShowLogButton"
+                                Content="查看日志"
+                                Click="OnShowLogClick" />
+                        <Button x:Name="FullScreenButton"
+                                Content="全屏"
+                                Click="OnToggleFullScreenClick" />
+                        <Button x:Name="StopCastingButton"
+                                Content="停止接收"
+                                Click="OnStopCastingClick" />
+                    </StackPanel>
+                </Grid>
+            </Grid>
         </Grid>
 
         <Grid x:Name="SettingsPanel" Padding="28" RowSpacing="20" MinWidth="480" MinHeight="480">

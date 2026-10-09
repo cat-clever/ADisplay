@@ -56,6 +56,15 @@ public sealed partial class MainWindow : Window
         StartupLog.Leave("MainWindow.InitializeComponent()");
 
         _dispatcher = DispatcherQueue.GetForCurrentThread();
+
+        // 指针在投屏画面上一动，就把悬浮控件叫出来。
+        //
+        // 用 AddHandler(..., handledEventsToo: true) 而不是在 XAML 上挂
+        // PointerMoved：MediaPlayerElement 自己会处理指针事件（它要靠悬停显示
+        // 传输控件），XAML 上挂的处理器收不到已经被标记成 handled 的事件。
+        CastingPanel.AddHandler(UIElement.PointerMovedEvent,
+                                new PointerEventHandler(OnCastingPointerMoved),
+                                true);
         // 日志集合由独立的日志窗口显示（见 LogWindow.xaml）。这里只持有它 ——
         // 谁显示、显示在哪，都是那个窗口自己的事。
 
@@ -314,6 +323,9 @@ public sealed partial class MainWindow : Window
             SettingsPanel.Visibility = Visibility.Collapsed;
             CastingPanel.Visibility = Visibility.Visible;
             CastingTitleText.Text = "正在镜像屏幕";
+            // 刚进投屏先把控件亮出来一次：让用户知道现在什么状态、退路在哪，
+            // 之后它自己会收起。
+            ShowCastingControls();
             AppendLog(AdLogLevel.Info, "iPhone 开始屏幕镜像");
         });
     }
@@ -365,6 +377,7 @@ public sealed partial class MainWindow : Window
         SettingsPanel.Visibility = Visibility.Collapsed;
         CastingPanel.Visibility = Visibility.Visible;
         CastingTitleText.Text = "正在接收投屏";
+        ShowCastingControls();
 
         PlayerElement.Source = MediaSource.CreateFromUri(uri);
         PlayerElement.MediaPlayer.Volume = 1.0;
@@ -400,6 +413,7 @@ public sealed partial class MainWindow : Window
             _mirrorSource = null;
         }
         ExitFullScreenOnCastingEnd();
+        HideCastingControls();
         CastingPanel.Visibility = Visibility.Collapsed;
         SettingsPanel.Visibility = Visibility.Visible;
     }
@@ -445,9 +459,9 @@ public sealed partial class MainWindow : Window
                                           : AppWindowPresenterKind.Default);
         FullScreenButton.Content = fullScreen ? "退出全屏" : "全屏";
 
-        // 全屏时把控制条收起来：那一条横在画面下面既挡画面又白占高度，
-        // 而全屏里退出有 Esc、播放控制由播放器自带的那套负责。
-        ControlBar.Visibility = fullScreen ? Visibility.Collapsed : Visibility.Visible;
+        // 进出全屏时把控件亮出来一次，让用户看到按钮文字已经跟着变了；
+        // 之后照旧自动收起。控制条不再单独隐藏 —— 它已经是悬浮的。
+        ShowCastingControls();
     }
 
     private void ExitFullScreenOnCastingEnd()
@@ -458,6 +472,56 @@ public sealed partial class MainWindow : Window
         {
             SetFullScreen(false);
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // 悬浮控件
+    //
+    // 默认收起，鼠标一动才显示，几秒后自己收起来 —— 投屏时用户看的就是画面，
+    // 常驻一条控件既挡画面又白占高度。收起不是「消失」：鼠标一动就回来。
+    // ---------------------------------------------------------------------
+
+    /// <summary>悬浮控件出现后停留多久自动收起。</summary>
+    private static readonly TimeSpan ControlsTimeout = TimeSpan.FromSeconds(4);
+
+    private DispatcherTimer? _controlsTimer;
+
+    /// <summary>唤出悬浮控件，并重新计时。</summary>
+    private void ShowCastingControls()
+    {
+        if (CastingPanel.Visibility != Visibility.Visible)
+        {
+            return;
+        }
+
+        CastingOverlay.Visibility = Visibility.Visible;
+
+        _controlsTimer ??= new DispatcherTimer { Interval = ControlsTimeout };
+        _controlsTimer.Tick -= OnControlsTimerTick;
+        _controlsTimer.Tick += OnControlsTimerTick;
+        // 先停再起：控件正在显示时鼠标又动了一下，倒计时要重新计，
+        // 而不是接着原来的走 —— 用户正在看控件，不该正好在这一刻收走。
+        _controlsTimer.Stop();
+        _controlsTimer.Start();
+    }
+
+    private void HideCastingControls()
+    {
+        if (_controlsTimer != null)
+        {
+            _controlsTimer.Stop();
+        }
+        CastingOverlay.Visibility = Visibility.Collapsed;
+    }
+
+    private void OnControlsTimerTick(object? sender, object e)
+    {
+        HideCastingControls();
+    }
+
+    private void OnCastingPointerMoved(object sender, PointerRoutedEventArgs e)
+    {
+        ShowCastingControls();
     }
 
     private void OnReportTick(object? sender, object e)

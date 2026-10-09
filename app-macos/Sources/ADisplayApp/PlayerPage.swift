@@ -25,6 +25,10 @@ private struct PlayerSurface: NSViewRepresentable {
         let view = AVPlayerView()
         view.player = player
         view.controlsStyle = .floating
+        // 画面按屏幕适应：整幅可见，多出来的边留黑。AVPlayerView 默认就是这个
+        // 值，显式写出来免得将来被改成 resizeAspectFill —— 那个会把画面裁掉一块，
+        // 而投屏看的就是完整画面。
+        view.videoGravity = .resizeAspect
         view.allowsPictureInPicturePlayback = true
         // 全屏按钮默认是关的，得显式打开 —— 投屏过来本来就是想在大屏上看，
         // 没有这个按钮等于每次都要手动拖窗口。
@@ -254,50 +258,111 @@ final class PlayerViewModel: ObservableObject {
     }
 }
 
+/// 鼠标移动侦测。
+///
+/// 桌面端没有遥控器，「鼠标在窗口里动了一下」就是用户想操作的信号，与
+/// QuickTime、IINA 这些播放器的行为一致。
+///
+/// 用 NSTrackingArea 而不是 SwiftUI 的 onHover：后者只在进入/离开时各触发一次，
+/// 鼠标停在窗口里不动的话，控件自动收起之后就再也叫不出来。
+///
+/// hitTest 返回 nil —— 这一层只报告鼠标位置，绝不参与命中判定。否则它会把点击
+/// 从 AVPlayerView 手里抢走，播放器自带的播放/暂停、进度条、全屏按钮就全废了。
+private struct MouseMoveReporter: NSViewRepresentable {
+    let onMove: () -> Void
+
+    func makeNSView(context: Context) -> NSView {
+        let view = ReportingView()
+        view.onMove = onMove
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        if let view = nsView as? ReportingView {
+            view.onMove = onMove
+        }
+    }
+
+    private final class ReportingView: NSView {
+        var onMove: (() -> Void)?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            // 少了这一句，窗口根本不会投递 mouseMoved 事件。
+            window?.acceptsMouseMovedEvents = true
+        }
+
+        override func updateTrackingAreas() {
+            super.updateTrackingAreas()
+            for area in trackingAreas {
+                removeTrackingArea(area)
+            }
+            addTrackingArea(NSTrackingArea(
+                rect: .zero,
+                options: [.mouseMoved, .activeInKeyWindow, .inVisibleRect],
+                owner: self,
+                userInfo: nil
+            ))
+        }
+
+        override func mouseMoved(with event: NSEvent) {
+            onMove?()
+        }
+
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            nil
+        }
+    }
+}
+
 struct PlayerPage: View {
 
     @EnvironmentObject private var model: EngineModel
     @StateObject private var viewModel = PlayerViewModel()
 
-    // 全屏时把控制条收起来。那一条横在画面下面既挡画面又白占高度，
-    // 而全屏里退出有 Esc、播放控制有播放器自带的那套，用不着它。
-    @State private var isFullScreen = false
+    /// 悬浮控件是否显示。默认收起 —— 投屏时用户看的就是画面。
+    @State private var controlsVisible = false
+
+    /// 自动收起的定时器。每次唤出都换一个新的，不攒着。
+    @State private var hideWorkItem: DispatchWorkItem?
 
     /// 当前投屏的媒体地址。镜像会话没有地址，所以是可选的 ——
     /// 走哪条路由 mirrorSessionId 决定。
     let media: EngineModel.ActiveMedia?
 
-    var body: some View {
-        // 画面占满整个区域，四周不留边距 —— 投屏时用户看的就是画面，
-        // 那一圈留白是白扔的像素。控制条紧贴在画面下方，所以画面本身仍然
-        // 被内容包住，不需要额外的框。这一层与 Windows 端一致。
-        VStack(spacing: 0) {
-            if model.mirrorSessionId != nil {
-                // 镜像走这条：帧由核心直接交下来，渲染面自己解码显示，
-                // 不经过 AVPlayer —— 那是给「一条 URL」用的。
-                MirrorSurface()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                PlayerSurface(player: viewModel.player)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
+    /// 控件出现后停留多久自动收起。
+    private static let controlsTimeout: TimeInterval = 4
 
-            if !isFullScreen {
-                HStack(spacing: 12) {
-                    Text(model.mirrorSessionId != nil ? "正在镜像屏幕" : "正在接收投屏")
-                        .font(.headline)
-                    Button("查看日志") {
-                        LogWindowController.shared.show()
-                    }
-                    Button("全屏") {
-                        toggleFullScreen()
-                    }
-                    Button("停止接收") {
-                        model.stopCasting()
-                    }
+    var body: some View {
+        // 画面铺满整个窗口，四周不留边距 —— 投屏时用户看的就是画面，那一圈
+        // 留白是白扔的像素。控件**浮在画面上**，不占画面的高度：独占一行会把
+        // 画面压扁一块，而那块地方本来该全是画面。
+        ZStack {
+            Group {
+                if model.mirrorSessionId != nil {
+                    // 镜像走这条：帧由核心直接交下来，渲染面自己解码显示，
+                    // 不经过 AVPlayer —— 那是给「一条 URL」用的。
+                    MirrorSurface()
+                } else {
+                    PlayerSurface(player: viewModel.player)
                 }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 10)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            // 只报鼠标移动，不抢点击（见 MouseMoveReporter）。
+            //
+            // frame 必须显式铺满：跟踪区域是按视图的可见矩形算的，不给尺寸就是
+            // 零大小，mouseMoved 一次也不会来。hitTest 返回 nil，所以铺满也不会
+            // 挡住下面的播放器。
+            MouseMoveReporter { showControls() }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            if controlsVisible {
+                VStack(spacing: 0) {
+                    statusBar
+                    Spacer(minLength: 0)
+                    controlBar
+                }
             }
         }
         .frame(minWidth: 520, minHeight: 460)
@@ -305,6 +370,8 @@ struct PlayerPage: View {
             if let media = media {
                 viewModel.attach(engine: model, media: media)
             }
+            // 刚进投屏先把控件亮出来一次，让用户知道现在是什么状态、退路在哪。
+            showControls()
         }
         // 同一次投屏里手机换视频时 activeMedia 会变，要重新拉流。
         // 镜像会话没有地址，这条不会触发。
@@ -315,17 +382,54 @@ struct PlayerPage: View {
         }
         .onDisappear {
             viewModel.detach()
+            hideWorkItem?.cancel()
         }
-        // 进出全屏由窗口自己发通知 —— 用户也可能按 Esc 或点播放器自带的全屏
-        // 按钮，不能只在自己的按钮里记状态，否则那边一按这边就不同步了。
-        .onReceive(NotificationCenter.default.publisher(
-            for: NSWindow.didEnterFullScreenNotification)) { _ in
-            isFullScreen = true
+    }
+
+    /// 顶部状态条。悬浮，不占画面高度。
+    private var statusBar: some View {
+        HStack(spacing: 12) {
+            Text(model.deviceName + " · "
+                 + (model.mirrorSessionId != nil ? "正在镜像屏幕" : "正在接收投屏"))
+                .font(.headline)
+            Spacer(minLength: 0)
+            Text("鼠标移动可再显示控件")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
-        .onReceive(NotificationCenter.default.publisher(
-            for: NSWindow.didExitFullScreenNotification)) { _ in
-            isFullScreen = false
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        // 材质而不是纯黑：跟随浅色/深色外观，不用自己挑两套颜色。
+        .background(.ultraThinMaterial)
+    }
+
+    /// 底部操作条。同样悬浮。
+    private var controlBar: some View {
+        HStack(spacing: 12) {
+            Button("停止接收") {
+                model.stopCasting()
+            }
+            Button("查看日志") {
+                LogWindowController.shared.show()
+            }
+            Button("全屏") {
+                toggleFullScreen()
+            }
         }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .frame(maxWidth: .infinity)
+        .background(.ultraThinMaterial)
+    }
+
+    private func showControls() {
+        controlsVisible = true
+        hideWorkItem?.cancel()
+
+        // 每次唤出都重新计时：用户正在看控件，不该正好在这一刻收走。
+        let work = DispatchWorkItem { controlsVisible = false }
+        hideWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.controlsTimeout, execute: work)
     }
 
     /// 窗口级全屏。与 Windows 端一致 —— 那边走的也是窗口全屏，
