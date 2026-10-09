@@ -4,9 +4,16 @@
 // 与显示，延迟最低。这跟「解码渲染交给各平台自带的实现」这条一贯的分工一致 ——
 // DLNA 那边交给 AVPlayer，镜像这边交给这个层，核心里不养解码器。
 //
-// 核心交过来的数据是 AVCC 格式：每个 NALU 前面带 4 字节大端长度前缀，
-// 不是 Annex B 的起始码。首帧通常是编码参数（H.264 的 SPS/PPS），
-// 要先拿它建出格式描述，后续的帧才知道怎么解。
+// 格式上有一个必须注意的落差，弄反了就是「一帧都解不出来」：
+//
+//   核心交过来的是 **Annex B** —— 每个 NALU 前面是 00 00 01 或 00 00 00 01
+//   起始码（这一点是从协议层源码确认的：它给每个 NALU 写的就是起始码）。
+//   而 AVSampleBufferDisplayLayer 要的是 **AVCC** —— 4 字节大端长度前缀，
+//   配合 nalUnitHeaderLength = 4 的格式描述。
+//
+// 所以这里要先按起始码切开、重新按长度前缀拼一遍，再入队。
+// 起始码那一版是能「看着像在跑」的：帧照样计数、切出来的东西也能入队，
+// 只是解码器一个 NALU 都认不出来，屏幕上什么都没有。
 
 import AVFoundation
 import AppKit
@@ -77,7 +84,8 @@ final class MirrorRenderView: NSView, MirrorFrameSink {
     func enqueueMirrorFrame(_ data: UnsafePointer<UInt8>, count: Int, isH265: Bool) {
         guard count > 4 else { return }
 
-        let nalUnits = MirrorRenderView.splitAVCC(data, count: count)
+        let nalUnits = MirrorRenderView.splitAnnexB(data, count: count)
+        guard !nalUnits.isEmpty else { return }
 
         // 参数集可以夹在任何一帧里（切分辨率、切编码器时会重发），
         // 所以每帧都扫一遍，见到就重建格式描述。
@@ -95,7 +103,9 @@ final class MirrorRenderView: NSView, MirrorFrameSink {
         guard displayLayer.isReadyForMoreMediaData else {
             return   // 来不及就丢帧：镜像宁可按最新画面走，也不要越积越久
         }
-        guard let sample = makeSampleBuffer(data: data, count: count, format: format) else {
+
+        let avcc = MirrorRenderView.annexBToAVCC(nalUnits)
+        guard !avcc.isEmpty, let sample = makeSampleBuffer(avcc: avcc, format: format) else {
             return
         }
         displayLayer.enqueue(sample)
@@ -154,35 +164,37 @@ final class MirrorRenderView: NSView, MirrorFrameSink {
         }
     }
 
-    private func makeSampleBuffer(data: UnsafePointer<UInt8>, count: Int,
-                                  format: CMVideoFormatDescription) -> CMSampleBuffer? {
+    private func makeSampleBuffer(avcc: [UInt8], format: CMVideoFormatDescription) -> CMSampleBuffer? {
         var blockBuffer: CMBlockBuffer?
         // 这里刻意不用「零拷贝」那个重载：数据来自核心的缓冲区，只在回调期间有效，
         // 而入队之后解码器还要用它。所以老老实实拷一份。
         let created = CMBlockBufferCreateWithMemoryBlock(
             allocator: kCFAllocatorDefault,
             memoryBlock: nil,
-            blockLength: count,
+            blockLength: avcc.count,
             blockAllocator: kCFAllocatorDefault,
             customBlockSource: nil,
             offsetToData: 0,
-            dataLength: count,
+            dataLength: avcc.count,
             flags: 0,
             blockBufferOut: &blockBuffer)
         guard created == kCMBlockBufferNoErr, let block = blockBuffer else { return nil }
 
-        let copied = CMBlockBufferReplaceDataBytes(
-            with: data, blockBuffer: block, offsetIntoDestination: 0, dataLength: count)
+        let copied = avcc.withUnsafeBytes { raw -> OSStatus in
+            guard let base = raw.baseAddress else { return -1 }
+            return CMBlockBufferReplaceDataBytes(
+                with: base, blockBuffer: block, offsetIntoDestination: 0, dataLength: avcc.count)
+        }
         guard copied == kCMBlockBufferNoErr else { return nil }
 
         // 显示时间戳要严格递增：同一时刻两帧会让显示层丢掉后一帧。
-        // 核心给的是微秒；没给或没前进时自己往前推一档（按 60fps 算）。
+        // 按 60fps 递推，够用了 —— 镜像的帧率就是跟着发送端走的。
         let pts = nextPresentationTime()
         var timing = CMSampleTimingInfo(
             duration: CMTime(value: 1, timescale: 60),
             presentationTimeStamp: pts,
             decodeTimeStamp: .invalid)
-        var sampleSize = count
+        var sampleSize = avcc.count
 
         var sampleBuffer: CMSampleBuffer?
         let status = CMSampleBufferCreateReady(
@@ -221,26 +233,58 @@ final class MirrorRenderView: NSView, MirrorFrameSink {
 
     // MARK: - AVCC 解析
 
-    /// 按 4 字节大端长度前缀切开一帧。
-    static func splitAVCC(_ data: UnsafePointer<UInt8>, count: Int) -> [[UInt8]] {
-        var units: [[UInt8]] = []
-        var offset = 0
-        while offset + 4 <= count {
-            let length = (Int(data[offset]) << 24) | (Int(data[offset + 1]) << 16)
-                | (Int(data[offset + 2]) << 8) | Int(data[offset + 3])
-            offset += 4
-            guard length > 0, offset + length <= count else { break }
-            var unit = [UInt8](repeating: 0, count: length)
-            _ = unit.withUnsafeMutableBufferPointer { buffer in
-                memcpy(buffer.baseAddress!, data + offset, length)
+    /// 按起始码切开一帧 Annex B。
+    static func splitAnnexB(_ data: UnsafePointer<UInt8>, count: Int) -> [[UInt8]] {
+        // 先记下每个起始码的位置：prefix 是起始码本身的下标，content 是它后面
+        // 第一个字节。一段 NALU 的结束就是下一个起始码的 prefix ——
+        // 这样 4 字节起始码前面那些多余的 0 会被自动排除在外。
+        var marks: [(prefix: Int, content: Int)] = []
+        var index = 0
+        while index + 3 <= count {
+            if data[index] == 0 && data[index + 1] == 0 {
+                if data[index + 2] == 1 {
+                    marks.append((prefix: index, content: index + 3))
+                    index += 3
+                    continue
+                }
+                if index + 4 <= count && data[index + 2] == 0 && data[index + 3] == 1 {
+                    marks.append((prefix: index, content: index + 4))
+                    index += 4
+                    continue
+                }
             }
-            units.append(unit)
-            offset += length
+            index += 1
+        }
+        guard !marks.isEmpty else { return [] }
+
+        var units: [[UInt8]] = []
+        for (position, mark) in marks.enumerated() {
+            var end = position + 1 < marks.count ? marks[position + 1].prefix : count
+            // 末尾可能还挂着几个 0（上一段 NALU 的填充），去掉再收。
+            while end > mark.content && data[end - 1] == 0 {
+                end -= 1
+            }
+            guard end > mark.content else { continue }
+            units.append(Array(UnsafeBufferPointer(start: data + mark.content, count: end - mark.content)))
         }
         return units
     }
 
-    /// 从这一帧的 NALU 里挑出参数集。没有就返回 nil。
+    /// Annex B 的 NALU 拼成 AVCC：每个前面换成 4 字节大端长度。
+    static func annexBToAVCC(_ units: [[UInt8]]) -> [UInt8] {
+        var out: [UInt8] = []
+        for unit in units {
+            let length = UInt32(unit.count)
+            out.append(UInt8((length >> 24) & 0xFF))
+            out.append(UInt8((length >> 16) & 0xFF))
+            out.append(UInt8((length >> 8) & 0xFF))
+            out.append(UInt8(length & 0xFF))
+            out.append(contentsOf: unit)
+        }
+        return out
+    }
+
+    /// 从这一帧切出来的 NALU 里挑出参数集。没有就返回 nil。
     static func parameterSets(in units: [[UInt8]], isH265: Bool) -> [[UInt8]]? {
         // H.264：SPS=7、PPS=8；H.265：VPS=32、SPS=33、PPS=34。
         // 类型在第一个字节的低 5 位（H.264）或 (byte >> 1) & 0x3F（H.265）。
