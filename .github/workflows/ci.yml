@@ -722,6 +722,31 @@ jobs:
         with:
           gradle-version: '8.9'
 
+      # 固定密钥签名。
+      #
+      # 密钥库不在仓库里（仓库是公开的），它和口令放在本仓库的 Secrets 里。
+      # 没有配置时跳过 —— gradle 那边会退回 debug 签名，构建不因此失败，
+      # 代价只是那个 APK 装新版要先卸载。
+      - name: 还原签名密钥
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "没有配置签名密钥，本次使用 debug 签名"
+            exit 0
+          fi
+          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/adisplay-release.keystore"
+          {
+            echo "ADISPLAY_KEYSTORE_FILE=$RUNNER_TEMP/adisplay-release.keystore"
+            echo "ADISPLAY_KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD"
+            echo "ADISPLAY_KEY_ALIAS=$KEY_ALIAS"
+            echo "ADISPLAY_KEY_PASSWORD=$KEY_PASSWORD"
+          } >> "$GITHUB_ENV"
+          echo "签名密钥已还原"
+
       - name: 构建 APK
         working-directory: app-tv
         run: gradle assembleRelease --no-daemon --stacktrace
