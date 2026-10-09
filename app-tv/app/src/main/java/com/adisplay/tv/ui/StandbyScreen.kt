@@ -88,6 +88,7 @@ private fun StandbyContent(model: EngineModel) {
 
     val buttonFocus = remember { FocusRequester() }
     val clearLogFocus = remember { FocusRequester() }
+    val renameFocus = remember { FocusRequester() }
 
     Surface(modifier = Modifier.fillMaxSize()) {
         Column(
@@ -158,6 +159,18 @@ private fun StandbyContent(model: EngineModel) {
                         enabled = model.logs.isNotEmpty(),
                         onClick = { model.clearLogs() },
                     )
+
+                    Spacer(modifier = Modifier.width(16.dp))
+
+                    // 电视上没有键盘，改名的入口必须显式给出来。名字是手机端
+                    // 投屏列表里看到的东西，改不了就只能认设备型号那一个默认名。
+                    ActionButton(
+                        text = "修改名称",
+                        textStyle = layout.actionStyle,
+                        minWidth = layout.buttonMinWidth,
+                        focusRequester = renameFocus,
+                        onClick = { model.beginRename() },
+                    )
                 }
 
                 Spacer(modifier = Modifier.height(layout.spacingLoose))
@@ -203,13 +216,22 @@ private fun StandbyContent(model: EngineModel) {
 
             Spacer(modifier = Modifier.height(layout.spacingLoose))
 
-            // 日志区钉在底部，高度固定（见 StandbyLayout.logHeight）。
-            // 它不可聚焦，所以遥控器的焦点始终留在上面的按钮上。
-            LogPanel(
-                lines = model.logs,
-                textStyle = layout.logStyle,
-                panelHeight = layout.logHeight
-            )
+            // 底部这块地方：平时是日志，改名时借用它做输入区。
+            //
+            // 借用的理由：电视的布局是算着屏幕高度放的（见 StandbyLayout），
+            // 在页面里另加一块会把上面的按钮挤出可视区；而这块高度固定，
+            // 正好换得下。
+            if (model.nameDraft != null) {
+                NameEditor(model = model, layout = layout)
+            } else {
+                // 日志区钉在底部，高度固定。它不可聚焦，所以遥控器的焦点
+                // 始终留在上面的按钮上。
+                LogPanel(
+                    lines = model.logs,
+                    textStyle = layout.logStyle,
+                    panelHeight = layout.logHeight
+                )
+            }
         }
     }
 

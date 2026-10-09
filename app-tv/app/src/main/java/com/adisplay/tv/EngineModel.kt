@@ -341,6 +341,59 @@ class EngineModel(context: Context) {
         appendLog(LogLevel.INFO, "核心库 " + version + " 就绪，设备名：" + deviceName)
     }
 
+    /**
+     * 名称草稿。null 表示没在改名。
+     *
+     * 电视上没有键盘，改名的入口要显式给出来（见待机页）—— 而 Android TV
+     * 在聚焦输入框时会弹出系统输入法，所以这里只需要一个普通输入框。
+     */
+    var nameDraft by mutableStateOf<String?>(null)
+        private set
+
+    fun beginRename() {
+        nameDraft = deviceName
+    }
+
+    fun cancelRename() {
+        nameDraft = null
+    }
+
+    fun updateNameDraft(text: String) {
+        nameDraft = text
+    }
+
+    /** 草稿不合法的原因；空串表示没问题。输入时就校验，而不是等按了保存才报错。 */
+    fun nameDraftProblem(): String {
+        val draft = nameDraft ?: return ""
+        if (draft.isEmpty()) {
+            return "名称不能为空"
+        }
+        return AdDisplayNative.nativeValidateDeviceName(draft)
+    }
+
+    /** 保存名称。核心改完会重新注册 mDNS / SSDP，手机端列表几秒内跟着变。 */
+    fun applyRename() {
+        val draft = nameDraft ?: return
+        val problem = if (draft.isEmpty()) "名称不能为空" else
+            AdDisplayNative.nativeValidateDeviceName(draft)
+        if (problem.isNotEmpty()) {
+            appendLog(LogLevel.WARN, problem)
+            return
+        }
+        val handle = engine
+        if (handle == 0L) {
+            return
+        }
+        val result = AdDisplayNative.nativeSetDeviceName(handle, draft)
+        if (result != AdResult.OK.code) {
+            appendLog(LogLevel.ERROR, "改名失败：" + AdResult.describe(result))
+            return
+        }
+        deviceName = draft
+        nameDraft = null
+        appendLog(LogLevel.INFO, "设备名称已改为「" + draft + "」。手机端列表可能需要几秒刷新。")
+    }
+
     /** 开启接收服务。 */
     fun startService() {
         val handle = engine

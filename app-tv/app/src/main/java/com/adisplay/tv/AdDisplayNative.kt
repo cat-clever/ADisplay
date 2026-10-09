@@ -126,6 +126,13 @@ object AdDisplayNative {
     /** 修改设备名称，即时生效（核心会重新注册 mDNS / SSDP）。 */
     external fun nativeSetDeviceName(handle: Long, name: String): Int
 
+    /**
+     * 校验一个设备名称。[返回空串表示合法][不合法时返回原因]。
+     *
+     * 不需要句柄：它是一条纯函数（字符数、控制字符这些规则），与引擎无关。
+     */
+    external fun nativeValidateDeviceName(name: String): String
+
     /** 把界面播放器的状态回报给核心，手机端的进度条与音量靠它更新。 */
     external fun nativeReportPlayback(
         handle: Long,
