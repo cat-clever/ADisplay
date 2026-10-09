@@ -52,9 +52,9 @@ class MainActivity : ComponentActivity() {
     /**
      * 遥控器的「菜单」键：投屏中按它就结束本次投屏。
      *
-     * 放在 Activity 里而不是播放页里，是因为 Compose 的按键事件只送到当前聚焦
-     * 的元素，而为了全屏，播放页里没有放任何可聚焦的控件 —— 页面里根本收不到
-     * 这个键。「返回」键走的是返回分派器（见 PlaybackFullScreen），不受这个限制。
+     * 放在 Activity 里而不是播放页里，是因为播放页里那层接键的控件只处理方向键与
+     * 确定键、把「菜单」放过去（见 PlaybackFullScreen 的 onKeyEvent）—— 按键先走
+     * 视图树，没被消费才轮到这里的 onKeyDown。
      */
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
         val casting = model.mirrorSessionId != null || model.playingMedia != null

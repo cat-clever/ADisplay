@@ -12,6 +12,7 @@ import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import com.adisplay.tv.AdPlaybackCommand
 import com.adisplay.tv.AdTransportState
@@ -93,13 +94,18 @@ fun PlaybackScreen(
     }
 
     // 全屏，并接上三条退路：点画面、遥控器「返回」、遥控器「菜单」。
-    PlaybackFullScreen(onExit = onExit) {
+    PlaybackFullScreen(
+        title = model.deviceName + " · 正在播放",
+        onExit = onExit,
+    ) {
         AndroidView(
             factory = { ctx ->
                 PlayerView(ctx).apply {
-                    // 控制条留给遥控器：按「确定」调出播放/暂停与进度。
-                    // 触摸则归上面那层透明触摸层管 —— 点一下就退出全屏。
-                    // 全屏期间不常驻任何控件，是用户明确要的。
+                    // 画面按屏幕适应：整幅可见，多出来的边留黑。
+                    // 用 ZOOM 会把画面裁掉一块，投屏看的就是完整画面。
+                    resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+                    // 控制条留着：万一焦点落在播放器上，遥控器按「确定」还能
+                    // 调出播放/暂停与进度。常态下焦点在我们的接键层上。
                     useController = true
                     controllerAutoShow = true
                     // 起播缓冲时转圈。电视上拉流慢是常事，黑屏和「正在缓冲」

@@ -1,15 +1,19 @@
-// ADisplay —— 播放期间的「全屏 + 退路」
+// ADisplay —— 播放期间的「全屏 + 悬浮控件」
 //
 // 投屏时用户看的就是画面，所以一进播放页就把状态栏和导航栏都藏掉，画面铺到
 // 屏幕边缘；离开时再还回去 —— 一直藏着的话，待机页那行设备名会被状态栏压住，
 // 用户退到桌面后系统栏也不见了。
 //
-// 退路给三条，触屏和遥控器各有顺手的：
-//   * 点画面（触屏）
+// 控件（顶部状态条、底部「停止接收投屏」）是**浮在画面上**的，不占画面的高度：
+// 独占一行会把画面压扁一块，而这块区域本来该全是画面。控件默认收起，点一下
+// 画面、或者遥控器按任意键才出现，几秒后自动收起（见 CONTROLS_TIMEOUT_MS）。
+//
+// 退路：
+//   * 控件出现后按「停止接收投屏」（触屏点它、遥控器选中它按确定）
 //   * 遥控器「返回」键
-//   * 遥控器「菜单」键
-// 三条做同一件事：结束本次投屏、回待机页。给够三条是因为电视只有遥控器 ——
-// 一旦卡在播放页又没有任何可见的按钮，用户唯一的办法是拔电源。
+//   * 遥控器「菜单」键（在 MainActivity.onKeyDown 里处理）
+// 给够几条是因为电视只有遥控器 —— 一旦卡在播放页又没有任何可见的按钮，
+// 用户唯一的办法是拔电源。
 
 package com.adisplay.tv.ui
 
@@ -22,13 +26,16 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -38,10 +45,16 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalView
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -50,18 +63,23 @@ import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
 import kotlinx.coroutines.delay
 
-/** 退出提示停留的时长。 */
-private const val HINT_DURATION_MS = 3000L
+/** 控件出现后停留多久自动收起。 */
+private const val CONTROLS_TIMEOUT_MS = 4000L
 
 /**
- * 把画面铺满屏幕，并接好三条退路。
+ * 全屏播放画面，控件悬浮其上。
  *
- * 画面本身当 content 传进来（镜像是一条 Surface、DLNA 是一个 PlayerView），
- * 这里不关心它是什么。
+ * @param title 顶部状态条左侧的文字，调用方给（一般是「设备名 · 正在做什么」）。
+ * @param content 画面本身：镜像是一条 Surface，DLNA 是一个 PlayerView。
  */
 @Composable
-fun PlaybackFullScreen(onExit: () -> Unit, content: @Composable BoxScope.() -> Unit) {
+fun PlaybackFullScreen(
+    title: String,
+    onExit: () -> Unit,
+    content: @Composable BoxScope.() -> Unit,
+) {
     val view = LocalView.current
+    val layout = resolveStandbyLayout(LocalConfiguration.current.screenWidthDp)
 
     DisposableEffect(view) {
         val window = view.context.findActivity()?.window
@@ -80,57 +98,131 @@ fun PlaybackFullScreen(onExit: () -> Unit, content: @Composable BoxScope.() -> U
         }
     }
 
-    // 遥控器「返回」键走 Activity 的返回分派器，不依赖焦点落在哪儿。
-    // 遥控器「菜单」键在 MainActivity.onKeyDown 里处理：Compose 的按键事件只送到
-    // 当前聚焦的元素，而为了全屏，播放页里没有放任何可聚焦的东西。
+    // 遥控器「返回」键走 Activity 的返回分派器，不受焦点影响。
     BackHandler { onExit() }
 
-    var hintVisible by remember { mutableStateOf(true) }
-    LaunchedEffect(Unit) {
-        delay(HINT_DURATION_MS)
-        hintVisible = false
+    // 用「请求计数」而不是一个 Boolean：控件已经显示时再点一下，也要把倒计时
+    // 重新计起（用户正在看控件，不该正好在这一刻收走）。Boolean 从 true 再赋
+    // true 不产生状态变化，LaunchedEffect 不会重启，计时也就不会重置。
+    var showRequest by remember { mutableStateOf(0) }
+    var controlsVisible by remember { mutableStateOf(false) }
+
+    LaunchedEffect(showRequest) {
+        if (showRequest == 0) {
+            return@LaunchedEffect
+        }
+        controlsVisible = true
+        delay(CONTROLS_TIMEOUT_MS)
+        controlsVisible = false
+    }
+
+    val catchFocus = remember { FocusRequester() }
+    val stopFocus = remember { FocusRequester() }
+
+    // 收起时把焦点交给「接键层」，遥控器按任意键都能把控件叫回来；
+    // 显示时交给「停止接收投屏」，用户按确定就能退出。
+    LaunchedEffect(controlsVisible) {
+        if (controlsVisible) {
+            stopFocus.requestFocus()
+        } else {
+            catchFocus.requestFocus()
+        }
     }
 
     Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
         content()
 
-        // 盖在画面上的透明触摸层。
+        // 接键 / 触摸层。盖满整屏，声明在画面之后，命中顺序在画面之上。
         //
-        // 必须有这一层，不能只靠外层的 clickable：DLNA 播放页里的 PlayerView
-        // 自己消费触摸（它要用触摸开关控制条），事件传不到父节点。这一层声明在
-        // content 之后，命中顺序在最上面，点哪儿都落到这里。
+        // 这一层必须单独存在，不能只靠外层的 clickable：DLNA 播放页里的
+        // PlayerView 自己消费触摸（它要用触摸开关控制条），事件传不到父节点。
         //
-        // 交互源与 indication 都留空：这是「点哪儿都退出」，不该在画面上闪波纹。
+        // clickable 在前、focusable 在后，与 ActionButton 同一套写法：触摸走
+        // 前者，遥控器的焦点与按键走后者，互不干扰。
         Box(
             modifier = Modifier
                 .matchParentSize()
                 .clickable(
+                    // 交互源与 indication 都留空：这是「点哪儿都显示控件」，
+                    // 不该在画面上闪波纹。
                     interactionSource = remember { MutableInteractionSource() },
                     indication = null,
-                    onClick = onExit,
+                    onClick = { showRequest++ },
                 )
+                .focusable()
+                .focusRequester(catchFocus)
+                .onKeyEvent { event ->
+                    // 只在抬起时响应，否则按下与抬起各触发一次。
+                    if (event.type != KeyEventType.KeyUp) {
+                        return@onKeyEvent false
+                    }
+                    // 「返回」与「菜单」必须放过去。
+                    //
+                    // 按键先走视图树、没被消费才轮到 Activity 的 onKeyDown，
+                    // 所以这两个键一旦在这里吃掉，「返回」就到不了返回分派器
+                    // （BackHandler 不再触发），「菜单」也到不了
+                    // MainActivity.onKeyDown —— 两条退路会一起失效。
+                    if (event.key == Key.Back || event.key == Key.Menu) {
+                        return@onKeyEvent false
+                    }
+                    showRequest++
+                    true
+                }
         )
 
-        // 提示只留几秒。全屏是用户要的，常驻一行字等于没全屏；但也完全不说不行
-        // —— 触屏上没有任何按钮，不说用户不知道怎么退出去。
+        // 顶部状态条。悬浮，不占画面高度。
         AnimatedVisibility(
-            visible = hintVisible,
+            visible = controlsVisible,
+            enter = fadeIn(),
+            exit = fadeOut(),
+            modifier = Modifier.align(Alignment.TopCenter),
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Color.Black.copy(alpha = 0.55f))
+                    .padding(horizontal = 24.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.titleMedium,
+                    color = Color.White,
+                )
+
+                Spacer(modifier = Modifier.weight(1f))
+
+                Text(
+                    text = "点画面可再显示控件，按「返回」结束投屏",
+                    style = layout.bodyStyle,
+                    color = Color.White.copy(alpha = 0.75f),
+                )
+            }
+        }
+
+        // 底部操作条。同样悬浮。
+        AnimatedVisibility(
+            visible = controlsVisible,
             enter = fadeIn(),
             exit = fadeOut(),
             modifier = Modifier.align(Alignment.BottomCenter),
         ) {
-            Text(
-                text = "点画面，或按遥控器的「返回」「菜单」键，结束本次投屏",
-                style = MaterialTheme.typography.bodyMedium,
-                color = Color.White.copy(alpha = 0.85f),
-                textAlign = TextAlign.Center,
+            Row(
                 modifier = Modifier
-                    .padding(bottom = 40.dp)
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(Color.Black.copy(alpha = 0.55f))
                     .fillMaxWidth()
-                    .padding(horizontal = 24.dp, vertical = 12.dp),
-            )
+                    .background(Color.Black.copy(alpha = 0.55f))
+                    .padding(horizontal = 24.dp, vertical = 14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.Center,
+            ) {
+                ActionButton(
+                    text = "停止接收投屏",
+                    textStyle = layout.actionStyle,
+                    minWidth = layout.buttonMinWidth,
+                    focusRequester = stopFocus,
+                    onClick = onExit,
+                )
+            }
         }
     }
 }

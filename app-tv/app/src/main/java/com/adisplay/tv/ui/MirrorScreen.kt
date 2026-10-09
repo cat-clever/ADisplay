@@ -19,7 +19,10 @@ import com.adisplay.tv.EngineModel
 
 @Composable
 fun MirrorScreen(model: EngineModel, onExit: () -> Unit) {
-    PlaybackFullScreen(onExit = onExit) {
+    PlaybackFullScreen(
+        title = model.deviceName + " · 正在镜像屏幕",
+        onExit = onExit,
+    ) {
         Box(
             modifier = Modifier.fillMaxSize(),
             contentAlignment = Alignment.Center,
