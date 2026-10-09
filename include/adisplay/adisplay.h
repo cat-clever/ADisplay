@@ -249,10 +249,17 @@ typedef struct AdPeerInfo {
  * 电视端的 MediaCodec）。它们硬解现成、延迟最低，也省掉在核心里养一套解码加
  * 渲染的代码。
  *
- * data 是 AVCC 格式：每个 NALU 前面带 4 字节长度前缀（不是 Annex B 的起始码），
- * 内容已经解密。指向核心持有的缓冲区，【仅在本次回调期间有效】。
+ * data 是 **Annex B**：每个 NALU 前面是 00 00 01 或 00 00 00 01 起始码，内容已经
+ * 解密。指向核心持有的缓冲区，【仅在本次回调期间有效】。
  *
- * 第一帧通常是编码参数（H.264 的 SPS/PPS），接收端要先拿它建格式描述再喂后续帧。
+ * 编码参数（H.264 的 SPS/PPS，H.265 的 VPS/SPS/PPS）以 NALU 的形式跟在帧里，
+ * 而且**核心保证每个关键帧都带上**，不只是第一帧 —— 协议层原本只在流开头给一次，
+ * 而界面层的渲染面往往晚一步才挂上来（帧回调在核心线程上立刻触发，会话回调却要
+ * 排队回主线程才能建出视图），那样第一帧就被丢在还没有落点的时候，参数集此后再也
+ * 不来，表现是「帧一直在计数、屏幕始终全黑」。
+ *
+ * 平台解码器多半要 AVCC（4 字节长度前缀），那一步转换归界面层 ——
+ * 见 macOS 的 MirrorView.swift 与 Windows 的 MirrorStreamSource.cs。
  */
 typedef struct AdMirrorFrame {
     uint32_t    struct_size;   /* = sizeof(AdMirrorFrame) */

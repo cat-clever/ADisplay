@@ -260,6 +260,16 @@ final class EngineModel: ObservableObject {
         callbacks.on_session_opened = sessionOpenedCallback
         callbacks.on_mirror_frame = mirrorFrameCallback
 
+        // 渲染面的日志从这条路进日志窗口。黑屏那类故障全部发生在渲染面内部，
+        // 那里没有别的通道能把「为什么这一帧没显示」说出来。
+        MirrorFrameRouter.shared.setLogHandler { [weak self] text in
+            DispatchQueue.main.async {
+                if let self = self {
+                    self.appendLog(level: .info, text: text)
+                }
+            }
+        }
+
         guard let handle = engine else { return }
         let installed = ad_engine_set_callbacks(handle, &callbacks, userData)
         if installed.rawValue != ResultCode.ok {

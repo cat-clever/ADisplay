@@ -14,6 +14,7 @@ set(ADISPLAY_TEST_SOURCES
     test_dlna_http.cpp
     test_dlna_media_url.cpp
     test_airplay_advert.cpp
+    test_airplay_mirror_nalu.cpp
     test_pipeline_media_source.cpp
     test_pipeline_hls_playlist.cpp
     test_pipeline_media_relay.cpp
@@ -38,6 +39,13 @@ foreach(test_source IN LISTS ADISPLAY_TEST_SOURCES)
     # 协议层 /info 共同的数据源，放在哪一边都不合适，放这里两边都能用）。
     if(test_name STREQUAL "test_airplay_advert")
         target_link_libraries(${test_name} PRIVATE adisplay_discovery)
+    endif()
+
+    # 镜像帧规范化的用例直接链 AirPlay 静态库。它只用到 MirrorNalu.cpp，
+    # 但静态库是按需拉取成员的，没被引用到的 AirplayReceiver.o 不会进最终产物，
+    # 也就不必为了跑一条纯逻辑用例去拉 UxPlay 的依赖。
+    if(test_name STREQUAL "test_airplay_mirror_nalu")
+        target_link_libraries(${test_name} PRIVATE adisplay_airplay)
     endif()
 
     # DLNA 的测试同样要触达 protocols/dlna/src 下的内部头。

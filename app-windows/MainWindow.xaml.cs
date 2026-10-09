@@ -259,6 +259,9 @@ public sealed partial class MainWindow : Window
             _mirrorSource = new MirrorStreamSource();
             // 编码参数到齐之后才知道怎么解，那时才设播放源。
             _mirrorSource.Ready += OnMirrorReady;
+            // 镜像渲染这条路上的失败都是静默的，表现统一是「界面正常、没有画面」。
+            // 它自己说不出来的话，就只能靠猜。
+            _mirrorSource.Notice += OnMirrorNotice;
 
             SettingsPanel.Visibility = Visibility.Collapsed;
             CastingPanel.Visibility = Visibility.Visible;
@@ -275,6 +278,12 @@ public sealed partial class MainWindow : Window
             PlayerElement.MediaPlayer.Volume = 1.0;
             PlayerElement.MediaPlayer.Play();
         });
+    }
+
+    private void OnMirrorNotice(string message)
+    {
+        // 回调在核心的工作线程上触发，日志集合只能在 UI 线程碰。
+        _dispatcher.TryEnqueue(() => AppendLog(AdLogLevel.Info, message));
     }
 
     private void OnMirrorFrameReceived(byte[] data, bool isH265, uint width, uint height, long ptsUs)
@@ -329,6 +338,7 @@ public sealed partial class MainWindow : Window
         if (_mirrorSource != null)
         {
             _mirrorSource.Ready -= OnMirrorReady;
+            _mirrorSource.Notice -= OnMirrorNotice;
             _mirrorSource.Dispose();
             _mirrorSource = null;
         }

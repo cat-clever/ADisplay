@@ -11,6 +11,7 @@
 #include <filesystem>
 #include <mutex>
 #include <string>
+#include <vector>
 
 // 这份构建是否带协议层。不带时下面的 raop 相关代码整段不参与编译，
 // 但类的接口保持一致 —— 界面层不需要为「有没有 AirPlay」写两套调用。
@@ -26,6 +27,7 @@ extern "C" {
 #include "stream.h"
 }
 #include "DnssdShim.h"
+#include "MirrorNalu.h"
 #endif
 
 namespace adisplay::airplay {
@@ -121,6 +123,11 @@ struct AirplayReceiverImpl {
     std::atomic<int64_t> last_frame_log_ms{0};
     std::atomic<bool> logged_first_video_frame{false};
 
+    // 镜像帧的规范化器（见 MirrorNalu.h）。协议层只在第一帧上带 SPS/PPS，
+    // 而渲染面总是晚一步才挂上来 —— 那一帧会被丢在还没有落点的时候。这里
+    // 把参数集缓存住、给之后每个关键帧补上，否则表现就是永久黑屏。
+    MirrorNaluNormalizer video_normalizer;
+
     IAirplayListener* listener_snapshot() {
         std::lock_guard<std::mutex> lock(mutex);
         return listener;
@@ -194,6 +201,8 @@ void cb_conn_reset(void* cls, int reason) {
 void cb_video_reset(void* cls, reset_type_t reset_type) {
     AirplayReceiverImpl* impl = impl_of(cls);
     AD_LOG_DEBUG("AirPlay 视频流重置（类型 {}）", static_cast<int>(reset_type));
+    // 重置意味着接下来的参数集是全新的一套（切分辨率、重开流）。
+    impl->video_normalizer.reset();
     if (impl->mirroring.exchange(false)) {
         IAirplayListener* listener = impl->listener_snapshot();
         if (listener != nullptr) {
@@ -211,13 +220,24 @@ void cb_video_process(void* cls, raop_ntp_t* ntp, video_decode_struct* data) {
     impl->note_video_frame(data->data_len, data->is_h265);
 
     IAirplayListener* listener = impl->listener_snapshot();
-    if (listener != nullptr) {
-        // 协议层给的时间戳是纳秒，这里换算成微秒对齐 C ABI 的约定。
-        const int64_t pts_us = static_cast<int64_t>(data->ntp_time_local / 1000ULL);
-        listener->on_video_frame(data->data, data->data_len, data->is_h265,
-                                 impl->video_width.load(), impl->video_height.load(),
-                                 pts_us);
+    if (listener == nullptr) {
+        return;
     }
+
+    // 先把这一帧整理成「参数集齐备的 Annex B」。协议层交下来的就是 Annex B，
+    // 但它只在第一帧上挂 SPS/PPS，所以这里补一次缓存。
+    const std::vector<uint8_t> frame =
+        impl->video_normalizer.normalize(data->data, static_cast<std::size_t>(data->data_len),
+                                         data->is_h265);
+    if (frame.empty()) {
+        return;
+    }
+
+    // 协议层给的时间戳是纳秒，这里换算成微秒对齐 C ABI 的约定。
+    const int64_t pts_us = static_cast<int64_t>(data->ntp_time_local / 1000ULL);
+    listener->on_video_frame(frame.data(), frame.size(), data->is_h265,
+                             impl->video_width.load(), impl->video_height.load(),
+                             pts_us);
 }
 
 void cb_audio_process(void* cls, raop_ntp_t* ntp, audio_decode_struct* data) {

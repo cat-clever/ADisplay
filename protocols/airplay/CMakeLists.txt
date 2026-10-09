@@ -24,11 +24,18 @@ endif()
 
 add_library(adisplay_airplay STATIC
     src/AirplayReceiver.cpp
+    # 镜像帧的 NALU 规范化（参数集缓存与补齐）。纯逻辑，单独成文件便于单元测试，
+    # 也刻意不依赖协议层 —— 测试不必把 UxPlay 拖进来。
+    src/MirrorNalu.cpp
 )
 
 target_include_directories(adisplay_airplay
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    # MirrorNalu.h 住在 src 下：它是内部实现，不进公开 API，但要被单元测试
+    # 直接包含（协议层的测试不能只靠 C ABI 那一层黑盒）。
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
 )
 
 # 对外告诉调用方（castcore）这份构建到底有没有协议层。

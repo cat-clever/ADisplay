@@ -14,6 +14,12 @@
 // 所以这里要先按起始码切开、重新按长度前缀拼一遍，再入队。
 // 起始码那一版是能「看着像在跑」的：帧照样计数、切出来的东西也能入队，
 // 只是解码器一个 NALU 都认不出来，屏幕上什么都没有。
+//
+// 另一条约定同样重要：**参数集（SPS/PPS）一定会随帧一起来，而且不只第一帧有**。
+// 协议层原本只在第一帧上挂一次，而渲染面的挂载要等主线程转一圈，第一帧会被
+// 丢在还没有落点的时候 —— 那一版的表现就是永久黑屏。核心因此把参数集缓存下来、
+// 给之后每个关键帧补齐（见 protocols/airplay/src/MirrorNalu.cpp）。
+// 这里只管「见到参数集就重建格式描述」，不必自己去记。
 
 import AVFoundation
 import AppKit
@@ -40,20 +46,51 @@ final class MirrorFrameRouter {
     // weak：渲染面被拆掉之后就不该再有帧往里送。取出来的局部变量是强引用，
     // 所以调用期间它不会被释放。
     private weak var sink: MirrorFrameSink?
+    // 没有落点的时候，帧是**静默**丢掉的 —— 而这是黑屏最常见的成因之一
+    // （渲染面比第一帧晚一步挂上来）。所以「没落点」和「刚挂上」都要有记录。
+    private var hasSink = false
+
+    // 渲染面自己看不到日志窗口，而黑屏这类故障恰恰全都发生在渲染面内部。
+    // 没有这条通道，「帧一直在计数、屏幕始终全黑」就只能靠猜。
+    // 由 EngineModel 在启动时接上。
+    private var logHandler: ((String) -> Void)?
 
     private init() {}
+
+    func setLogHandler(_ handler: ((String) -> Void)?) {
+        lock.lock()
+        logHandler = handler
+        lock.unlock()
+    }
+
+    func log(_ text: String) {
+        lock.lock()
+        let handler = logHandler
+        lock.unlock()
+        if let handler = handler {
+            handler(text)
+        }
+    }
 
     func attach(_ sink: MirrorFrameSink?) {
         lock.lock()
         self.sink = sink
+        let becameAttached = (sink != nil) && !hasSink
+        hasSink = (sink != nil)
         lock.unlock()
+
+        if becameAttached {
+            log("镜像渲染面已挂上，开始接收帧。")
+        }
     }
 
     func deliver(_ data: UnsafePointer<UInt8>, count: Int, isH265: Bool, ptsUs: Int64) {
         lock.lock()
         let target = sink
         lock.unlock()
-        target?.enqueueMirrorFrame(data, count: count, isH265: isH265, ptsUs: ptsUs)
+        if let target = target {
+            target.enqueueMirrorFrame(data, count: count, isH265: isH265, ptsUs: ptsUs)
+        }
     }
 }
 
@@ -85,18 +122,25 @@ final class MirrorRenderView: NSView, MirrorFrameSink {
     // MARK: - 收帧
 
     func enqueueMirrorFrame(_ data: UnsafePointer<UInt8>, count: Int, isH265: Bool, ptsUs: Int64) {
-        guard count > 4 else { return }
+        guard count > 4 else {
+            return
+        }
 
         let nalUnits = MirrorRenderView.splitAnnexB(data, count: count)
-        guard !nalUnits.isEmpty else { return }
+        if nalUnits.isEmpty {
+            noteDrop("这一帧里切不出 NALU")
+            return
+        }
 
-        // 参数集可以夹在任何一帧里（切分辨率、切编码器时会重发），
+        // 参数集可以夹在任何一帧里（切分辨率、切编码器、以及核心给关键帧补齐时），
         // 所以每帧都扫一遍，见到就重建格式描述。
         if let sets = MirrorRenderView.parameterSets(in: nalUnits, isH265: isH265) {
             rebuildFormatDescription(with: sets, isH265: isH265)
         }
         guard let format = formatDescription else {
-            return   // 还没拿到参数集，这一帧解不了，丢掉即可
+            // 走到这里几乎只有一种可能：核心还没送来带参数集的帧。
+            noteDrop("还没有解码参数（SPS/PPS）")
+            return
         }
 
         // 解码器卡住时（比如刚切过分辨率）要主动冲一次，否则它会一直拒绝新帧。
@@ -104,51 +148,112 @@ final class MirrorRenderView: NSView, MirrorFrameSink {
             displayLayer.flush()
         }
         guard displayLayer.isReadyForMoreMediaData else {
+            noteDrop("显示层未就绪")
             return   // 来不及就丢帧：镜像宁可按最新画面走，也不要越积越久
         }
 
         let avcc = MirrorRenderView.annexBToAVCC(nalUnits)
-        guard !avcc.isEmpty,
-              let sample = makeSampleBuffer(avcc: avcc, format: format, ptsUs: ptsUs) else {
+        guard !avcc.isEmpty else {
+            noteDrop("转成 AVCC 之后是空的")
+            return
+        }
+        let isKeyframe = MirrorRenderView.containsKeyframe(nalUnits, isH265: isH265)
+        guard let sample = makeSampleBuffer(avcc: avcc, format: format,
+                                            ptsUs: ptsUs, isKeyframe: isKeyframe) else {
+            noteDrop("构造样例缓冲失败")
             return
         }
         displayLayer.enqueue(sample)
+        noteEnqueued()
+    }
+
+    // MARK: - 诊断
+
+    // 渲染这条路上每一步都是静默失败，而它们的表现完全一样：黑屏。
+    // 所以每处丢弃都要写明原因，并做限流 —— 每帧一行会把日志淹掉。
+    private var enqueuedFrames = 0
+    private var droppedFrames = 0
+    private var lastSummaryMs: Int64 = 0
+    private var lastDropReason: String?
+    private var loggedFormatFailure = false
+
+    private func nowMs() -> Int64 {
+        return Int64(Date().timeIntervalSince1970 * 1000)
+    }
+
+    private func noteEnqueued() {
+        enqueuedFrames += 1
+        if enqueuedFrames == 1 {
+            MirrorFrameRouter.shared.log("镜像渲染：首帧已交给显示层。")
+        }
+        noteSummaryIfDue()
+    }
+
+    private func noteDrop(_ reason: String) {
+        droppedFrames += 1
+        lastDropReason = reason
+        // 第一次丢弃一定报出来：黑屏的时候，这一行就是答案。
+        if droppedFrames == 1 {
+            MirrorFrameRouter.shared.log("镜像渲染：丢弃首帧 —— " + reason + "（已入队 "
+                                         + String(enqueuedFrames) + " 帧）。")
+        }
+        noteSummaryIfDue()
+    }
+
+    private func noteSummaryIfDue() {
+        // 第一次事件已经单独报过了，不再重复一句汇总。
+        if enqueuedFrames + droppedFrames <= 1 {
+            return
+        }
+        let now = nowMs()
+        if now - lastSummaryMs < 5000 {
+            return
+        }
+        lastSummaryMs = now
+
+        var text = "镜像渲染：已入队 " + String(enqueuedFrames) + " 帧，丢弃 "
+                   + String(droppedFrames) + " 帧"
+        if droppedFrames > 0, let reason = lastDropReason {
+            text += "（最近一次原因：" + reason + "）"
+        }
+        MirrorFrameRouter.shared.log(text + "。")
     }
 
     private func rebuildFormatDescription(with sets: [[UInt8]], isH265: Bool) {
-        var pointers: [UnsafePointer<UInt8>] = []
-        var sizes: [Int] = []
-        // 这些数组元素的生存期只到本次调用结束，而创建函数会把内容拷走，
-        // 所以用 withUnsafeBufferPointer 逐层嵌套是安全的。
+        // 所有参数集拼进同一块连续存储。withUnsafeBufferPointer 给出的指针只在
+        // 闭包内有效，把逐段取到的指针存进数组、出了闭包再拿来用是未定义行为
+        // —— 前几版就是这么写的，能不能跑全看那块内存有没有被复用。
+        var flat: [UInt8] = []
+        var offsets: [Int] = []
         for set in sets {
-            set.withUnsafeBufferPointer { buffer in
-                if let base = buffer.baseAddress {
-                    pointers.append(base)
-                    sizes.append(buffer.count)
-                }
-            }
+            offsets.append(flat.count)
+            flat.append(contentsOf: set)
         }
-        guard pointers.count == sets.count, !pointers.isEmpty else { return }
+        if offsets.isEmpty || flat.isEmpty {
+            return
+        }
 
         var format: CMVideoFormatDescription?
-        let status: OSStatus
-        if isH265 {
-            status = pointers.withUnsafeBufferPointer { pointerBuffer in
-                sizes.withUnsafeBufferPointer { sizeBuffer in
-                    CMVideoFormatDescriptionCreateFromHEVCParameterSets(
-                        allocator: kCFAllocatorDefault,
-                        parameterSetCount: sets.count,
-                        parameterSetPointers: pointerBuffer.baseAddress!,
-                        parameterSetSizes: sizeBuffer.baseAddress!,
-                        nalUnitHeaderLength: 4,
-                        extensions: nil,
-                        formatDescriptionOut: &format)
-                }
+        let status: OSStatus = flat.withUnsafeBufferPointer { buffer -> OSStatus in
+            guard let base = buffer.baseAddress else { return -1 }
+            var pointers: [UnsafePointer<UInt8>] = []
+            for index in 0..<sets.count {
+                pointers.append(base + offsets[index])
             }
-        } else {
-            status = pointers.withUnsafeBufferPointer { pointerBuffer in
+            let sizes = sets.map { $0.count }
+            return pointers.withUnsafeBufferPointer { pointerBuffer in
                 sizes.withUnsafeBufferPointer { sizeBuffer in
-                    CMVideoFormatDescriptionCreateFromH264ParameterSets(
+                    if isH265 {
+                        return CMVideoFormatDescriptionCreateFromHEVCParameterSets(
+                            allocator: kCFAllocatorDefault,
+                            parameterSetCount: sets.count,
+                            parameterSetPointers: pointerBuffer.baseAddress!,
+                            parameterSetSizes: sizeBuffer.baseAddress!,
+                            nalUnitHeaderLength: 4,
+                            extensions: nil,
+                            formatDescriptionOut: &format)
+                    }
+                    return CMVideoFormatDescriptionCreateFromH264ParameterSets(
                         allocator: kCFAllocatorDefault,
                         parameterSetCount: sets.count,
                         parameterSetPointers: pointerBuffer.baseAddress!,
@@ -159,17 +264,28 @@ final class MirrorRenderView: NSView, MirrorFrameSink {
             }
         }
 
-        if status == noErr, let created = format {
+        if status != noErr || format == nil {
+            // 参数集拿到了却建不出解码配置，这是真正的异常，必须报出来。
+            if !loggedFormatFailure {
+                loggedFormatFailure = true
+                MirrorFrameRouter.shared.log("镜像渲染：用收到的 SPS/PPS 建解码配置失败（错误码 "
+                                             + String(status) + "），画面起不来。")
+            }
+            return
+        }
+        if let created = format {
             if formatDescription == nil {
                 let dims = CMVideoFormatDescriptionGetDimensions(created)
-                NSLog("ADisplay: 镜像编码参数已就绪，%dx%d", dims.width, dims.height)
+                let kind = isH265 ? "H.265" : "H.264"
+                MirrorFrameRouter.shared.log("镜像渲染：解码参数已就绪（" + kind + "），编码尺寸 "
+                                             + String(dims.width) + "x" + String(dims.height) + "。")
             }
             formatDescription = created
         }
     }
 
     private func makeSampleBuffer(avcc: [UInt8], format: CMVideoFormatDescription,
-                                  ptsUs: Int64) -> CMSampleBuffer? {
+                                  ptsUs: Int64, isKeyframe: Bool) -> CMSampleBuffer? {
         var blockBuffer: CMBlockBuffer?
         // 这里刻意不用「零拷贝」那个重载：数据来自核心的缓冲区，只在回调期间有效，
         // 而入队之后解码器还要用它。所以老老实实拷一份。
@@ -213,13 +329,20 @@ final class MirrorRenderView: NSView, MirrorFrameSink {
             sampleBufferOut: &sampleBuffer)
         guard status == noErr, let sample = sampleBuffer else { return nil }
 
-        // 非关键帧要标出来，否则解码器会把每一帧都当随机访问点，画面会花。
+        // NotSync 的意思就是字面那样：「这一帧不是随机访问点」。这里原先一律填
+        // false，等于告诉解码器每一帧都能独立解码 —— 非关键帧会去参考根本不存在的
+        // 参考帧，画面自然出不来。
         if let attachments = CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: true),
            CFArrayGetCount(attachments) > 0 {
             let dict = unsafeBitCast(CFArrayGetValueAtIndex(attachments, 0), to: CFMutableDictionary.self)
-            CFDictionarySetValue(dict,
-                                 Unmanaged.passUnretained(kCMSampleAttachmentKey_NotSync).toOpaque(),
-                                 Unmanaged.passUnretained(kCFBooleanFalse).toOpaque())
+            // kCFBooleanTrue / kCFBooleanFalse 在 Swift 里被导入成可选值，这里显式解包
+            // 而不是强解 —— 它们当然是恒非空的，但项目里不用 `!`。
+            let notSync = isKeyframe ? kCFBooleanFalse : kCFBooleanTrue
+            if let notSync = notSync {
+                CFDictionarySetValue(dict,
+                                     Unmanaged.passUnretained(kCMSampleAttachmentKey_NotSync).toOpaque(),
+                                     Unmanaged.passUnretained(notSync).toOpaque())
+            }
         }
         return sample
     }
@@ -325,6 +448,22 @@ final class MirrorRenderView: NSView, MirrorFrameSink {
         // 只给 SPS 不给 PPS 是残缺的，建不出格式描述 —— 等下一帧凑齐再说。
         let needed = isH265 ? 3 : 2
         return sets.count >= needed ? sets : nil
+    }
+
+    /// 帧内是否含关键帧。H.264 的 IDR 是 5；H.265 的 IDR 是 19/20。
+    /// 它决定 NotSync 怎么标，也决定这一帧能不能独立解出来。
+    static func containsKeyframe(_ units: [[UInt8]], isH265: Bool) -> Bool {
+        for unit in units where !unit.isEmpty {
+            let type = isH265 ? (Int(unit[0]) >> 1) & 0x3F : Int(unit[0]) & 0x1F
+            if isH265 {
+                if type == 19 || type == 20 {
+                    return true
+                }
+            } else if type == 5 {
+                return true
+            }
+        }
+        return false
     }
 }
 

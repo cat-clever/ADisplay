@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 
-# 版本号要跟着 git tag 走。发版时要同步的是这六处 —— 前五处是版本号本身，
+# 版本号要跟着 git tag 走。发版时要同步的是这七处 —— 前五处是版本号本身，
 # 后两处是从它算出来的构建号（主*10000 + 次*100 + 修订）：
 #
 #   CMakeLists.txt（这里）                界面显示的版本
@@ -15,7 +15,7 @@ cmake_minimum_required(VERSION 3.21)
 # 后两处最容易漏：它们不是版本号，换个 5.7 出来却长得像另一个版本号，
 # 逐文件搜旧版本号时不会被注意到 —— 这个清单就是为了不再靠记性。
 project(ADisplay
-    VERSION 0.5.15
+    VERSION 0.5.16
     DESCRIPTION "跨平台投屏接收端：AirPlay / DLNA 接收，支持 Windows、macOS、Android TV"
     HOMEPAGE_URL "https://github.com/cat-clever/ADisplay"
     LANGUAGES CXX)

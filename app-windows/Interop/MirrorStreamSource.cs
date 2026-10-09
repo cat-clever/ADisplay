@@ -57,6 +57,18 @@ public sealed class MirrorStreamSource
     public event Action<MediaStreamSource>? Ready;
 
     /// <summary>
+    /// 需要记进日志窗口的一句话。
+    /// 这条路上的失败全是静默的，而表现都是同一个「界面正常、就是没有画面」——
+    /// 所以每一步的判断依据都要能说出来，否则只能靠猜。
+    /// </summary>
+    public event Action<string>? Notice;
+
+    // 同一类提示只说一次：逐帧报会把日志淹掉。
+    private bool _noticedNoNalu;
+    private bool _noticedNoParameterSets;
+    private bool _noticedFirstSample;
+
+    /// <summary>
     /// 收一帧（Annex B，核心交过来的原始形态）。由核心的工作线程调用。
     /// </summary>
     public void Push(byte[] annexB, bool isH265, uint width, uint height, long ptsUs)
@@ -69,6 +81,8 @@ public sealed class MirrorStreamSource
         List<byte[]> units = SplitAnnexB(annexB);
         if (units.Count == 0)
         {
+            RaiseNoticeOnce(ref _noticedNoNalu, true,
+                "镜像渲染：收到一帧，但里面切不出 NALU。");
             return;
         }
 
@@ -79,7 +93,11 @@ public sealed class MirrorStreamSource
             {
                 if (!ParameterSets(units, isH265, out byte[]? sps, out byte[]? pps))
                 {
-                    return;   // 还没有编码参数，这一帧解不了
+                    // 还没有编码参数，这一帧解不了。核心会给每个关键帧补齐参数集，
+                    // 所以正常情况下这里最多等到下一个关键帧。
+                    RaiseNoticeOnce(ref _noticedNoParameterSets, true,
+                        "镜像渲染：还没有拿到编码参数（SPS/PPS），等待下一个关键帧。");
+                    return;
                 }
                 _isH265 = isH265;
                 BuildSourceLocked(sps!, pps!, width, height);
@@ -104,6 +122,11 @@ public sealed class MirrorStreamSource
             return;
         }
         bool keyFrame = ContainsKeyFrame(units, isH265);
+        if (keyFrame)
+        {
+            RaiseNoticeOnce(ref _noticedFirstSample, true,
+                "镜像渲染：首个关键帧已交给媒体管线。");
+        }
 
         MediaStreamSourceSampleRequest? request = null;
         MediaStreamSourceSampleRequestDeferral? deferral = null;
@@ -166,6 +189,22 @@ public sealed class MirrorStreamSource
     private bool _isReadyLocked()
     {
         return _source != null;
+    }
+
+    // 同类提示只报一次。长跑时每次丢弃都报会把日志窗口刷满，
+    // 真正要看的那一行反而被埋掉。
+    private void RaiseNoticeOnce(ref bool alreadyRaised, bool raise, string message)
+    {
+        if (!raise || alreadyRaised)
+        {
+            return;
+        }
+        alreadyRaised = true;
+        Action<string>? handler = Notice;
+        if (handler != null)
+        {
+            handler(message);
+        }
     }
 
     private void BuildSourceLocked(byte[] sps, byte[] pps, uint width, uint height)
