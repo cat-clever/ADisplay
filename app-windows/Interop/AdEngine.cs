@@ -34,9 +34,15 @@ internal sealed class AdEngine : IDisposable
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate void SessionClosedCallback(IntPtr userData, uint sessionId, int reason);
+    private delegate void SessionOpenedCallback(IntPtr userData, uint sessionId, IntPtr peer, int streamKind);
+    private delegate void MirrorFrameCallback(IntPtr userData, IntPtr frame);
 
     private IntPtr _handle = IntPtr.Zero;
     private bool _disposed;
+
+    // 与 adisplay.h 的 AdStreamKind 对应。这里只关心镜像这一条 ——
+    // 「媒体 URL」那条路走的是 on_media_url，不经过会话回调。
+    private const int StreamKindMirrorVideo = 0;
 
     // 这些字段的唯一作用是让委托活到引擎销毁为止，不要删。
     private StateChangedCallback? _stateChangedCallback;
@@ -44,6 +50,8 @@ internal sealed class AdEngine : IDisposable
     private MediaUrlCallback? _mediaUrlCallback;
     private PlaybackCommandCallback? _playbackCommandCallback;
     private SessionClosedCallback? _sessionClosedCallback;
+    private SessionOpenedCallback? _sessionOpenedCallback;
+    private MirrorFrameCallback? _mirrorFrameCallback;
 
     public event Action<AdServiceState>? StateChanged;
     public event Action<AdLogLevel, string>? LogEmitted;
@@ -56,6 +64,20 @@ internal sealed class AdEngine : IDisposable
 
     /// <summary>这次投屏结束了（手机推来新地址把旧会话抢占，或接收服务停止）。</summary>
     public event Action? CastingEnded;
+
+    /// <summary>iPhone 开始屏幕镜像。界面据此把播放源换成镜像流。</summary>
+    public event Action? MirrorStarted;
+
+    /// <summary>
+    /// 收到一帧镜像视频。data 是 AVCC 格式的 H.264/H.265，已解密。
+    ///
+    /// 刻意不在这里切回 UI 线程：帧率是每秒几十帧，每帧跳一次会把 UI 线程压满。
+    /// 而 MediaStreamSource 本来就是**拉取式**的 —— 帧先进队列，平台要的时候
+    /// 自己来取，所以这条回调只需要把字节拷进队列就返回。
+    /// </summary>
+    /// width/height 是发送端报来的画面尺寸（核心从镜像流头部读出来的），
+    /// 为 0 表示还没收到尺寸信息。
+    public event Action<byte[], bool, uint, uint>? MirrorFrameReceived;
 
     public bool IsRunning
     {
@@ -108,6 +130,8 @@ internal sealed class AdEngine : IDisposable
         _mediaUrlCallback = OnMediaUrlFromCore;
         _playbackCommandCallback = OnPlaybackCommandFromCore;
         _sessionClosedCallback = OnSessionClosedFromCore;
+        _sessionOpenedCallback = OnSessionOpenedFromCore;
+        _mirrorFrameCallback = OnMirrorFrameFromCore;
 
         AdCallbacks callbacks = default;
         callbacks.StructSize = (uint)Marshal.SizeOf<AdCallbacks>();
@@ -117,6 +141,8 @@ internal sealed class AdEngine : IDisposable
         callbacks.OnMediaUrl = Marshal.GetFunctionPointerForDelegate(_mediaUrlCallback);
         callbacks.OnPlaybackCommand = Marshal.GetFunctionPointerForDelegate(_playbackCommandCallback);
         callbacks.OnSessionClosed = Marshal.GetFunctionPointerForDelegate(_sessionClosedCallback);
+        callbacks.OnSessionOpened = Marshal.GetFunctionPointerForDelegate(_sessionOpenedCallback);
+        callbacks.OnMirrorFrame = Marshal.GetFunctionPointerForDelegate(_mirrorFrameCallback);
 
         AdResult result = AdNative.ad_engine_set_callbacks(_handle, ref callbacks, IntPtr.Zero);
         ThrowIfFailed(result, "注册回调");
@@ -161,6 +187,45 @@ internal sealed class AdEngine : IDisposable
         {
             handler(command, value);
         }
+    }
+
+    private void OnSessionOpenedFromCore(IntPtr userData, uint sessionId, IntPtr peer, int streamKind)
+    {
+        // 只有镜像会话要走渲染面；「媒体 URL」那条路是 on_media_url 的事。
+        if (streamKind != StreamKindMirrorVideo)
+        {
+            return;
+        }
+        Action? handler = MirrorStarted;
+        if (handler != null)
+        {
+            handler();
+        }
+    }
+
+    private void OnMirrorFrameFromCore(IntPtr userData, IntPtr frame)
+    {
+        if (frame == IntPtr.Zero)
+        {
+            return;
+        }
+
+        Action<byte[], bool, uint, uint>? handler = MirrorFrameReceived;
+        if (handler == null)
+        {
+            return;
+        }
+
+        // 指针只在本次回调期间有效，必须拷走 —— 而拷贝在这里做（核心的工作线程上）
+        // 而不是在 UI 线程上做，是为了不让每帧都过一次线程调度。
+        AdMirrorFrame value = Marshal.PtrToStructure<AdMirrorFrame>(frame);
+        if (value.Data == IntPtr.Zero || value.Size <= 0)
+        {
+            return;
+        }
+        byte[] copy = new byte[value.Size];
+        Marshal.Copy(value.Data, copy, 0, value.Size);
+        handler(copy, value.IsH265 != 0, value.Width, value.Height);
     }
 
     private void OnSessionClosedFromCore(IntPtr userData, uint sessionId, int reason)

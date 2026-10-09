@@ -31,6 +31,8 @@ public sealed partial class MainWindow : Window
     // 每秒把播放器状态回报给核心。手机每隔一段时间会拉 GetPositionInfo，
     // 位置必须持续更新，否则手机上的进度条一直停在起点。
     private DispatcherTimer? _reportTimer;
+    // 镜像会话的帧源。null 表示当前不是镜像会话。
+    private MirrorStreamSource? _mirrorSource;
     // 独立的日志窗口。null 表示当前没开着。
     private LogWindow? _logWindow;
     private readonly ObservableCollection<string> _logLines = new();
@@ -58,6 +60,8 @@ public sealed partial class MainWindow : Window
         _engine.MediaUrlReceived += OnMediaUrlReceived;
         _engine.PlaybackCommandReceived += OnPlaybackCommandReceived;
         _engine.CastingEnded += OnCastingEnded;
+        _engine.MirrorStarted += OnMirrorStarted;
+        _engine.MirrorFrameReceived += OnMirrorFrameReceived;
 
         Closed += OnWindowClosed;
 
@@ -233,6 +237,56 @@ public sealed partial class MainWindow : Window
         _dispatcher.TryEnqueue(EndCasting);
     }
 
+    // ---------------------------------------------------------------------
+    // AirPlay 屏幕镜像
+    //
+    // 与 DLNA 那条路的区别只在「画面从哪来」：那边是一条 URL 交给播放器引擎，
+    // 这边是持续的压缩帧。解码与渲染同样不归我们管 —— 帧喂进 MediaStreamSource，
+    // 背后是 Media Foundation。
+    // ---------------------------------------------------------------------
+
+    private void OnMirrorStarted()
+    {
+        _dispatcher.TryEnqueue(() =>
+        {
+            if (_mirrorSource != null)
+            {
+                return;
+            }
+            // 会话号与 DLNA 共用一套编号，镜像这边只用来回报播放状态。
+            _castSessionId = 0;
+
+            _mirrorSource = new MirrorStreamSource();
+            // 编码参数到齐之后才知道怎么解，那时才设播放源。
+            _mirrorSource.Ready += OnMirrorReady;
+
+            SettingsPanel.Visibility = Visibility.Collapsed;
+            CastingPanel.Visibility = Visibility.Visible;
+            CastingTitleText.Text = "正在镜像屏幕";
+            AppendLog(AdLogLevel.Info, "iPhone 开始屏幕镜像");
+        });
+    }
+
+    private void OnMirrorReady(MediaStreamSource source)
+    {
+        _dispatcher.TryEnqueue(() =>
+        {
+            PlayerElement.Source = MediaSource.CreateFromMediaStreamSource(source);
+            PlayerElement.MediaPlayer.Volume = 1.0;
+            PlayerElement.MediaPlayer.Play();
+        });
+    }
+
+    private void OnMirrorFrameReceived(byte[] data, bool isH265, uint width, uint height)
+    {
+        // 不切回 UI 线程：MediaStreamSource 是拉取式的，这里只需要把字节塞进队列。
+        MirrorStreamSource? source = _mirrorSource;
+        if (source != null)
+        {
+            source.Push(data, isH265, width, height);
+        }
+    }
+
     private void BeginCasting(uint sessionId, string url)
     {
         if (!Uri.TryCreate(url, UriKind.Absolute, out Uri? uri))
@@ -270,6 +324,14 @@ public sealed partial class MainWindow : Window
         _castSessionId = 0;
 
         PlayerElement.Source = null;
+        // 镜像的帧源要显式收掉：它挂着一次可能还没答复的拉取请求，
+        // 放着不管会让管线一直等下去。
+        if (_mirrorSource != null)
+        {
+            _mirrorSource.Ready -= OnMirrorReady;
+            _mirrorSource.Dispose();
+            _mirrorSource = null;
+        }
         ExitFullScreenOnCastingEnd();
         CastingPanel.Visibility = Visibility.Collapsed;
         SettingsPanel.Visibility = Visibility.Visible;
@@ -513,6 +575,8 @@ public sealed partial class MainWindow : Window
         // 先摘事件再销毁引擎，避免销毁过程中的状态回调打到已经在拆的界面上。
         _engine.StateChanged -= OnEngineStateChanged;
         _engine.LogEmitted -= OnEngineLogEmitted;
+        _engine.MirrorStarted -= OnMirrorStarted;
+        _engine.MirrorFrameReceived -= OnMirrorFrameReceived;
         _engine.Dispose();
     }
 }

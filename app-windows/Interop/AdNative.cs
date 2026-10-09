@@ -138,6 +138,30 @@ internal struct AdCallbacks
 }
 
 /// <summary>
+/// 一帧压缩的镜像视频，对应 C 的 AdMirrorFrame。
+///
+/// 与 AdVideoFrame 分开：那个是「核心解码、界面渲染」那条路用的（交出来的是
+/// NV12/I420 平面），而镜像是把压缩帧直接交给平台的解码器
+/// （Windows 这边是 MediaStreamSource + MediaPlayerElement）。
+///
+/// Data 是 AVCC 格式（每个 NALU 前 4 字节长度前缀），已解密。
+/// 它只在回调期间有效 —— 托管侧要留存必须自己拷一份。
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct AdMirrorFrame
+{
+    public uint StructSize;
+    public uint SessionId;
+    public IntPtr Data;
+    public int Size;
+    public int IsH265;
+    public uint Width;
+    public uint Height;
+    public long PtsUs;
+    public int Reserved;
+}
+
+/// <summary>
 /// 界面层播放器的当前状态，对应 C 的 AdPlaybackStatus。
 ///
 /// 界面层是播放状态的唯一权威来源：核心不碰播放器，手机的 GetTransportInfo /
