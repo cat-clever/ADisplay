@@ -11,6 +11,7 @@
 
 import AVKit
 import AppKit
+import Combine
 import SwiftUI
 
 /// AVPlayerView 是 AppKit 控件，需要包一层。
@@ -258,6 +259,10 @@ struct PlayerPage: View {
     @EnvironmentObject private var model: EngineModel
     @StateObject private var viewModel = PlayerViewModel()
 
+    // 全屏时把控制条收起来。那一条横在画面下面既挡画面又白占高度，
+    // 而全屏里退出有 Esc、播放控制有播放器自带的那套，用不着它。
+    @State private var isFullScreen = false
+
     let media: EngineModel.ActiveMedia
 
     var body: some View {
@@ -268,21 +273,23 @@ struct PlayerPage: View {
             PlayerSurface(player: viewModel.player)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-            HStack(spacing: 12) {
-                Text("正在接收投屏")
-                    .font(.headline)
-                Button("查看日志") {
-                    LogWindowController.shared.show(model: model)
+            if !isFullScreen {
+                HStack(spacing: 12) {
+                    Text("正在接收投屏")
+                        .font(.headline)
+                    Button("查看日志") {
+                        LogWindowController.shared.show(model: model)
+                    }
+                    Button("全屏") {
+                        toggleFullScreen()
+                    }
+                    Button("停止接收") {
+                        model.stopCasting()
+                    }
                 }
-                Button("全屏") {
-                    toggleFullScreen()
-                }
-                Button("停止接收") {
-                    model.stopCasting()
-                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 10)
         }
         .frame(minWidth: 520, minHeight: 460)
         .onAppear {
@@ -294,6 +301,16 @@ struct PlayerPage: View {
         }
         .onDisappear {
             viewModel.detach()
+        }
+        // 进出全屏由窗口自己发通知 —— 用户也可能按 Esc 或点播放器自带的全屏
+        // 按钮，不能只在自己的按钮里记状态，否则那边一按这边就不同步了。
+        .onReceive(NotificationCenter.default.publisher(
+            for: NSWindow.didEnterFullScreenNotification)) { _ in
+            isFullScreen = true
+        }
+        .onReceive(NotificationCenter.default.publisher(
+            for: NSWindow.didExitFullScreenNotification)) { _ in
+            isFullScreen = false
         }
     }
 

@@ -46,7 +46,8 @@
                                 AreTransportControlsEnabled="True"
                                 Stretch="Uniform" />
 
-            <StackPanel Grid.Row="1"
+            <StackPanel x:Name="ControlBar"
+                        Grid.Row="1"
                         Orientation="Horizontal"
                         Spacing="12"
                         Padding="12,8">

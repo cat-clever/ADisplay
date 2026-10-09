@@ -19,6 +19,7 @@
 struct AVFormatContext;
 struct AVIOContext;
 struct AVBSFContext;
+struct AVPacket;
 
 namespace adisplay::pipeline {
 
@@ -52,6 +53,13 @@ public:
 
 private:
     bool ensure_output(const AVFormatContext* input, std::string* error);
+
+    // 写 ftyp+moov 之前先把 AAC 的解码配置取出来。
+    //
+    // 必须在写头之前：movenc 写 moov 时就要把 AudioSpecificConfig 放进 esds，
+    // 而那份配置要等第一条音频包流过 aac_adtstoasc 才会有。顺序反了（先写头、
+    // 后收包），esds 就是残缺的，播放器会拒绝打开整个文件。
+    void prime_aac_config(AVFormatContext* input);
     void close_output();
 
     AVFormatContext* output_ = nullptr;
@@ -59,6 +67,12 @@ private:
     std::vector<uint8_t> buffer_;              // 输出字节的落脚点，写回调往这里写
     OutputSink sink_;                          // 与 buffer_ 配套的当前位置
     std::vector<uint8_t> init_segment_;
+    // 预读阶段攒下的包。它们是这个分片开头的帧 —— 丢掉的话每个分片都会缺
+    // 一小段声音，所以先留着，写完头之后按原顺序处理。
+    std::vector<AVPacket*> pending_packets_;
+    // 每条输入流的 AAC 解码配置（AudioSpecificConfig）。空表示没取到。
+    std::vector<std::vector<uint8_t>> aac_config_;
+
     // 每条输出流的码流过滤器（下标与输出流对齐），nullptr 表示这条流不需要。
     // 目前只有 AAC 用得上：TS 里它是 ADTS 封装，而 MP4 要裸 AAC。
     std::vector<AVBSFContext*> bsf_;

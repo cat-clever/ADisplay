@@ -110,6 +110,20 @@ int read_callback(void* opaque, uint8_t* buffer, int size) {
     return static_cast<int>(taken);
 }
 
+// 预读上限。正常情况下头两个包之内就能见到音频，给足余量只是为了避免
+// 极端素材（例如开头几十秒只有视频）把整个分片读完。
+constexpr int kPrimePacketLimit = 400;
+
+// 放掉预读攒下的包。它们在处理时已被逐个搬空，这里只回收对象本身。
+void release_pending(std::vector<AVPacket*>* pending) {
+    for (AVPacket*& pkt : *pending) {
+        if (pkt != nullptr) {
+            av_packet_free(&pkt);
+        }
+    }
+    pending->clear();
+}
+
 // 释放一次分片解析用的输入。自定义 AVIO 由我们自己释放（见 ensure_output 里
 // 关于 pb 归属的说明）。
 void release_input(AVFormatContext** input, AVIOContext** io) {
@@ -131,6 +145,9 @@ Mp4Remuxer::~Mp4Remuxer() {
 }
 
 void Mp4Remuxer::close_output() {
+    release_pending(&pending_packets_);
+    aac_config_.clear();
+
     for (AVBSFContext*& ctx : bsf_) {
         if (ctx != nullptr) {
             av_bsf_free(&ctx);
@@ -153,6 +170,92 @@ void Mp4Remuxer::close_output() {
     }
     if (output_io_ != nullptr) {
         avio_context_free(&output_io_);
+    }
+}
+
+void Mp4Remuxer::prime_aac_config(AVFormatContext* input) {
+    aac_config_.assign(input->nb_streams, std::vector<uint8_t>());
+
+    // 找出需要预读的流。只有 AAC 需要：视频的参数集（SPS/PPS）由 movenc 从
+    // 码流里自己提取，不需要我们在写头之前准备什么。
+    std::vector<unsigned int> need_config;
+    for (unsigned int i = 0; i < input->nb_streams; ++i) {
+        if (input->streams[i]->codecpar->codec_id == AV_CODEC_ID_AAC) {
+            need_config.push_back(i);
+        }
+    }
+    if (need_config.empty()) {
+        return;
+    }
+
+    const AVBitStreamFilter* filter = av_bsf_get_by_name("aac_adtstoasc");
+    if (filter == nullptr) {
+        return;   // 没有这个过滤器，后面也走不通，交给调用方报错
+    }
+
+    for (unsigned int index : need_config) {
+        // 这一份过滤器只用来取配置，用完即弃 —— 真正转码流的那一份在
+        // ensure_output 里另建，两者不共用，免得互相吃掉对方的输入。
+        AVBSFContext* ctx = nullptr;
+        if (av_bsf_alloc(filter, &ctx) < 0 || ctx == nullptr) {
+            continue;
+        }
+        if (avcodec_parameters_copy(ctx->par_in, input->streams[index]->codecpar) < 0 ||
+            av_bsf_init(ctx) < 0) {
+            av_bsf_free(&ctx);
+            continue;
+        }
+
+        bool produced = false;
+        for (int guard = 0; !produced && guard < kPrimePacketLimit; ++guard) {
+            AVPacket* pkt = av_packet_alloc();
+            if (pkt == nullptr || av_read_frame(input, pkt) < 0) {
+                if (pkt != nullptr) {
+                    av_packet_free(&pkt);
+                }
+                break;   // 读到末尾还没见到音频
+            }
+            // 不管是不是音频都留着：它是这个分片开头的一帧，不能丢。
+            pending_packets_.push_back(pkt);
+
+            if (static_cast<unsigned int>(pkt->stream_index) != index) {
+                continue;
+            }
+
+            // 送一份拷贝给过滤器：send 会把包搬空，而原包还要留给后面的
+            // 正常处理，不能被吃掉。
+            AVPacket* clone = av_packet_clone(pkt);
+            if (clone == nullptr) {
+                continue;
+            }
+            const int send_ret = av_bsf_send_packet(ctx, clone);
+            av_packet_free(&clone);   // 无论成败，这个包对象都要还回去
+            if (send_ret < 0) {
+                continue;
+            }
+
+            AVPacket* produced_packet = av_packet_alloc();
+            if (produced_packet == nullptr) {
+                continue;
+            }
+            if (av_bsf_receive_packet(ctx, produced_packet) >= 0) {
+                produced = true;
+                // 配置**不**在过滤器的 par_out 上，而是作为附属数据挂在第一条
+                // 输出包上（AV_PKT_DATA_NEW_EXTRADATA）—— 这一点是从过滤器的
+                // 源码里确认的：它用 av_packet_new_side_data 挂上去，而不是写
+                // par_out。按 par_out 取会一直取到空。
+                size_t side_size = 0;
+                const uint8_t* side = av_packet_get_side_data(
+                    produced_packet, AV_PKT_DATA_NEW_EXTRADATA, &side_size);
+                if (side != nullptr && side_size > 0) {
+                    aac_config_[index].assign(side, side + side_size);
+                    AD_LOG_DEBUG("取到 AAC 解码配置，{} 字节", side_size);
+                }
+            }
+            av_packet_free(&produced_packet);
+        }
+
+        av_bsf_free(&ctx);
     }
 }
 
@@ -201,14 +304,31 @@ bool Mp4Remuxer::ensure_output(const AVFormatContext* input, std::string* error)
         out_stream->time_base = in_stream->time_base;
         out_stream->avg_frame_rate = in_stream->avg_frame_rate;
         out_stream->sample_aspect_ratio = in_stream->sample_aspect_ratio;
-        if (in_stream->codecpar->codec_id == AV_CODEC_ID_AAC &&
-            (out_stream->codecpar->extradata == nullptr ||
-             out_stream->codecpar->extradata_size == 0)) {
-            // AAC 在 MP4 里需要一份 AudioSpecificConfig（esds 里的那点内容），
-            // 它由解复用时从 ADTS 头里提取。正常路径上 find_stream_info 已经
-            // 填好了，缺了说明这条流没有 —— 写出来的 mp4 会没有声音，
-            // 而界面上只表现为「有画面没声音」，不说出来很难判断。
-            AD_LOG_WARN("AAC 音轨缺少解码配置（extradata），写出的 fMP4 可能没有声音");
+        if (in_stream->codecpar->codec_id == AV_CODEC_ID_AAC) {
+            // AAC 在 MP4 里需要一份 AudioSpecificConfig（esds 里的那点内容）。
+            // 它藏在 ADTS 头里，要等第一条音频包被解析出来才拿得到 ——
+            // 所以由 prime_aac_config 预读得到，在这里补上。
+            //
+            // 不能指望 find_stream_info 顺手填好：实测它对这种 TS 分片没有填，
+            // 于是 esds 残缺，播放器直接拒绝打开整个文件（表现为「Cannot Open」），
+            // 而不只是没有声音。
+            const std::vector<uint8_t> config =
+                i < aac_config_.size() ? aac_config_[i] : std::vector<uint8_t>();
+            if (!config.empty()) {
+                av_freep(&out_stream->codecpar->extradata);
+                out_stream->codecpar->extradata = static_cast<uint8_t*>(
+                    av_mallocz(config.size() + AV_INPUT_BUFFER_PADDING_SIZE));
+                if (out_stream->codecpar->extradata != nullptr) {
+                    std::memcpy(out_stream->codecpar->extradata, config.data(), config.size());
+                    out_stream->codecpar->extradata_size = static_cast<int>(config.size());
+                }
+            }
+            if (out_stream->codecpar->extradata == nullptr ||
+                out_stream->codecpar->extradata_size == 0) {
+                // 预读也没拿到。写出来的 esds 会是残缺的，播放器多半打不开 ——
+                // 这条日志是那种情况下唯一的线索。
+                AD_LOG_WARN("AAC 音轨没有取到解码配置，写出的 fMP4 播放器可能打不开");
+            }
         }
         stream_map_[i] = static_cast<int>(output_->nb_streams) - 1;
     }
@@ -370,6 +490,9 @@ bool Mp4Remuxer::append_ts_segment(const uint8_t* data, std::size_t size,
         return false;
     }
 
+    // 先预读、拿到 AAC 解码配置，再写头 —— 顺序不能反（见 prime_aac_config）。
+    prime_aac_config(input);
+
     if (!ensure_output(input, error)) {
         release_input(&input, &input_io);
         close_output();
@@ -385,6 +508,9 @@ bool Mp4Remuxer::append_ts_segment(const uint8_t* data, std::size_t size,
 
     const std::size_t before = buffer_.size();
     std::vector<bool> first_packet(stream_map_.size(), true);
+    // 预读阶段读过的包排在所有新读的包之前，必须按这个顺序先处理 ——
+    // 顺序错了音视频的交错就乱了。
+    std::size_t pending_index = 0;
 
     // 一个包走完「时间戳整平 → 交给复用器」，返回 FFmpeg 错误码（>=0 为成功）。
     //
@@ -439,6 +565,7 @@ bool Mp4Remuxer::append_ts_segment(const uint8_t* data, std::size_t size,
         av_packet_unref(*pkt);
         av_packet_free(pkt);
         release_input(&input, &input_io);
+        release_pending(&pending_packets_);
         buffer_.clear();
         sink_.pos = 0;
         *error = std::string(what) + av_error_text(code);
@@ -448,7 +575,10 @@ bool Mp4Remuxer::append_ts_segment(const uint8_t* data, std::size_t size,
     while (true) {
         // 探测阶段读过的包被 libavformat 缓在内部队列里，这里会原样吐出来，
         // 分片开头不会丢。
-        if (av_read_frame(input, packet) < 0) {
+        if (pending_index < pending_packets_.size()) {
+            av_packet_move_ref(packet, pending_packets_[pending_index]);
+            ++pending_index;
+        } else if (av_read_frame(input, packet) < 0) {
             break;   // EOF 或尾部损坏都当结束
         }
         const unsigned int input_index = static_cast<unsigned int>(packet->stream_index);
@@ -491,6 +621,7 @@ bool Mp4Remuxer::append_ts_segment(const uint8_t* data, std::size_t size,
     }
 
     av_packet_free(&packet);
+    release_pending(&pending_packets_);
     release_input(&input, &input_io);
 
     // 1) 把交织器里还没吐出来的包排空（它会为了排序把它们压着）。

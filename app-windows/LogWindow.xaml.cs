@@ -21,8 +21,8 @@ public sealed partial class LogWindow : Window
 
         _lines = lines;
         _dispatcher = DispatcherQueue.GetForCurrentThread();
-        LogList.ItemsSource = _lines;
         Title = "ADisplay 日志";
+        RefreshText();
 
         // 打开时先滚到底 —— 点「查看日志」的人要看的是最后几行。
         _lines.CollectionChanged += OnLinesChanged;
@@ -31,12 +31,21 @@ public sealed partial class LogWindow : Window
 
     private void OnLinesChanged(object? sender, System.Collections.Specialized.NotifyCollectionChangedEventArgs e)
     {
-        // 刚 Add 完时布局还没更新，此刻读 ScrollableHeight 拿到的是旧值，
+        RefreshText();
+
+        // 刚换完文本时布局还没更新，此刻读 ScrollableHeight 拿到的是旧值，
         // 滚动会差一行。再排一次队，等这一帧构建完再滚。
         _dispatcher.TryEnqueue(() =>
         {
             LogScrollViewer.ChangeView(null, LogScrollViewer.ScrollableHeight, null);
         });
+    }
+
+    /// 把整个集合拼成一份文本。每来一条日志重拼一次是 O(n)，但 n 上限是
+    /// 500 行 —— 换成增量追加反而要自己维护「被裁掉的行怎么办」，不值得。
+    private void RefreshText()
+    {
+        LogText.Text = string.Join(Environment.NewLine, _lines);
     }
 
     private void OnWindowClosed(object sender, WindowEventArgs args)

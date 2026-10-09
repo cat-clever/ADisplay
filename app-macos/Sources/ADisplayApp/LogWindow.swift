@@ -70,23 +70,24 @@ struct LogView: View {
 
             ScrollViewReader { proxy in
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 2) {
-                        ForEach(Array(model.logs.enumerated()), id: \.offset) { index, line in
-                            Text(line)
-                                .font(.system(size: 11, design: .monospaced))
-                                .textSelection(.enabled)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .id(index)
-                        }
-                    }
-                    .padding(8)
+                    // 整份日志放在一个 Text 里，而不是每行一个。
+                    //
+                    // 每行一个便于懒加载，但鼠标拖不出跨行的选区 —— 想复制中间
+                    // 一段就只能一行一行来，而「把出错前后几行一起贴出去」恰好
+                    // 是看日志的人最常做的事。日志上限 500 行，一次渲染的开销
+                    // 可以接受。
+                    Text(model.logs.joined(separator: "\n"))
+                        .font(.system(size: 11, design: .monospaced))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(8)
+                        .id("日志末尾")
                 }
                 .background(Color(nsColor: .textBackgroundColor).opacity(0.5))
                 .cornerRadius(6)
                 // 新日志进来时自动滚到底 —— 排查时盯的就是最后几行。
                 .onChange(of: model.logs.count) { _ in
-                    guard let last = model.logs.indices.last else { return }
-                    proxy.scrollTo(last, anchor: .bottom)
+                    proxy.scrollTo("日志末尾", anchor: .bottom)
                 }
             }
         }

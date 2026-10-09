@@ -36,16 +36,19 @@
                 BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                 BorderThickness="1">
             <ScrollViewer x:Name="LogScrollViewer" VerticalScrollBarVisibility="Auto">
-                <ItemsControl x:Name="LogList">
-                    <ItemsControl.ItemTemplate>
-                        <DataTemplate>
-                            <TextBlock Text="{Binding}"
-                                       FontFamily="Consolas"
-                                       FontSize="12"
-                                       TextWrapping="Wrap" />
-                        </DataTemplate>
-                    </ItemsControl.ItemTemplate>
-                </ItemsControl>
+                <!--
+                    整份日志放在一个 TextBlock 里，而不是每行一个。
+
+                    每行一个便于虚拟化，但鼠标拖不出跨行的选区 —— 想复制中间
+                    一段就只能一行一行来，而「把出错前后几行一起贴出去」恰好是
+                    看日志的人最常做的事。日志上限 500 行，一次渲染的开销可以
+                    接受。
+                -->
+                <TextBlock x:Name="LogText"
+                           IsTextSelectionEnabled="True"
+                           FontFamily="Consolas"
+                           FontSize="12"
+                           TextWrapping="Wrap" />
             </ScrollViewer>
         </Border>
     </Grid>

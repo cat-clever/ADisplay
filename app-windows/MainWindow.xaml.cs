@@ -315,6 +315,10 @@ public sealed partial class MainWindow : Window
         AppWindow.SetPresenter(fullScreen ? AppWindowPresenterKind.FullScreen
                                           : AppWindowPresenterKind.Default);
         FullScreenButton.Content = fullScreen ? "退出全屏" : "全屏";
+
+        // 全屏时把控制条收起来：那一条横在画面下面既挡画面又白占高度，
+        // 而全屏里退出有 Esc、播放控制由播放器自带的那套负责。
+        ControlBar.Visibility = fullScreen ? Visibility.Collapsed : Visibility.Visible;
     }
 
     private void ExitFullScreenOnCastingEnd()
