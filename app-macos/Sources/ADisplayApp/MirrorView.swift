@@ -22,7 +22,8 @@ import SwiftUI
 /// 镜像帧的落点。由渲染面实现，核心每来一帧调一次。
 protocol MirrorFrameSink: AnyObject {
     /// data 只在本次调用期间有效 —— 需要留存必须自己拷走。
-    func enqueueMirrorFrame(_ data: UnsafePointer<UInt8>, count: Int, isH265: Bool)
+    /// ptsUs 是发送端报的显示时间戳（微秒），0 表示它没给。
+    func enqueueMirrorFrame(_ data: UnsafePointer<UInt8>, count: Int, isH265: Bool, ptsUs: Int64)
 }
 
 /// 镜像帧的转接处。
@@ -48,11 +49,11 @@ final class MirrorFrameRouter {
         lock.unlock()
     }
 
-    func deliver(_ data: UnsafePointer<UInt8>, count: Int, isH265: Bool) {
+    func deliver(_ data: UnsafePointer<UInt8>, count: Int, isH265: Bool, ptsUs: Int64) {
         lock.lock()
         let target = sink
         lock.unlock()
-        target?.enqueueMirrorFrame(data, count: count, isH265: isH265)
+        target?.enqueueMirrorFrame(data, count: count, isH265: isH265, ptsUs: ptsUs)
     }
 }
 
@@ -62,6 +63,8 @@ final class MirrorRenderView: NSView, MirrorFrameSink {
     private let displayLayer = AVSampleBufferDisplayLayer()
     private var formatDescription: CMVideoFormatDescription?
     private var lastPresentationTime = CMTime.invalid
+    // 第一帧的发送端时间戳，用来把整条时间轴重排到 0 起点。-1 表示还没收到。
+    private var firstSenderPtsUs: Int64 = -1
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -81,7 +84,7 @@ final class MirrorRenderView: NSView, MirrorFrameSink {
 
     // MARK: - 收帧
 
-    func enqueueMirrorFrame(_ data: UnsafePointer<UInt8>, count: Int, isH265: Bool) {
+    func enqueueMirrorFrame(_ data: UnsafePointer<UInt8>, count: Int, isH265: Bool, ptsUs: Int64) {
         guard count > 4 else { return }
 
         let nalUnits = MirrorRenderView.splitAnnexB(data, count: count)
@@ -105,7 +108,8 @@ final class MirrorRenderView: NSView, MirrorFrameSink {
         }
 
         let avcc = MirrorRenderView.annexBToAVCC(nalUnits)
-        guard !avcc.isEmpty, let sample = makeSampleBuffer(avcc: avcc, format: format) else {
+        guard !avcc.isEmpty,
+              let sample = makeSampleBuffer(avcc: avcc, format: format, ptsUs: ptsUs) else {
             return
         }
         displayLayer.enqueue(sample)
@@ -164,7 +168,8 @@ final class MirrorRenderView: NSView, MirrorFrameSink {
         }
     }
 
-    private func makeSampleBuffer(avcc: [UInt8], format: CMVideoFormatDescription) -> CMSampleBuffer? {
+    private func makeSampleBuffer(avcc: [UInt8], format: CMVideoFormatDescription,
+                                  ptsUs: Int64) -> CMSampleBuffer? {
         var blockBuffer: CMBlockBuffer?
         // 这里刻意不用「零拷贝」那个重载：数据来自核心的缓冲区，只在回调期间有效，
         // 而入队之后解码器还要用它。所以老老实实拷一份。
@@ -187,9 +192,8 @@ final class MirrorRenderView: NSView, MirrorFrameSink {
         }
         guard copied == kCMBlockBufferNoErr else { return nil }
 
-        // 显示时间戳要严格递增：同一时刻两帧会让显示层丢掉后一帧。
-        // 按 60fps 递推，够用了 —— 镜像的帧率就是跟着发送端走的。
-        let pts = nextPresentationTime()
+        // 时间戳的取法见 nextPresentationTime：优先用发送端报的，那才是真实帧节奏。
+        let pts = nextPresentationTime(senderUs: ptsUs)
         var timing = CMSampleTimingInfo(
             duration: CMTime(value: 1, timescale: 60),
             presentationTimeStamp: pts,
@@ -220,15 +224,33 @@ final class MirrorRenderView: NSView, MirrorFrameSink {
         return sample
     }
 
-    /// 上一帧的时间加一档，保证严格递增。
-    private func nextPresentationTime() -> CMTime {
-        let step = CMTime(value: 1, timescale: 60)
-        if lastPresentationTime.isValid {
-            lastPresentationTime = lastPresentationTime + step
+    /// 下一个显示时间戳。
+    ///
+    /// 优先用发送端报的那个 —— 它才是真实的帧节奏（这台上次投的是 30fps），
+    /// 而我们自己按 60fps 数出来的间隔只有实际的一半，画面会被放快一倍。
+    ///
+    /// 发送端的时钟是「开机以来的微秒」，是个很大的数，所以以第一帧为基准重排到
+    /// 0 起点；时间戳又必须严格递增（同一时刻两帧会被显示层丢掉），所以相等或倒退
+    /// 时往前推一毫秒。
+    private func nextPresentationTime(senderUs: Int64) -> CMTime {
+        let fallbackStep = CMTime(value: 1000, timescale: 1_000_000)   // 兜底按 1000fps 推进
+        var candidate: CMTime
+        if senderUs > 0 {
+            if firstSenderPtsUs < 0 {
+                firstSenderPtsUs = senderUs
+            }
+            let rebased = senderUs - firstSenderPtsUs
+            candidate = CMTime(value: rebased, timescale: 1_000_000)
+        } else if lastPresentationTime.isValid {
+            candidate = lastPresentationTime + fallbackStep
         } else {
-            lastPresentationTime = CMTime(value: 0, timescale: 60)
+            candidate = CMTime.zero
         }
-        return lastPresentationTime
+        if lastPresentationTime.isValid && candidate <= lastPresentationTime {
+            candidate = lastPresentationTime + CMTime(value: 1, timescale: 1000)
+        }
+        lastPresentationTime = candidate
+        return candidate
     }
 
     // MARK: - AVCC 解析

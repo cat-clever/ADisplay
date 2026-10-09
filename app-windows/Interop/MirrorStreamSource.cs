@@ -36,14 +36,22 @@ public sealed class MirrorStreamSource
     private readonly object _lock = new object();
     private readonly Queue<byte[]> _pending = new Queue<byte[]>();
     private readonly Queue<bool> _pendingKeyFrame = new Queue<bool>();
+    private readonly Queue<TimeSpan> _pendingTimestamp = new Queue<TimeSpan>();
 
     private MediaStreamSource? _source;
     private bool _isH265;
-    private long _sampleIndex;
+
+    // 发送端的时间戳是「开机以来的微秒」，是个很大的数 —— 以第一帧为基准重排到
+    // 0 起点，否则管线会以为第一帧要在 27 小时后才播。同时记下上一次的值，
+    // 保证严格递增（相等或倒退的样本会被丢掉）。
+    private long _firstPtsUs = -1;
+    private long _lastTimestampTicks = -1;
 
     // 等着答复的那次拉取。队列空的时候挂在这里，下一帧到了再完成它。
     private MediaStreamSourceSampleRequest? _waitingRequest;
     private MediaStreamSourceSampleRequestDeferral? _waitingDeferral;
+    // 答复挂起的那次拉取时，顺手把这一帧的时间戳带出去。
+    private TimeSpan _waitingTimestamp = TimeSpan.Zero;
 
     /// <summary>流建好了（编码参数到齐）。界面拿到它就可以设播放源了。</summary>
     public event Action<MediaStreamSource>? Ready;
@@ -51,7 +59,7 @@ public sealed class MirrorStreamSource
     /// <summary>
     /// 收一帧（Annex B，核心交过来的原始形态）。由核心的工作线程调用。
     /// </summary>
-    public void Push(byte[] annexB, bool isH265, uint width, uint height)
+    public void Push(byte[] annexB, bool isH265, uint width, uint height, long ptsUs)
     {
         if (annexB == null || annexB.Length <= 4)
         {
@@ -103,10 +111,12 @@ public sealed class MirrorStreamSource
         {
             _pending.Enqueue(avcc);
             _pendingKeyFrame.Enqueue(keyFrame);
+            _pendingTimestamp.Enqueue(TimestampFrom(ptsUs));
             while (_pending.Count > MaxQueuedFrames)
             {
                 _pending.Dequeue();
                 _pendingKeyFrame.Dequeue();
+                _pendingTimestamp.Dequeue();
             }
 
             // 有人在等就立刻给它，不用等下一次拉取。
@@ -121,7 +131,7 @@ public sealed class MirrorStreamSource
 
         if (request != null)
         {
-            request.Sample = MakeSample(avcc, keyFrame);
+            request.Sample = MakeSample(avcc, keyFrame, _waitingTimestamp);
             if (deferral != null)
             {
                 deferral.Complete();
@@ -136,6 +146,7 @@ public sealed class MirrorStreamSource
         {
             _pending.Clear();
             _pendingKeyFrame.Clear();
+            _pendingTimestamp.Clear();
             deferral = _waitingDeferral;
             _waitingDeferral = null;
             _waitingRequest = null;
@@ -184,12 +195,14 @@ public sealed class MirrorStreamSource
     {
         byte[]? frame = null;
         bool keyFrame = false;
+        TimeSpan timestamp = TimeSpan.Zero;
         lock (_lock)
         {
             if (_pending.Count > 0)
             {
                 frame = _pending.Dequeue();
                 keyFrame = _pendingKeyFrame.Dequeue();
+                timestamp = _pendingTimestamp.Dequeue();
             }
             else
             {
@@ -197,27 +210,52 @@ public sealed class MirrorStreamSource
                 // 画面会就此断掉 —— 而镜像的帧本来就是一阵一阵来的。
                 _waitingRequest = args.Request;
                 _waitingDeferral = args.Request.GetDeferral();
+                _waitingTimestamp = timestamp;
                 return;
             }
         }
-        args.Request.Sample = MakeSample(frame, keyFrame);
+        args.Request.Sample = MakeSample(frame, keyFrame, timestamp);
     }
 
     // 这里刻意不写全限定名：本项目自己的命名空间里有 ADisplay.Windows，
     // 而 C# 解析 `Windows.Media.Core.X` 这种写法时先从当前命名空间找起 ——
     // 它会命中 ADisplay.Windows 然后在里面找 Media，报「ADisplay.Windows 里
     // 没有 Media」。文件顶部的 using 不受影响（那里是从全局命名空间解析的）。
-    private MediaStreamSample MakeSample(byte[] avcc, bool keyFrame)
+    /// <summary>
+    /// 把发送端的时间戳换算成样本时间戳：以第一帧为基准重排到 0 起点，并保证严格递增。
+    /// </summary>
+    private TimeSpan TimestampFrom(long ptsUs)
+    {
+        long ticks;
+        if (ptsUs > 0)
+        {
+            if (_firstPtsUs < 0)
+            {
+                _firstPtsUs = ptsUs;
+            }
+            // 1 微秒 = 10 个 100ns 的 tick。
+            ticks = (ptsUs - _firstPtsUs) * 10;
+        }
+        else
+        {
+            // 发送端没给时间戳就按 60fps 兜底推进。
+            ticks = _lastTimestampTicks < 0 ? 0 : _lastTimestampTicks + TimeSpan.TicksPerSecond / 60;
+        }
+        if (_lastTimestampTicks >= 0 && ticks <= _lastTimestampTicks)
+        {
+            ticks = _lastTimestampTicks + TimeSpan.TicksPerMillisecond;
+        }
+        _lastTimestampTicks = ticks;
+        return TimeSpan.FromTicks(ticks);
+    }
+
+    private MediaStreamSample MakeSample(byte[] avcc, bool keyFrame, TimeSpan timestamp)
     {
         IBuffer buffer =
             CryptographicBuffer.CreateFromByteArray(avcc);
-        // 时间戳只是用来排队与显示的，按 60fps 递推即可 —— 镜像的帧率跟着发送端走。
-        // 计数器要原子自增：这条路径既会被核心的工作线程走到（有请求在等时直接答复），
-        // 也会被 Media Foundation 的拉取线程走到。
-        long index = System.Threading.Interlocked.Increment(ref _sampleIndex);
-        TimeSpan timestamp = TimeSpan.FromMilliseconds(index * (1000.0 / 60.0));
         MediaStreamSample sample = MediaStreamSample.CreateFromBuffer(buffer, timestamp);
-        sample.Duration = TimeSpan.FromMilliseconds(1000.0 / 60.0);
+        // 时长只是个提示，真正的节奏由上面那个时间戳定。
+        sample.Duration = TimeSpan.FromMilliseconds(1000.0 / 30.0);
         // 关键帧标记必须准：把每一帧都标成关键帧，解码器会把它们都当随机访问点，
         // 画面会花。
         sample.KeyFrame = keyFrame;

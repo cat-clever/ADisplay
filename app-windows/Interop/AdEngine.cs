@@ -76,8 +76,8 @@ internal sealed class AdEngine : IDisposable
     /// 自己来取，所以这条回调只需要把字节拷进队列就返回。
     /// </summary>
     /// width/height 是发送端报来的画面尺寸（核心从镜像流头部读出来的），
-    /// 为 0 表示还没收到尺寸信息。
-    public event Action<byte[], bool, uint, uint>? MirrorFrameReceived;
+    /// 为 0 表示还没收到尺寸信息。ptsUs 是发送端报的显示时间戳，0 表示它没给。
+    public event Action<byte[], bool, uint, uint, long>? MirrorFrameReceived;
 
     public bool IsRunning
     {
@@ -210,7 +210,7 @@ internal sealed class AdEngine : IDisposable
             return;
         }
 
-        Action<byte[], bool, uint, uint>? handler = MirrorFrameReceived;
+        Action<byte[], bool, uint, uint, long>? handler = MirrorFrameReceived;
         if (handler == null)
         {
             return;
@@ -225,7 +225,7 @@ internal sealed class AdEngine : IDisposable
         }
         byte[] copy = new byte[value.Size];
         Marshal.Copy(value.Data, copy, 0, value.Size);
-        handler(copy, value.IsH265 != 0, value.Width, value.Height);
+        handler(copy, value.IsH265 != 0, value.Width, value.Height, value.PtsUs);
     }
 
     private void OnSessionClosedFromCore(IntPtr userData, uint sessionId, int reason)

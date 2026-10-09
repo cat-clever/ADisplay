@@ -277,13 +277,13 @@ public sealed partial class MainWindow : Window
         });
     }
 
-    private void OnMirrorFrameReceived(byte[] data, bool isH265, uint width, uint height)
+    private void OnMirrorFrameReceived(byte[] data, bool isH265, uint width, uint height, long ptsUs)
     {
         // 不切回 UI 线程：MediaStreamSource 是拉取式的，这里只需要把字节塞进队列。
         MirrorStreamSource? source = _mirrorSource;
         if (source != null)
         {
-            source.Push(data, isH265, width, height);
+            source.Push(data, isH265, width, height, ptsUs);
         }
     }
 

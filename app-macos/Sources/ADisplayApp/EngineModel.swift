@@ -238,7 +238,8 @@ final class EngineModel: ObservableObject {
             guard rawUserData != nil, let frame = frame, let data = frame.pointee.data else { return }
             MirrorFrameRouter.shared.deliver(data,
                                              count: Int(frame.pointee.size),
-                                             isH265: frame.pointee.is_h265 != 0)
+                                             isH265: frame.pointee.is_h265 != 0,
+                                             ptsUs: frame.pointee.pts_us)
         }
 
         sessionClosedCallback = { rawUserData, sessionId, _ in
