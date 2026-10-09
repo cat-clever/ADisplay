@@ -1,7 +1,8 @@
 # 签名密钥与它的口令绝不入库 —— 仓库是公开的。
 #
-# 它们放在本仓库的 Secrets 里（ANDROID_KEYSTORE_BASE64 等四项），CI 构建时
-# 还原成文件。本机那份只是备份，丢了就再也发不出能覆盖升级的包。
+# 项目现在统一用仓库里那份公开密钥库 app-tv/fallback-signing.p12 签名，下面两个
+# 文件已经不再参与构建，只是本机留档 —— 一旦误提交，等于把一把没用的私钥公开，
+# 所以继续挡着。
 adisplay-release.keystore
 adisplay-release.key.txt
 

@@ -17,8 +17,8 @@ android {
         // 规则固定下来，升级时不用每次临时决定该加多少。
         // 它必须随版本递增 —— 不变的话 Android 会认为是同一个包，
         // 覆盖安装时不会更新。
-        versionCode = 545
-        versionName = "0.5.45"
+        versionCode = 546
+        versionName = "0.5.46"
 
         // 只打 arm64-v8a。
         //
@@ -36,44 +36,40 @@ android {
         }
     }
 
-    // 签名：三级优先。
+    // 签名：统一用仓库里那份**公开的**密钥库 app-tv/fallback-signing.p12。
     //
-    //   1. 环境变量（CI 里由仓库 Secrets 提供）—— 你自己的私有密钥
-    //   2. 仓库里那份**公开的兜底密钥** —— 给 fork 用的
-    //   3. debug 签名 —— 兜底中的兜底，正常不会走到
+    // 不接环境变量、不接 Secrets。签名在这里只有一个作用：让同一个应用在设备上
+    // 能**覆盖升级** —— Android 要求新旧包签名一致，否则必须先卸载，而卸载会清掉
+    // 配置与配对密钥。所以签名必须每版都一样，而且不能依赖只有本仓库才有的东西。
     //
-    // 为什么必须给 fork 一份兜底密钥：GitHub 的 Secrets **不会**复制到 fork
-    // （fork 也读不到原仓库的），所以别人 fork 之后那几个环境变量是空的。
-    // 没有兜底的话，他们的包每次都落到 debug 签名 —— 而 debug 密钥库是每台
-    // 机器各自生成的，CI 每次都是全新 runner，于是每个版本签名都不同，装新版
-    // 必须先卸载，卸载又会清掉配置与配对密钥。
+    // 早先这里走过「Secrets 里配了私有密钥就优先用」的三级回退，那套东西的麻烦
+    // 大于收益：Secrets 不会复制到 fork，可复用工作流也不会自动继承 Secrets，
+    // 两处都只是**静默**失效 —— gradle 不报错，直接退回 debug 签名，而 debug
+    // 密钥库是每个 runner 构建时现生成的，等于签名每版都变。结果是发出去的包
+    // 一直是 debug 签名，用户装新版照样要先卸载，正好绕回要解决的问题上。
     //
-    // 兜底密钥是公开的（就在 app-tv/fallback-signing.p12，口令写在下面），
-    // 所以它证明不了发布者身份。但签名在这里的作用本来就是「同一台设备上能
-    // 覆盖升级」，不是身份认证 —— 何况所有 fork 用同一个包名 com.adisplay.tv，
-    // 本来也只能装一个。想要私有密钥，把那四个 Secrets 配上即会自动优先。
-    val fallbackKeystore = File(project.projectDir, "fallback-signing.p12")
-    val secretKeystorePath = System.getenv("ADISPLAY_KEYSTORE_FILE")
-    val useSecretKey = !secretKeystorePath.isNullOrEmpty() && File(secretKeystorePath).exists()
-    val useFallbackKey = !useSecretKey && fallbackKeystore.exists()
+    // 公开密钥当然证明不了发布者身份，但这里本来也不需要它证明：所有构建
+    // （含 fork）用同一个包名 com.adisplay.tv，一台设备上只能装一个。
+    //
+    // 路径按**根项目**算：本文件在 app-tv/app/ 下，密钥库在 app-tv/ 下。
+    // 按 projectDir 拼会差一级，找不到文件就静默退回 debug 签名。
+    val releaseKeystore = project.rootProject.file("fallback-signing.p12")
+
+    // 打进构建日志。签名配错时 gradle 不会报错（会静默退回 debug），只有用户装
+    // 新版失败那一刻才会暴露 —— 让 CI 日志里直接能看到用的是哪把密钥。
+    logger.lifecycle("APK 签名密钥库：${releaseKeystore.absolutePath}（存在=${releaseKeystore.exists()}）")
 
     signingConfigs {
         create("release") {
-            if (useSecretKey) {
-                storeFile = File(secretKeystorePath)
-                storePassword = System.getenv("ADISPLAY_KEYSTORE_PASSWORD")
-                keyAlias = System.getenv("ADISPLAY_KEY_ALIAS")
-                keyPassword = System.getenv("ADISPLAY_KEY_PASSWORD")
-            } else if (useFallbackKey) {
-                storeFile = fallbackKeystore
-                // 公开的兜底口令，刻意写在代码里而不是藏起来 —— 它本来就是
-                // 仓库的一部分，装作保密只会让人误以为它能证明身份。
-                storePassword = "adisplay-fallback"
-                keyAlias = "adisplay"
-                keyPassword = "adisplay-fallback"
-            }
-            // 两种密钥库都是 openssl 生成的 PKCS12。显式写出来：默认值随 JDK
-            // 版本变过，写死更稳。
+            storeFile = releaseKeystore
+            // 公开口令，刻意写在代码里而不是藏起来 —— 它本来就是仓库的一部分，
+            // 装作保密只会让人误以为它能证明身份。
+            storePassword = "adisplay-fallback"
+            // 别名就是密钥库里的 friendlyName（openssl 导出时用 -name adisplay
+            // 写进去的），Java 读 PKCS12 时看到的就是它。
+            keyAlias = "adisplay"
+            keyPassword = "adisplay-fallback"
+            // openssl 生成的 PKCS12。显式写出来：默认值随 JDK 版本变过。
             storeType = "PKCS12"
         }
     }
@@ -82,11 +78,9 @@ android {
         release {
             // 侧载自用，不需要混淆；出问题时要看得懂堆栈（文档 1.1）。
             isMinifyEnabled = false
-            signingConfig = if (useSecretKey || useFallbackKey) {
-                signingConfigs.getByName("release")
-            } else {
-                signingConfigs.getByName("debug")
-            }
+            // 固定用上面那把密钥库；找不到文件时 gradle 会直接失败，
+            // 而不是悄悄退回 debug 签名 —— 失败比发一个签名会变的包好。
+            signingConfig = signingConfigs.getByName("release")
         }
     }
 

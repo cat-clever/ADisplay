@@ -722,30 +722,8 @@ jobs:
         with:
           gradle-version: '8.9'
 
-      # 固定密钥签名。
-      #
-      # 密钥库不在仓库里（仓库是公开的），它和口令放在本仓库的 Secrets 里。
-      # 没有配置时跳过 —— gradle 那边会退回 debug 签名，构建不因此失败，
-      # 代价只是那个 APK 装新版要先卸载。
-      - name: 还原签名密钥
-        env:
-          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-        run: |
-          if [ -z "$KEYSTORE_BASE64" ]; then
-            echo "没有配置签名密钥，本次使用 debug 签名"
-            exit 0
-          fi
-          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/adisplay-release.keystore"
-          {
-            echo "ADISPLAY_KEYSTORE_FILE=$RUNNER_TEMP/adisplay-release.keystore"
-            echo "ADISPLAY_KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD"
-            echo "ADISPLAY_KEY_ALIAS=$KEY_ALIAS"
-            echo "ADISPLAY_KEY_PASSWORD=$KEY_PASSWORD"
-          } >> "$GITHUB_ENV"
-          echo "签名密钥已还原"
+      # 签名不需要在这里做什么准备：密钥库 app-tv/fallback-signing.p12 就在仓库里，
+      # gradle 直接用它（见 app-tv/app/build.gradle.kts 的签名段）。
 
       - name: 构建 APK
         working-directory: app-tv
@@ -761,6 +739,12 @@ jobs:
           fi
           cp "${APK}" adisplay-android-tv.apk
           ls -lh adisplay-android-tv.apk
+
+      # 签名配错时 gradle 不会报错，它会静默退回 debug 签名 —— 而 debug 密钥库是
+      # 每个 runner 现生成的，那种包用户装新版必须先卸载。装包失败只有用户能发现，
+      # 所以在这里当面把证书读出来看。
+      - name: 校验 APK 签名
+        run: python3 app-tv/verify_apk_signing.py adisplay-android-tv.apk
 
       # Gradle 不会因为 .so 缺失而失败：它只是少打一个文件，产出的 APK
       # 装上跑起来才在 System.loadLibrary 处抛 UnsatisfiedLinkError。
