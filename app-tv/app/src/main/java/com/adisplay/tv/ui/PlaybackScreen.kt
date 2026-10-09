@@ -1,23 +1,38 @@
 package com.adisplay.tv.ui
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.media3.common.AnalyticsListener
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
+import androidx.tv.material3.MaterialTheme
+import androidx.tv.material3.Text
 import com.adisplay.tv.AdPlaybackCommand
 import com.adisplay.tv.AdTransportState
 import com.adisplay.tv.EngineModel
 import com.adisplay.tv.PlaybackIntent
+import java.util.Locale
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 
@@ -94,6 +109,44 @@ fun PlaybackScreen(
         }
     }
 
+    // 是不是在缓冲、当前估计的下载速度。
+    //
+    // 大码率的片子（4K、B 站的高清源）起播前要拉一大段，这段时间画面是黑的 ——
+    // 用户看到的就是「投屏没反应」。所以缓冲期间把速度摆出来：一眼能看出它在动、
+    // 动得多快，而不是对着黑屏猜。
+    var buffering by remember { mutableStateOf(false) }
+    var speedBytesPerSecond by remember { mutableStateOf(0L) }
+
+    DisposableEffect(exoPlayer) {
+        val stateListener = object : Player.Listener {
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                buffering = playbackState == Player.STATE_BUFFERING
+            }
+        }
+
+        // 速度取 ExoPlayer 自己的带宽估计（每两秒更新一次）。不按「整块下载量 ÷
+        // 耗时」自己算：那样会在块与块之间跳，看起来像网速在剧烈抖动。
+        val bandwidthListener = object : AnalyticsListener {
+            override fun onBandwidthEstimate(
+                eventTime: AnalyticsListener.EventTime,
+                elapsedMs: Int,
+                bytes: Long,
+                bitrateEstimate: Long,
+            ) {
+                // 估计值是按比特算的，显示按字节。
+                speedBytesPerSecond = bitrateEstimate / 8L
+            }
+        }
+
+        exoPlayer.addListener(stateListener)
+        exoPlayer.addAnalyticsListener(bandwidthListener)
+
+        onDispose {
+            exoPlayer.removeListener(stateListener)
+            exoPlayer.removeAnalyticsListener(bandwidthListener)
+        }
+    }
+
     // 全屏，并接上三条退路：点画面、遥控器「返回」、遥控器「菜单」。
     PlaybackFullScreen(
         title = model.deviceName + " · 正在播放",
@@ -120,6 +173,44 @@ fun PlaybackScreen(
             },
             modifier = Modifier.fillMaxSize(),
         )
+
+        // 缓冲提示。只在缓冲时出现 —— 全屏播放页上不该有常驻的东西。
+        if (buffering) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(Color.Black.copy(alpha = 0.62f))
+                    .padding(horizontal = 22.dp, vertical = 14.dp),
+            ) {
+                Text(
+                    text = if (speedBytesPerSecond > 0L) {
+                        "正在缓冲　" + formatSpeed(speedBytesPerSecond)
+                    } else {
+                        "正在缓冲…"
+                    },
+                    style = MaterialTheme.typography.titleMedium,
+                    color = Color.White,
+                )
+            }
+        }
+    }
+}
+
+/**
+ * 把字节/秒写成「1.2 MB/s」这种。
+ *
+ * 用 Locale.US：小数点必须是点。中文区域设置下会格式化成「1.2」也没问题，但
+ * 万一落到用逗号做小数点的区域，同一行里「1,2 MB/s」会被读成一千二百。
+ */
+private fun formatSpeed(bytesPerSecond: Long): String {
+    return when {
+        bytesPerSecond >= 1024L * 1024L ->
+            String.format(Locale.US, "%.1f MB/s", bytesPerSecond / 1024.0 / 1024.0)
+        bytesPerSecond >= 1024L ->
+            String.format(Locale.US, "%.0f KB/s", bytesPerSecond / 1024.0)
+        else ->
+            String.format(Locale.US, "%d B/s", bytesPerSecond)
     }
 }
 
