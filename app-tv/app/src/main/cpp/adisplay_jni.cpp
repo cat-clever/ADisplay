@@ -37,6 +37,7 @@ jmethodID g_on_playback_command = nullptr;
 jmethodID g_on_session_closed = nullptr;
 jmethodID g_on_session_opened = nullptr;
 jmethodID g_on_mirror_frame = nullptr;
+jmethodID g_on_mirror_audio_frame = nullptr;
 
 // 取出 JNIEnv。需要附着时顺带告诉调用方，用完要解附着。
 JNIEnv* acquire_env(bool* did_attach) {
@@ -244,6 +245,44 @@ void call_mirror_frame(void* /*user_data*/, const AdMirrorFrame* frame) {
     release_env(attached);
 }
 
+void call_mirror_audio_frame(void* /*user_data*/, const AdMirrorAudioFrame* frame) {
+    if (frame == nullptr || frame->data == nullptr || frame->size <= 0) {
+        return;
+    }
+    jobject target = nullptr;
+    jmethodID method = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        target = g_callback;
+        method = g_on_mirror_audio_frame;
+    }
+    if (target == nullptr || method == nullptr) {
+        return;
+    }
+
+    bool attached = false;
+    JNIEnv* env = acquire_env(&attached);
+    if (env == nullptr) {
+        release_env(attached);
+        return;
+    }
+
+    // 与镜像视频同理：核心那个指针只在回调期间有效，Kotlin 侧要留到解码器
+    // 真正用它的那一刻，所以这里拷一份。
+    jbyteArray data = env->NewByteArray(static_cast<jsize>(frame->size));
+    if (data != nullptr) {
+        env->SetByteArrayRegion(data, 0, static_cast<jsize>(frame->size),
+                                reinterpret_cast<const jbyte*>(frame->data));
+        env->CallVoidMethod(target, method, data,
+                            static_cast<jint>(frame->sample_rate),
+                            static_cast<jint>(frame->channels),
+                            static_cast<jlong>(frame->pts_us));
+        swallow_exception(env);
+        env->DeleteLocalRef(data);
+    }
+    release_env(attached);
+}
+
 std::string from_java(JNIEnv* env, jstring text) {
     if (text == nullptr) {
         return std::string();
@@ -332,6 +371,7 @@ Java_com_adisplay_tv_AdDisplayNative_nativeSetCallbacks(JNIEnv* env, jobject /*t
     jmethodID on_session_closed = nullptr;
     jmethodID on_session_opened = nullptr;
     jmethodID on_mirror_frame = nullptr;
+    jmethodID on_mirror_audio_frame = nullptr;
 
     if (callback != nullptr) {
         jclass cls = env->GetObjectClass(callback);
@@ -345,6 +385,7 @@ Java_com_adisplay_tv_AdDisplayNative_nativeSetCallbacks(JNIEnv* env, jobject /*t
         on_session_closed = env->GetMethodID(cls, "onSessionClosed", "(II)V");
         on_session_opened = env->GetMethodID(cls, "onSessionOpened", "(II)V");
         on_mirror_frame = env->GetMethodID(cls, "onMirrorFrame", "([BIIIJ)V");
+        on_mirror_audio_frame = env->GetMethodID(cls, "onMirrorAudioFrame", "([BIIJ)V");
         env->DeleteLocalRef(cls);
         if (on_state_changed == nullptr || on_log == nullptr || on_media_url == nullptr ||
             on_playback_command == nullptr || on_session_closed == nullptr) {
@@ -374,6 +415,7 @@ Java_com_adisplay_tv_AdDisplayNative_nativeSetCallbacks(JNIEnv* env, jobject /*t
         g_on_session_closed = on_session_closed;
         g_on_session_opened = on_session_opened;
         g_on_mirror_frame = on_mirror_frame;
+        g_on_mirror_audio_frame = on_mirror_audio_frame;
     }
 
     if (callback == nullptr) {
@@ -390,6 +432,9 @@ Java_com_adisplay_tv_AdDisplayNative_nativeSetCallbacks(JNIEnv* env, jobject /*t
     callbacks.on_session_closed = &call_session_closed;
     callbacks.on_session_opened = &call_session_opened;
     callbacks.on_mirror_frame = &call_mirror_frame;
+    // 注册它等于告诉核心「伴音我自己解」—— 核心因此只转发压缩帧、不做解码，
+    // 也就不必把 FFmpeg 链进 APK。
+    callbacks.on_mirror_audio_frame = &call_mirror_audio_frame;
 
     return ad_engine_set_callbacks(engine, &callbacks, nullptr);
 }

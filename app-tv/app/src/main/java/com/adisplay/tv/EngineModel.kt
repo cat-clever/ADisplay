@@ -219,6 +219,13 @@ class EngineModel(context: Context) {
      */
     val mirrorPlayer = MirrorVideoPlayer { message -> post { appendLog(LogLevel.INFO, message) } }
 
+    /**
+     * 镜像伴音的播放端。核心转发的是**压缩**帧（AAC-ELD），这边自己解 ——
+     * 注册压缩回调就等于告诉核心「不必解码」，从而避开把 FFmpeg 链进 APK。
+     * 见 MirrorAudioPlayer 的文件头。
+     */
+    val mirrorAudio = MirrorAudioPlayer { message -> post { appendLog(LogLevel.INFO, message) } }
+
     /** 服务当前的真实状态，来自核心的状态回调。 */
     var serviceState by mutableStateOf(ServiceState.STOPPED)
         private set
@@ -534,6 +541,16 @@ class EngineModel(context: Context) {
             }
         }
 
+        override fun onMirrorAudioFrame(
+            data: ByteArray,
+            sampleRate: Int,
+            channels: Int,
+            ptsUs: Long
+        ) {
+            // 不切主线程，理由同视频帧：每秒约 92 帧，跳一次会让声音断续。
+            mirrorAudio.push(data, sampleRate, channels)
+        }
+
         override fun onSessionClosed(sessionId: Int, reason: Int) {
             post {
                 appendLog(LogLevel.INFO, "会话 " + sessionId + " 已关闭，原因 " + reason)
@@ -547,6 +564,7 @@ class EngineModel(context: Context) {
                 // 镜像会话结束同样要退出投屏页，否则电视会停在最后一帧上。
                 if (mirrorSessionId == sessionId) {
                     mirrorSessionId = null
+                    mirrorAudio.release()
                 }
             }
         }

@@ -47,6 +47,17 @@ object AdDisplayNative {
          * 那样还要转成 AVCC。data 只在本次调用期间有效，需要留存必须自己拷走。
          */
         fun onMirrorFrame(data: ByteArray, isH265: Int, width: Int, height: Int, ptsUs: Long)
+
+        /**
+         * 一帧镜像伴音（**压缩**，AAC-ELD 裸帧，已解密）。
+         *
+         * 注册它等于告诉核心「这一帧我自己解」—— 核心因此只转发、不做解码。
+         * 之所以要这样：把 FFmpeg 静态链进 APK 会让包大出上百兆，而 Android 的
+         * MediaCodec 本来就认 AAC-ELD。
+         *
+         * data 只在本次调用期间有效。
+         */
+        fun onMirrorAudioFrame(data: ByteArray, sampleRate: Int, channels: Int, ptsUs: Long)
     }
 
     /** 核心库是否可用。为 false 时下面所有 native* 都不能调。 */

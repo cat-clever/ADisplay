@@ -283,6 +283,33 @@ typedef struct AdMirrorFrame {
     int         reserved;
 } AdMirrorFrame;
 
+/*
+ * 一帧**压缩的**镜像伴音（AirPlay 屏幕镜像的伴音）。
+ *
+ * 与 AdMirrorFrame 同一个思路：能交给平台解的就不在核心解。核心按「界面层注册
+ * 了哪一个回调」决定这一帧怎么走：
+ *
+ *   注册了本回调       → 原样转发压缩帧，核心不做解码
+ *   只注册 on_audio_frame → 核心解成 PCM 再发
+ *
+ * Android 走前者：它的 MediaCodec 认 AAC-ELD，而把 FFmpeg 静态链进 APK 会让包
+ * 大出上百兆（见 core/pipeline/CMakeLists.txt 里的实测）。macOS / Windows 走
+ * 后者：AudioToolbox 认，但 Media Foundation 不认，与其分平台写两套不如核心解。
+ *
+ * data 是 AAC-ELD 的裸帧（不含 ADTS 头），内容已经解密，仅在本次回调期间有效。
+ */
+typedef struct AdMirrorAudioFrame {
+    uint32_t    struct_size;   /* = sizeof(AdMirrorAudioFrame) */
+    uint32_t    session_id;
+    const uint8_t* data;
+    int32_t     size;
+    /* 采样率与声道数。每帧长度由编码配置决定，这里一并给出，省得界面层自己辨认。 */
+    uint32_t    sample_rate;
+    uint32_t    channels;
+    int64_t     pts_us;
+    int         reserved;
+} AdMirrorAudioFrame;
+
 typedef struct AdVideoFrame {
     uint32_t    struct_size;      /* = sizeof(AdVideoFrame) */
     uint32_t    session_id;
@@ -362,6 +389,10 @@ typedef struct AdCallbacks {
 
     /* 日志。level 见 AdLogLevel。msg 为 UTF-8，只在回调期间有效。 */
     void (AD_CALL *on_log)(void* user_data, int level, const char* msg);
+
+    /* 镜像伴音的**压缩**帧（见 AdMirrorAudioFrame）。
+       注册它就等于告诉核心「这一帧我自己解」—— 核心只做转发，不做解码。 */
+    void (AD_CALL *on_mirror_audio_frame)(void* user_data, const AdMirrorAudioFrame* frame);
 } AdCallbacks;
 
 /* ========================================================================

@@ -328,6 +328,40 @@ struct AdEngine {
         snapshot.on_mirror_frame(user, &frame);
     }
 
+    // 界面层是否要自己解镜像伴音（注册了压缩回调就表示要）。
+    //
+    // 有它才有可能「注册了就不解码」：核心在每帧进来时问一次，答案是要，
+    // 就只转发压缩帧。Android 靠这条路避开把 FFmpeg 链进 APK。
+    bool wants_compressed_mirror_audio() {
+        std::lock_guard<std::mutex> lock(mutex);
+        return callbacks.on_mirror_audio_frame != nullptr;
+    }
+
+    // 镜像伴音的**压缩**帧（AAC-ELD 裸帧）。只有界面层注册了对应回调时才走到。
+    void notify_mirror_audio_frame(uint32_t session_id, const unsigned char* data, int size,
+                                   uint32_t sample_rate, uint32_t channels, int64_t pts_us) {
+        AdCallbacks snapshot{};
+        void* user = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            snapshot = callbacks;
+            user = user_data;
+        }
+        if (snapshot.on_mirror_audio_frame == nullptr) {
+            return;
+        }
+        AdMirrorAudioFrame frame{};
+        frame.struct_size = static_cast<uint32_t>(sizeof(AdMirrorAudioFrame));
+        frame.session_id = session_id;
+        frame.data = data;
+        frame.size = size;
+        frame.sample_rate = sample_rate;
+        frame.channels = channels;
+        frame.pts_us = pts_us;
+        frame.reserved = 0;
+        snapshot.on_mirror_audio_frame(user, &frame);
+    }
+
     // 镜像伴音。与视频是同一路 AirPlay 会话的两条流，所以共用会话号 ——
     // 界面层据此知道这段声音属于哪块画面。
     //
@@ -754,6 +788,25 @@ public:
         if (compression_type != kAacEldCompressionType) {
             return;
         }
+        const uint32_t session = session_id_.load() != 0
+                                     ? session_id_.load()
+                                     : open_session(AD_STREAM_MIRROR_VIDEO);
+        if (session == 0) {
+            return;
+        }
+
+        // 界面层注册了压缩回调，就说明它自己会解（Android 的 MediaCodec 认
+        // AAC-ELD，而把 FFmpeg 链进 APK 会让包大出上百兆）。这时核心只转发，
+        // 一个字节都不解 —— 连解码器都不必创建。
+        if (engine_->wants_compressed_mirror_audio()) {
+            engine_->notify_mirror_audio_frame(
+                session, data, size,
+                static_cast<uint32_t>(pipeline::kAirplayMirrorAudioSampleRate),
+                static_cast<uint32_t>(pipeline::kAirplayMirrorAudioChannels),
+                0);
+            return;
+        }
+
         if (audio_decoder_failed.load() || !ensure_audio_decoder()) {
             return;
         }
@@ -776,12 +829,6 @@ public:
         }
         audio_frames_decoded.fetch_add(1);
 
-        const uint32_t session = session_id_.load() != 0
-                                     ? session_id_.load()
-                                     : open_session(AD_STREAM_MIRROR_VIDEO);
-        if (session == 0) {
-            return;
-        }
         // 时间戳给 0：协议层交下来的音频帧不带可达的本地时间（视频那条回调会
         // 单独给 ntp_time_local，音频这条没有）。伴音按到达顺序播即可 —— 它与
         // 画面同源，十几毫秒的帧长本身就把节奏定死了。
