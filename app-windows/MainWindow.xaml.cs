@@ -8,7 +8,9 @@ using System;
 using System.Collections.ObjectModel;
 using System.Runtime.InteropServices;
 using Microsoft.UI.Dispatching;
+using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Controls;
 using Windows.ApplicationModel.DataTransfer;
 using Windows.Media.Core;
@@ -268,6 +270,7 @@ public sealed partial class MainWindow : Window
         _castSessionId = 0;
 
         PlayerElement.Source = null;
+        ExitFullScreenOnCastingEnd();
         CastingPanel.Visibility = Visibility.Collapsed;
         SettingsPanel.Visibility = Visibility.Visible;
     }
@@ -276,6 +279,52 @@ public sealed partial class MainWindow : Window
     {
         // 只结束本地播放：核心那边下次收到推送会重新开会话。
         EndCasting();
+    }
+
+    // ---------------------------------------------------------------------
+    // 全屏
+    //
+    // 走 AppWindow 而不是 MediaPlayerElement.IsFullWindow：后者只让画面填满
+    // 窗口，标题栏与边框还在原处，投屏时用户要的是整块屏幕。
+    // ---------------------------------------------------------------------
+
+    private void OnToggleFullScreenClick(object sender, RoutedEventArgs e)
+    {
+        SetFullScreen(!IsFullScreen());
+    }
+
+    private void OnEscapeInvoked(KeyboardAccelerator sender,
+                                 KeyboardAcceleratorInvokedEventArgs args)
+    {
+        // 只在全屏时响应。窗口模式下按 Esc 什么也不做 —— 否则用户想关掉
+        // 某个东西时会莫名进入全屏。
+        if (IsFullScreen())
+        {
+            SetFullScreen(false);
+            args.Handled = true;
+        }
+    }
+
+    private bool IsFullScreen()
+    {
+        return AppWindow.Presenter.Kind == AppWindowPresenterKind.FullScreen;
+    }
+
+    private void SetFullScreen(bool fullScreen)
+    {
+        AppWindow.SetPresenter(fullScreen ? AppWindowPresenterKind.FullScreen
+                                          : AppWindowPresenterKind.Default);
+        FullScreenButton.Content = fullScreen ? "退出全屏" : "全屏";
+    }
+
+    private void ExitFullScreenOnCastingEnd()
+    {
+        // 投屏结束时人可能正停在全屏画面里，而那时投屏面板会被整个收起来 ——
+        // 不收全屏的话，用户面对的就是一块没有内容的黑屏，还找不到退出按钮。
+        if (IsFullScreen())
+        {
+            SetFullScreen(false);
+        }
     }
 
     private void OnReportTick(object? sender, object e)

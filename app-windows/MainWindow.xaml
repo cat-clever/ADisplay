@@ -20,6 +20,13 @@
             与 macOS 端同一套行为。
         -->
         <Grid x:Name="CastingPanel" Visibility="Collapsed" Padding="16" RowSpacing="12">
+            <!-- 全屏时按 Esc 退出。挂在整块投屏面板上，比绑在按钮上精确：
+                 绑按钮的话窗口模式下按 Esc 也会进全屏，而用户按 Esc 通常是想
+                 关掉某个东西。 -->
+            <Grid.KeyboardAccelerators>
+                <KeyboardAccelerator Key="Escape" Invoked="OnEscapeInvoked" />
+            </Grid.KeyboardAccelerators>
+
             <Grid.RowDefinitions>
                 <RowDefinition Height="*" />
                 <RowDefinition Height="Auto" />
@@ -40,6 +47,9 @@
                 <Button x:Name="StopCastingButton"
                         Content="停止接收"
                         Click="OnStopCastingClick" />
+                <Button x:Name="FullScreenButton"
+                        Content="全屏"
+                        Click="OnToggleFullScreenClick" />
                 <ToggleButton x:Name="CastingLogToggle"
                               Content="显示日志"
                               Checked="OnCastingLogToggled"

@@ -10,6 +10,7 @@
 // 手机看到的永远是「正在起播」，进度条不动，音量滑块还会弹回去。
 
 import AVKit
+import AppKit
 import SwiftUI
 
 /// AVPlayerView 是 AppKit 控件，需要包一层。
@@ -257,6 +258,10 @@ struct PlayerPage: View {
     @EnvironmentObject private var model: EngineModel
     @StateObject private var viewModel = PlayerViewModel()
 
+    // 投屏一失败，设置页连同它的日志区会被整个盖住 —— 而那正是最需要看日志的
+    // 时候。所以播放页也要能看，默认收起，不占画面。
+    @State private var showLog = false
+
     let media: EngineModel.ActiveMedia
 
     var body: some View {
@@ -268,13 +273,21 @@ struct PlayerPage: View {
                 Text("正在接收投屏")
                     .font(.headline)
                 Spacer()
+                Toggle("显示日志", isOn: $showLog)
+                    .toggleStyle(.button)
+                    .font(.caption)
                 Button("停止接收") {
                     model.stopCasting()
                 }
             }
+
+            if showLog {
+                logPanel
+            }
         }
         .padding(16)
-        .frame(minWidth: 640, minHeight: 420)
+        // 日志区展开时要放得下播放器加日志，所以最小高度按展开后的样子留。
+        .frame(minWidth: 640, minHeight: showLog ? 600 : 420)
         .onAppear {
             viewModel.attach(engine: model, media: media)
         }
@@ -284,6 +297,33 @@ struct PlayerPage: View {
         }
         .onDisappear {
             viewModel.detach()
+        }
+    }
+
+    /// 播放页的日志区。内容与设置页共用同一份（EngineModel.logs），
+    /// 所以两边看到的东西永远一致，不需要各自维护。
+    private var logPanel: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 2) {
+                    ForEach(Array(model.logs.enumerated()), id: \.offset) { index, line in
+                        Text(line)
+                            .font(.system(size: 11, design: .monospaced))
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .id(index)
+                    }
+                }
+                .padding(8)
+            }
+            .frame(height: 150)
+            .background(Color(nsColor: .textBackgroundColor).opacity(0.5))
+            .cornerRadius(6)
+            // 新日志进来时自动滚到底 —— 排查时盯的就是最后几行。
+            .onChange(of: model.logs.count) { _ in
+                guard let last = model.logs.indices.last else { return }
+                proxy.scrollTo(last, anchor: .bottom)
+            }
         }
     }
 }
