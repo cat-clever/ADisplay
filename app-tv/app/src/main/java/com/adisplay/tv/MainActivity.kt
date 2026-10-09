@@ -2,6 +2,7 @@ package com.adisplay.tv
 
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import android.view.KeyEvent
 import android.view.WindowManager
 import androidx.activity.compose.setContent
 import androidx.compose.runtime.LaunchedEffect
@@ -46,6 +47,22 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    /**
+     * 遥控器的「菜单」键：投屏中按它就结束本次投屏。
+     *
+     * 放在 Activity 里而不是播放页里，是因为 Compose 的按键事件只送到当前聚焦
+     * 的元素，而为了全屏，播放页里没有放任何可聚焦的控件 —— 页面里根本收不到
+     * 这个键。「返回」键走的是返回分派器（见 PlaybackFullScreen），不受这个限制。
+     */
+    override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
+        val casting = model.mirrorSessionId != null || model.playingMedia != null
+        if (keyCode == KeyEvent.KEYCODE_MENU && casting) {
+            model.stopService()
+            return true
+        }
+        return super.onKeyDown(keyCode, event)
     }
 
     override fun onStart() {
