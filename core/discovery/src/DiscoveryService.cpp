@@ -99,12 +99,15 @@ struct DiscoveryService::Impl {
     std::string current_address;
     std::string last_error;
 
-    // 按当前配置与地址，把三条 mDNS 服务全部公布一遍。
-    bool publish_all(const std::string& address, std::string* out_error) {
+    // 按当前配置把三条 mDNS 服务全部公布一遍。
+    //
+    // 刻意不接收地址参数：地址不再由我们告诉 mDNS，而是交给系统按网卡自己公布
+    // （理由见下面那处注释）。留着一个用不上的参数，只会让读的人以为它还在起作用。
+    bool publish_all(std::string* out_error) {
         publishers.clear();
         std::string first_failure;
 
-        const auto add_publisher = [this, &address, &first_failure](
+        const auto add_publisher = [this, &first_failure](
                                        const std::string& service_type,
                                        const std::string& instance_name,
                                        uint16_t port,
@@ -261,7 +264,7 @@ struct DiscoveryService::Impl {
         }
 
         std::string error;
-        publish_all(address, &error);
+        publish_all(&error);
         if (config.enable_dlna) {
             start_ssdp(address, &error);
         }
@@ -314,7 +317,7 @@ bool DiscoveryService::start(const DiscoveryConfig& config, std::string* out_err
     impl_->running.store(true);
 
     std::string mdns_error;
-    const bool mdns_ok = impl_->publish_all(address, &mdns_error);
+    const bool mdns_ok = impl_->publish_all(&mdns_error);
 
     std::string ssdp_error;
     const bool ssdp_ok = impl_->start_ssdp(address, &ssdp_error);
@@ -399,7 +402,7 @@ bool DiscoveryService::set_device_name(const std::string& name, std::string* out
     }
 
     std::string error;
-    impl_->publish_all(address, &error);
+    impl_->publish_all(&error);
     if (impl_->config.enable_dlna) {
         impl_->start_ssdp(address, &error);
     }
