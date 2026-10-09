@@ -82,7 +82,7 @@ class ReceiverService : Service() {
         )
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_launcher)
+            .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle("正在接收投屏")
             .setContentText("手机可以投屏到本机；点这条通知回到界面。")
             .setContentIntent(open)
