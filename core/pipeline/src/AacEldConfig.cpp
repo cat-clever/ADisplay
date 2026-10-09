@@ -1,4 +1,4 @@
-#include "AacEldConfig.h"
+#include <adisplay/pipeline/AacEldConfig.h>
 
 namespace adisplay {
 namespace pipeline {
