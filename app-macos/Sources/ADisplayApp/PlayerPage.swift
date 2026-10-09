@@ -263,19 +263,28 @@ struct PlayerPage: View {
     // 而全屏里退出有 Esc、播放控制有播放器自带的那套，用不着它。
     @State private var isFullScreen = false
 
-    let media: EngineModel.ActiveMedia
+    /// 当前投屏的媒体地址。镜像会话没有地址，所以是可选的 ——
+    /// 走哪条路由 mirrorSessionId 决定。
+    let media: EngineModel.ActiveMedia?
 
     var body: some View {
         // 画面占满整个区域，四周不留边距 —— 投屏时用户看的就是画面，
         // 那一圈留白是白扔的像素。控制条紧贴在画面下方，所以画面本身仍然
         // 被内容包住，不需要额外的框。这一层与 Windows 端一致。
         VStack(spacing: 0) {
-            PlayerSurface(player: viewModel.player)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            if model.mirrorSessionId != nil {
+                // 镜像走这条：帧由核心直接交下来，渲染面自己解码显示，
+                // 不经过 AVPlayer —— 那是给「一条 URL」用的。
+                MirrorSurface()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                PlayerSurface(player: viewModel.player)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
 
             if !isFullScreen {
                 HStack(spacing: 12) {
-                    Text("正在接收投屏")
+                    Text(model.mirrorSessionId != nil ? "正在镜像屏幕" : "正在接收投屏")
                         .font(.headline)
                     Button("查看日志") {
                         LogWindowController.shared.show(model: model)
@@ -293,11 +302,16 @@ struct PlayerPage: View {
         }
         .frame(minWidth: 520, minHeight: 460)
         .onAppear {
-            viewModel.attach(engine: model, media: media)
+            if let media = media {
+                viewModel.attach(engine: model, media: media)
+            }
         }
         // 同一次投屏里手机换视频时 activeMedia 会变，要重新拉流。
+        // 镜像会话没有地址，这条不会触发。
         .onChange(of: media) { updated in
-            viewModel.attach(engine: model, media: updated)
+            if let updated = updated {
+                viewModel.attach(engine: model, media: updated)
+            }
         }
         .onDisappear {
             viewModel.detach()

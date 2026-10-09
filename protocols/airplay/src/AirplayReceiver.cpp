@@ -109,6 +109,11 @@ struct AirplayReceiverImpl {
     // 用 atomic 是因为它会被 HTTP 工作线程读取。
     std::atomic<int> volume{100};
 
+    // 发送端报来的画面尺寸。视频帧本身不带尺寸，由 video_report_size 单独告知，
+    // 所以在这里缓存住，跟着每一帧一起交出去。
+    std::atomic<uint32_t> video_width{0};
+    std::atomic<uint32_t> video_height{0};
+
     // 镜像状态与帧计数，只用于日志。
     std::atomic<bool> mirroring{false};
     std::atomic<uint64_t> video_frames{0};
@@ -207,7 +212,11 @@ void cb_video_process(void* cls, raop_ntp_t* ntp, video_decode_struct* data) {
 
     IAirplayListener* listener = impl->listener_snapshot();
     if (listener != nullptr) {
-        listener->on_video_frame(data->data, data->data_len, data->is_h265);
+        // 协议层给的时间戳是纳秒，这里换算成微秒对齐 C ABI 的约定。
+        const int64_t pts_us = static_cast<int64_t>(data->ntp_time_local / 1000ULL);
+        listener->on_video_frame(data->data, data->data_len, data->is_h265,
+                                 impl->video_width.load(), impl->video_height.load(),
+                                 pts_us);
     }
 }
 
@@ -251,6 +260,10 @@ void cb_video_report_size(void* cls, float* width_source, float* height_source,
     if (width_source == nullptr || height_source == nullptr) {
         return;
     }
+
+    AirplayReceiverImpl* impl = impl_of(cls);
+    impl->video_width.store(static_cast<uint32_t>(*width_source));
+    impl->video_height.store(static_cast<uint32_t>(*height_source));
 
     AD_LOG_INFO("AirPlay 镜像画面尺寸 {}x{}", static_cast<int>(*width_source),
                 static_cast<int>(*height_source));

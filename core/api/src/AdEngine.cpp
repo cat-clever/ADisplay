@@ -267,6 +267,33 @@ struct AdEngine {
         }
     }
 
+    // 镜像视频帧。和别的转发同一个模式：持锁取快照，锁外调用户代码。
+    //
+    // data 只在回调期间有效 —— 界面层要留存必须自己拷走，这一点写在 adisplay.h 里。
+    void notify_mirror_frame(uint32_t session_id, const unsigned char* data, int size,
+                             bool is_h265, uint32_t width, uint32_t height, int64_t pts_us) {
+        AdCallbacks snapshot{};
+        void* user = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            snapshot = callbacks;
+            user = user_data;
+        }
+        if (snapshot.on_mirror_frame == nullptr) {
+            return;
+        }
+        AdMirrorFrame frame{};
+        frame.struct_size = static_cast<uint32_t>(sizeof(AdMirrorFrame));
+        frame.session_id = session_id;
+        frame.data = data;
+        frame.size = size;
+        frame.is_h265 = is_h265 ? 1 : 0;
+        frame.width = width;
+        frame.height = height;
+        frame.pts_us = pts_us;
+        snapshot.on_mirror_frame(user, &frame);
+    }
+
     void notify_playback_command(uint32_t session_id, int command, int64_t value) {
         AdCallbacks snapshot{};
         void* user = nullptr;
@@ -622,16 +649,20 @@ public:
         close_session(AD_CLOSE_USER_REQUEST);
     }
 
-    void on_video_frame(const unsigned char* data, int size, bool is_h265) override {
+    void on_video_frame(const unsigned char* data, int size, bool is_h265,
+                        uint32_t width, uint32_t height, int64_t pts_us) override {
         // 帧的到达与计数由 AirplayReceiver 记日志（节流也在那边），
-        // 这里只补一件事：部分 iOS 版本不发 mirror_video_running，
-        // 上来直接送帧 —— 那就在第一帧时把会话开出来。
-        (void) data;
-        (void) size;
-        (void) is_h265;
-        if (session_id_.load() == 0) {
-            open_session(AD_STREAM_MIRROR_VIDEO);
+        // 这里只做一件事：交给界面层去解码显示。
+        //
+        // 部分 iOS 版本不发 mirror_video_running，上来直接送帧 ——
+        // 那就在第一帧时把会话开出来。
+        const uint32_t session = session_id_.load() != 0
+                                     ? session_id_.load()
+                                     : open_session(AD_STREAM_MIRROR_VIDEO);
+        if (session == 0) {
+            return;
         }
+        engine_->notify_mirror_frame(session, data, size, is_h265, width, height, pts_us);
     }
 
     void on_audio_frame(const unsigned char* data, int size, int compression_type) override {

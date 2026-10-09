@@ -67,6 +67,13 @@ enum PlaybackState: Int32 {
     case transitioning = 4
 }
 
+/// 与 adisplay.h 的 AdStreamKind 数值一一对应。
+enum StreamKind: Int32 {
+    case mirrorVideo = 0
+    case mirrorAudio = 1
+    case mediaURL = 2
+}
+
 /// 与 adisplay.h 的 AdPlaybackCommand 数值一一对应。
 enum PlaybackCommand: Int32 {
     case play = 0
@@ -100,6 +107,10 @@ final class EngineModel: ObservableObject {
     /// 手机推来的媒体地址。非 nil 表示正在投屏，界面据此整窗切到播放页。
     @Published private(set) var activeMedia: ActiveMedia?
 
+    /// 正在进行的 AirPlay 屏幕镜像会话。非 nil 表示画面由镜像流来，
+    /// 界面要切到渲染面而不是播放器 —— 两者是同一页里的两条不同路径。
+    @Published private(set) var mirrorSessionId: UInt32?
+
     /// 一次投屏会话。sessionId 要原样带回报给核心，核心靠它把状态
     /// 对应回手机上那个会话。
     struct ActiveMedia: Equatable {
@@ -119,6 +130,10 @@ final class EngineModel: ObservableObject {
     private var mediaURLCallback: (@convention(c) (UnsafeMutableRawPointer?, UInt32, UnsafePointer<CChar>?, UnsafePointer<CChar>?) -> Void)?
     private var playbackCommandCallback: (@convention(c) (UnsafeMutableRawPointer?, UInt32, Int32, Int64) -> Void)?
     private var sessionClosedCallback: (@convention(c) (UnsafeMutableRawPointer?, UInt32, Int32) -> Void)?
+    private var sessionOpenedCallback: (@convention(c) (UnsafeMutableRawPointer?, UInt32,
+                                                        UnsafePointer<AdPeerInfo>?, Int32) -> Void)?
+    private var mirrorFrameCallback: (@convention(c) (UnsafeMutableRawPointer?,
+                                                      UnsafePointer<AdMirrorFrame>?) -> Void)?
 
     deinit {
         if let handle = engine {
@@ -206,6 +221,26 @@ final class EngineModel: ObservableObject {
             }
         }
 
+        // 镜像会话与「媒体 URL」是两条不同的路：前者是持续的帧，后者是一条地址。
+        // 这里只认前者，后者交给 on_media_url。
+        sessionOpenedCallback = { rawUserData, sessionId, _, streamKind in
+            guard let rawUserData = rawUserData else { return }
+            guard streamKind == StreamKind.mirrorVideo.rawValue else { return }
+            let model = Unmanaged<EngineModel>.fromOpaque(rawUserData).takeUnretainedValue()
+            DispatchQueue.main.async {
+                model.beginMirror(sessionId: sessionId)
+            }
+        }
+
+        // 帧刻意不切回主线程：每帧跳一次会把解码队列压满、平白多出延迟。
+        // 转接处自己加锁取指针，剩下的在调用线程上做完（显示层是线程安全的）。
+        mirrorFrameCallback = { rawUserData, frame in
+            guard rawUserData != nil, let frame = frame, let data = frame.pointee.data else { return }
+            MirrorFrameRouter.shared.deliver(data,
+                                             count: Int(frame.pointee.size),
+                                             isH265: frame.pointee.is_h265 != 0)
+        }
+
         sessionClosedCallback = { rawUserData, sessionId, _ in
             guard let rawUserData = rawUserData else { return }
             let model = Unmanaged<EngineModel>.fromOpaque(rawUserData).takeUnretainedValue()
@@ -221,6 +256,8 @@ final class EngineModel: ObservableObject {
         callbacks.on_media_url = mediaURLCallback
         callbacks.on_playback_command = playbackCommandCallback
         callbacks.on_session_closed = sessionClosedCallback
+        callbacks.on_session_opened = sessionOpenedCallback
+        callbacks.on_mirror_frame = mirrorFrameCallback
 
         guard let handle = engine else { return }
         let installed = ad_engine_set_callbacks(handle, &callbacks, userData)
@@ -244,6 +281,9 @@ final class EngineModel: ObservableObject {
     func stopCasting() {
         activeMedia = nil
         playbackHandler = nil
+        // 镜像那条路没有播放器可停，停的就是「还往渲染面送帧」这件事。
+        mirrorSessionId = nil
+        MirrorFrameRouter.shared.attach(nil)
     }
 
     /// 把播放器的真实状态回报给核心。不回报的话手机看到的永远停在「起播中」。
@@ -277,7 +317,20 @@ final class EngineModel: ObservableObject {
         appendLog(level: .info, text: "手机推送媒体：\(url)")
     }
 
+    private func beginMirror(sessionId: UInt32) {
+        mirrorSessionId = sessionId
+        appendLog(level: .info, text: "iPhone 开始屏幕镜像")
+    }
+
     private func endMedia(sessionId: UInt32) {
+        // 镜像会话与媒体会话共用同一个会话号空间，两边都要按会话号收尾。
+        if mirrorSessionId == sessionId {
+            mirrorSessionId = nil
+            // 会话结束了就不该再往渲染面送帧。
+            MirrorFrameRouter.shared.attach(nil)
+            appendLog(level: .info, text: "屏幕镜像已结束")
+        }
+
         // 会话号对不上说明是上一个已经被抢占的会话在收尾，忽略即可。
         guard activeMedia?.sessionId == sessionId else { return }
         activeMedia = nil

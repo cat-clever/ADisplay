@@ -240,6 +240,35 @@ typedef struct AdPeerInfo {
  * plane_count 与 linesize 描述平面布局：NV12 是 2 个平面，I420 是 3 个，
  * BGRA8 是 1 个。linesize[i] 是第 i 个平面每行的字节数（可能大于 width）。
  */
+/*
+ * 一帧**压缩的**镜像视频（AirPlay 屏幕镜像）。
+ *
+ * 为什么与 AdVideoFrame 分开：那个是「核心解码、界面渲染」那条路用的（交出来
+ * 的是 NV12/I420 这类平面数据）。镜像走另一条更短的路 —— 直接把压缩帧交给各平台
+ * 自带的解码器（macOS 的 AVSampleBufferDisplayLayer、Windows 的 Media Foundation、
+ * 电视端的 MediaCodec）。它们硬解现成、延迟最低，也省掉在核心里养一套解码加
+ * 渲染的代码。
+ *
+ * data 是 AVCC 格式：每个 NALU 前面带 4 字节长度前缀（不是 Annex B 的起始码），
+ * 内容已经解密。指向核心持有的缓冲区，【仅在本次回调期间有效】。
+ *
+ * 第一帧通常是编码参数（H.264 的 SPS/PPS），接收端要先拿它建格式描述再喂后续帧。
+ */
+typedef struct AdMirrorFrame {
+    uint32_t    struct_size;   /* = sizeof(AdMirrorFrame) */
+    uint32_t    session_id;
+    const uint8_t* data;
+    int32_t     size;
+    /* 0 = H.264，1 = H.265。 */
+    int32_t     is_h265;
+    /* 发送端报来的画面尺寸，可能为 0（还没收到尺寸信息）。 */
+    uint32_t    width;
+    uint32_t    height;
+    /* 显示时间戳，微秒。用于定帧率；为 0 表示发送端没给。 */
+    int64_t     pts_us;
+    int         reserved;
+} AdMirrorFrame;
+
 typedef struct AdVideoFrame {
     uint32_t    struct_size;      /* = sizeof(AdVideoFrame) */
     uint32_t    session_id;
@@ -297,6 +326,10 @@ typedef struct AdCallbacks {
     /* 解码后的音视频帧。stream_kind 见 AdStreamKind。 */
     void (AD_CALL *on_video_frame)(void* user_data, const AdVideoFrame* frame);
     void (AD_CALL *on_audio_frame)(void* user_data, const AdAudioFrame* frame);
+
+    /* 镜像流的压缩视频帧（AirPlay 屏幕镜像专用，见 AdMirrorFrame）。
+       界面层把它交给平台解码器即可，核心不做解码。 */
+    void (AD_CALL *on_mirror_frame)(void* user_data, const AdMirrorFrame* frame);
 
     /* 收到媒体 URL（DLNA / AirPlay 视频推送，文档 3.2）。
        接收端据此自行拉流播放，或交给 libmpv。 */

@@ -67,8 +67,13 @@ public:
     virtual void on_video_stop() = 0;
 
     // 镜像流的视频帧。数据是 AVCC 格式的 H.264/H.265（已解密），
-    // 一帧的前 4 字节是长度前缀，不是 Annex B 的起始码。
-    virtual void on_video_frame(const unsigned char* data, int size, bool is_h265) = 0;
+    // 每个 NALU 前面是 4 字节长度前缀，不是 Annex B 的起始码。
+    //
+    // 第一帧通常是编码参数（H.264 的 SPS/PPS）—— 渲染端要先拿它建格式描述。
+    // width/height 是发送端报来的画面尺寸，可能为 0（还没收到尺寸信息）；
+    // pts_us 是显示时间戳（微秒），为 0 表示发送端没给。
+    virtual void on_video_frame(const unsigned char* data, int size, bool is_h265,
+                                uint32_t width, uint32_t height, int64_t pts_us) = 0;
 
     // 镜像流的音频帧。compression_type 是 ALAC / AAC-ELD 等的标识。
     virtual void on_audio_frame(const unsigned char* data, int size,

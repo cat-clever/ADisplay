@@ -127,6 +127,10 @@ internal struct AdCallbacks
     public IntPtr OnSessionClosed;
     public IntPtr OnVideoFrame;
     public IntPtr OnAudioFrame;
+    // 镜像流的压缩视频帧（AirPlay 屏幕镜像）。Windows 端还没接渲染，
+    // 但这个字段必须在 —— 这个结构体是手写的布局映射，少一个字段后面
+    // 全部错位，而那种错只在运行到回调时才炸，且看不出原因。
+    public IntPtr OnMirrorFrame;
     public IntPtr OnMediaUrl;
     public IntPtr OnPlaybackState;
     public IntPtr OnPlaybackCommand;

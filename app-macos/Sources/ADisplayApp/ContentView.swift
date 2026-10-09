@@ -16,10 +16,13 @@ struct ContentView: View {
 
     var body: some View {
         Group {
-            if let media = model.activeMedia {
+            if model.activeMedia != nil || model.mirrorSessionId != nil {
                 // 有投屏就把整个窗口让给画面：这是用户此刻唯一关心的事，
                 // 设置项等停止投屏后再回来。
-                PlayerPage(media: media)
+                //
+                // 镜像会话没有「媒体地址」，所以这里传的是可选的 —— 播放页
+                // 自己按 mirrorSessionId 决定走渲染面还是播放器。
+                PlayerPage(media: model.activeMedia)
                     .environmentObject(model)
             } else {
                 settingsPage
