@@ -153,7 +153,7 @@ struct ContentView: View {
 
             HStack(spacing: 12) {
                 Button("查看日志") {
-                    LogWindowController.shared.show(model: model)
+                    LogWindowController.shared.show()
                 }
                 Text("日志在单独的窗口里显示，投屏时也能一直开着。")
                     .font(.caption)

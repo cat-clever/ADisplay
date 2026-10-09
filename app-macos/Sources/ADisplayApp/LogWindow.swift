@@ -18,13 +18,13 @@ final class LogWindowController {
 
     private var window: NSWindow?
 
-    func show(model: EngineModel) {
+    func show() {
         if let existing = window {
             existing.makeKeyAndOrderFront(nil)
             return
         }
 
-        let hosting = NSHostingView(rootView: LogView().environmentObject(model))
+        let hosting = NSHostingView(rootView: LogView())
         let created = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 760, height: 460),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -43,11 +43,13 @@ final class LogWindowController {
     }
 }
 
-/// 日志窗口的内容。与设置页共用同一份 EngineModel.logs —— 两边看到的永远
-/// 是同一份，不需要各自维护，也不会出现「两处日志不一样」这种最难查的情况。
+/// 日志窗口的内容。
+///
+/// 只观察 LogStore，不观察 EngineModel —— 后者是投屏页也在观察的对象，
+/// 日志挂在它上面会让投屏页每来一行日志就重排一次（全屏切换时最明显）。
 struct LogView: View {
 
-    @EnvironmentObject private var model: EngineModel
+    @ObservedObject private var store = LogStore.shared
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -65,7 +67,7 @@ struct LogView: View {
                 }
                 .buttonStyle(.borderless)
                 .font(.caption)
-                .disabled(model.logs.isEmpty)
+                .disabled(store.lines.isEmpty)
             }
 
             ScrollViewReader { proxy in
@@ -74,9 +76,9 @@ struct LogView: View {
                     //
                     // 每行一个便于懒加载，但鼠标拖不出跨行的选区 —— 想复制中间
                     // 一段就只能一行一行来，而「把出错前后几行一起贴出去」恰好
-                    // 是看日志的人最常做的事。日志上限 500 行，一次渲染的开销
-                    // 可以接受。
-                    Text(model.logs.joined(separator: "\n"))
+                    // 是看日志的人最常做的事。行数由 LogStore 限制在 500 行，
+                    // 而且同一瞬间的多行会合并成一次发布。
+                    Text(store.lines.joined(separator: "\n"))
                         .font(.system(size: 11, design: .monospaced))
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -86,7 +88,7 @@ struct LogView: View {
                 .background(Color(nsColor: .textBackgroundColor).opacity(0.5))
                 .cornerRadius(6)
                 // 新日志进来时自动滚到底 —— 排查时盯的就是最后几行。
-                .onChange(of: model.logs.count) { _ in
+                .onChange(of: store.lines.count) { _ in
                     proxy.scrollTo("日志末尾", anchor: .bottom)
                 }
             }
@@ -98,6 +100,6 @@ struct LogView: View {
     private func copyAll() {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
-        pasteboard.setString(model.logs.joined(separator: "\n"), forType: .string)
+        pasteboard.setString(store.lines.joined(separator: "\n"), forType: .string)
     }
 }

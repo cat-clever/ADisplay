@@ -287,7 +287,7 @@ struct PlayerPage: View {
                     Text(model.mirrorSessionId != nil ? "正在镜像屏幕" : "正在接收投屏")
                         .font(.headline)
                     Button("查看日志") {
-                        LogWindowController.shared.show(model: model)
+                        LogWindowController.shared.show()
                     }
                     Button("全屏") {
                         toggleFullScreen()

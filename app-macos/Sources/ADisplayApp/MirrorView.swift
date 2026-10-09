@@ -173,6 +173,16 @@ final class MirrorRenderView: NSView, MirrorFrameSink {
     // MARK: - 收帧
 
     func enqueueMirrorFrame(_ data: UnsafePointer<UInt8>, count: Int, isH265: Bool, ptsUs: Int64) {
+        // 计一次时。它回答的是「CPU 高到底是渲染这一侧造成的，还是别处」——
+        // 每帧零点几毫秒就说明这里不是瓶颈，得往解码与合成那边看。
+        let started = DispatchTime.now().uptimeNanoseconds
+        processMirrorFrame(data, count: count, isH265: isH265, ptsUs: ptsUs)
+        processedFrames += 1
+        totalProcessNanos += DispatchTime.now().uptimeNanoseconds - started
+    }
+
+    private func processMirrorFrame(_ data: UnsafePointer<UInt8>, count: Int,
+                                    isH265: Bool, ptsUs: Int64) {
         guard count > 4 else {
             return
         }
@@ -224,6 +234,8 @@ final class MirrorRenderView: NSView, MirrorFrameSink {
     // 所以每处丢弃都要写明原因，并做限流 —— 每帧一行会把日志淹掉。
     private var enqueuedFrames = 0
     private var droppedFrames = 0
+    private var processedFrames = 0
+    private var totalProcessNanos: UInt64 = 0
     private var lastSummaryMs: Int64 = 0
     private var lastDropReason: String?
     private var loggedFormatFailure = false
@@ -262,8 +274,10 @@ final class MirrorRenderView: NSView, MirrorFrameSink {
         }
         lastSummaryMs = now
 
+        let averageMs = Double(totalProcessNanos) / Double(max(processedFrames, 1)) / 1_000_000.0
         var text = "镜像渲染：已入队 " + String(enqueuedFrames) + " 帧，丢弃 "
-                   + String(droppedFrames) + " 帧"
+                   + String(droppedFrames) + " 帧，每帧处理 "
+                   + String(format: "%.2f", averageMs) + " 毫秒"
         if droppedFrames > 0, let reason = lastDropReason {
             text += "（最近一次原因：" + reason + "）"
         }

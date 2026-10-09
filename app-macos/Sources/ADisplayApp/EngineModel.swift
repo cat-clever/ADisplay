@@ -95,7 +95,6 @@ final class EngineModel: ObservableObject {
 
     @Published private(set) var state: ServiceState = .stopped
     @Published private(set) var statusText: String = "未启动"
-    @Published private(set) var logs: [String] = []
     @Published private(set) var localAddresses: String = ""
     @Published private(set) var deviceId: String = ""
     @Published private(set) var version: String = ""
@@ -122,7 +121,6 @@ final class EngineModel: ObservableObject {
     private var playbackHandler: ((PlaybackCommand, Int64) -> Void)?
 
     private var engine: OpaquePointer?
-    private let maxLogLines = 500
 
     // 回调闭包必须由本对象持有并保活。
     private var stateCallback: (@convention(c) (UnsafeMutableRawPointer?, Int32) -> Void)?
@@ -515,13 +513,10 @@ final class EngineModel: ObservableObject {
         }
     }
 
+    /// 日志写进独立的 LogStore，而不是本类的 @Published ——
+    /// 投屏页与设置页都在观察本类，日志挂在这里会让它们每来一行就重排一次
+    /// （代价随日志量放大，全屏切换时尤其明显）。理由详见 LogStore.swift。
     private func appendLog(level: LogLevel, text: String) {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "HH:mm:ss"
-        logs.append("[\(formatter.string(from: Date()))] [\(level.label)] \(text)")
-
-        if logs.count > maxLogLines {
-            logs.removeFirst(logs.count - maxLogLines)
-        }
+        LogStore.shared.append(level: level, text: text)
     }
 }
