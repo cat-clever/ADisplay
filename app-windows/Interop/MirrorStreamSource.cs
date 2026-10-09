@@ -94,7 +94,7 @@ public sealed class MirrorStreamSource
         {
             if (!_isReadyLocked())
             {
-                if (!ParameterSets(units, isH265, out byte[]? sps, out byte[]? pps))
+                if (!ParameterSets(units, isH265, out byte[]? vps, out byte[]? sps, out byte[]? pps))
                 {
                     // 还没有编码参数，这一帧解不了。核心会给每个关键帧补齐参数集，
                     // 所以正常情况下这里最多等到下一个关键帧。
@@ -105,7 +105,7 @@ public sealed class MirrorStreamSource
                 else
                 {
                     _isH265 = isH265;
-                    BuildSourceLocked(sps!, pps!, width, height);
+                    BuildSourceLocked(vps, sps!, pps!, width, height);
                     firstFrame = true;
                 }
             }
@@ -229,7 +229,7 @@ public sealed class MirrorStreamSource
         }
     }
 
-    private void BuildSourceLocked(byte[] sps, byte[] pps, uint width, uint height)
+    private void BuildSourceLocked(byte[]? vps, byte[] sps, byte[] pps, uint width, uint height)
     {
         VideoEncodingProperties properties = _isH265
             ? VideoEncodingProperties.CreateHevc()
@@ -237,8 +237,12 @@ public sealed class MirrorStreamSource
         // 尺寸用发送端报来的（核心从镜像流的头部读出来的），不自己再解一遍 SPS。
         properties.Width = width;
         properties.Height = height;
-        // 编码器私有数据：avcC 记录。少了它，解码器不知道该怎么解。
-        properties.Properties[MpegSequenceHeader] = BuildAvcC(sps, pps);
+        // 编码器私有数据：H.264 放 avcC，H.265 放 hvcC。两者完全不兼容 ——
+        // 喂错了解码器一个 NALU 都认不出来，表现同样是「界面正常、没有画面」。
+        // 走 H.265 时 vps 一定在（上面 ParameterSets 只在一套齐了时才返回 true）。
+        properties.Properties[MpegSequenceHeader] = _isH265
+            ? BuildHvcC(vps!, sps, pps)
+            : BuildAvcC(sps, pps);
 
         VideoStreamDescriptor descriptor = new VideoStreamDescriptor(properties);
         MediaStreamSource source = new MediaStreamSource(descriptor);
@@ -400,8 +404,9 @@ public sealed class MirrorStreamSource
     }
 
     private static bool ParameterSets(List<byte[]> units, bool isH265,
-                                      out byte[]? sps, out byte[]? pps)
+                                      out byte[]? vps, out byte[]? sps, out byte[]? pps)
     {
+        vps = null;
         sps = null;
         pps = null;
         foreach (byte[] unit in units)
@@ -413,6 +418,7 @@ public sealed class MirrorStreamSource
             int type = isH265 ? (unit[0] >> 1) & 0x3F : unit[0] & 0x1F;
             if (isH265)
             {
+                if (type == 32) { vps = unit; }
                 if (type == 33) { sps = unit; }
                 if (type == 34) { pps = unit; }
             }
@@ -421,6 +427,11 @@ public sealed class MirrorStreamSource
                 if (type == 7) { sps = unit; }
                 if (type == 8) { pps = unit; }
             }
+        }
+        // H.265 要三个都齐：hvcC 里 VPS 是必需的，少一个就建不出配置记录。
+        if (isH265)
+        {
+            return vps != null && sps != null && pps != null;
         }
         return sps != null && pps != null;
     }
@@ -444,6 +455,67 @@ public sealed class MirrorStreamSource
     }
 
     /// <summary>按 avcC 的格式拼编码器私有数据。</summary>
+    // HEVCDecoderConfigurationRecord（ISO/IEC 14496-15 里的 hvcC）。
+    //
+    //   0        configurationVersion = 1
+    //   1..12    general_profile_space/tier/profile_idc、profile_compatibility_flags、
+    //            constraint_indicator_flags、level_idc —— 直接从 SPS 的第 1..12 字节照抄
+    //            （SPS 第 0 字节是 NAL 头）
+    //   13..14   min_spatial_segmentation_idc（高 4 位保留）
+    //   15       parallelismType（高 6 位保留）
+    //   16       chromaFormat（高 6 位保留）
+    //   17       bitDepthLumaMinus8（高 5 位保留）
+    //   18       bitDepthChromaMinus8（高 5 位保留）
+    //   19..20   avgFrameRate
+    //   21       constantFrameRate / numTemporalLayers / temporalIdNested / 长度前缀 4 字节
+    //   22       numOfArrays = 3
+    //   之后     每个数组：<类型 1 字节> <该类型 NALU 个数 2 字节>，每个 NALU：<长度 2 字节> <数据>
+    private static byte[] BuildHvcC(byte[] vps, byte[] sps, byte[] pps)
+    {
+        const int headerLength = 23;
+        int arraysLength = (5 + vps.Length) + (5 + sps.Length) + (5 + pps.Length);
+        byte[] record = new byte[headerLength + arraysLength];
+        int offset = 0;
+
+        record[offset++] = 0x01;   // configurationVersion
+
+        // 这一段是照抄 SPS 头部。长度不足时退到 0 —— 宁可解不出来，
+        // 也不要写出一段越界的记录。
+        for (int i = 0; i < 12; i++)
+        {
+            int source = i + 1;
+            record[offset++] = source < sps.Length ? sps[source] : (byte)0x00;
+        }
+
+        record[offset++] = 0xF0;   // min_spatial_segmentation_idc：保留 4 位 + 0
+        record[offset++] = 0x00;
+        record[offset++] = 0xFC;   // parallelismType：保留 6 位 + 0
+        record[offset++] = 0xFD;   // chromaFormat：保留 6 位 + 1（4:2:0）
+        record[offset++] = 0xF8;   // bitDepthLumaMinus8：保留 5 位 + 0（8 位）
+        record[offset++] = 0xF8;   // bitDepthChromaMinus8：同上
+        record[offset++] = 0x00;   // avgFrameRate
+        record[offset++] = 0x00;
+        // 常量帧率 0、时间层数 1、时域嵌套 1、NALU 长度前缀 4 字节
+        record[offset++] = 0x0F;
+        record[offset++] = 0x03;   // numOfArrays = 3（VPS / SPS / PPS）
+
+        offset = AppendHvcCArray(record, offset, 32, vps);
+        offset = AppendHvcCArray(record, offset, 33, sps);
+        offset = AppendHvcCArray(record, offset, 34, pps);
+        return record;
+    }
+
+    private static int AppendHvcCArray(byte[] record, int offset, int nalType, byte[] data)
+    {
+        record[offset++] = (byte)(0x80 | (nalType & 0x3F));   // array_completeness = 1
+        record[offset++] = 0x00;
+        record[offset++] = 0x01;                              // 该类型一个 NALU
+        record[offset++] = (byte)((data.Length >> 8) & 0xFF);
+        record[offset++] = (byte)(data.Length & 0xFF);
+        Array.Copy(data, 0, record, offset, data.Length);
+        return offset + data.Length;
+    }
+
     private static byte[] BuildAvcC(byte[] sps, byte[] pps)
     {
         // 01 <profile> <compat> <level> ff e1 <SPS 长度> <SPS> 01 <PPS 长度> <PPS>

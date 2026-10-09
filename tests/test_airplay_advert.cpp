@@ -45,7 +45,23 @@ std::map<std::string, std::string> to_map(const std::vector<adisplay::discovery:
 AD_TEST(airplay_features_value, "能力位取值与 UxPlay 一致") {
     // 这个字面值是真机验证过的组合。改动它等于改了 iOS 眼里我们是谁，
     // 所以把它钉死在这里，而不是让它随代码悄悄漂移。
-    AD_CHECK_EQ(airplay::features_string(), std::string("0x5A7FFEE6,0x0"));
+    AD_CHECK_EQ(airplay::features_string(), std::string("0x5A7FFEE6,0x400"));
+}
+
+// 这一条守的是一个具体故障：分辨率调高后「投屏窗口闪一下就没了」。
+//
+// 手机在分辨率较高时会改用 H.265 编码屏幕，而接收端必须先在能力位里声明支持
+// （bit 42），否则它发来的参数集包是空的，协议层认不出来就判定编解码器不支持、
+// 直接关掉会话 —— 而手机那边仍然显示正在投屏，看起来像是接收端自己掉了。
+AD_TEST(airplay_features_h265_bit, "能力位必须声明支持 H.265 镜像（bit 42）") {
+    const uint64_t bit42 = static_cast<uint64_t>(1) << 42;
+    AD_CHECK_EQ((airplay::kFeatures & bit42), bit42);
+    // 它落在高半字：42 = 32 + 10，也就是 features2 的 bit 10。
+    //
+    // 注意别拿 0x400 去低位里比对：features1 的 bit 10 本来就是 1（0x5A7FFEE6
+    // 的低 16 位是 0xFEE6），但那是个无关的能力位。同一个掩码在两个半字里
+    // 各有一个位，混起来看会得出错误结论 —— 这里只用上面那条按 bit 42 的断言。
+    AD_CHECK_EQ(airplay::kFeatures2, 0x400u);
 }
 
 AD_TEST(airplay_features_half_words, "能力位的两个半字不能写反：/info 的整数要跟 TXT 串对得上") {
@@ -56,17 +72,17 @@ AD_TEST(airplay_features_half_words, "能力位的两个半字不能写反：/in
     // 「手机能搜到、连得上、配对与 FairPlay 全部成功，然后不发流」——
     // 协议层日志里一切正常，只有逐字节比对 /info 的应答才看得出来。
     AD_CHECK_EQ(airplay::kFeatures1, 0x5A7FFEE6u);
-    AD_CHECK_EQ(airplay::kFeatures2, 0x0u);
+    AD_CHECK_EQ(airplay::kFeatures2, 0x400u);
 
     // 协议层 dnssd_get_airplay_features 返回的是 (features2 << 32) | features1。
     // 这里逐字复刻那个表达式，等于把两边钉在一起：谁改了约定都会红。
     AD_CHECK_EQ(airplay::kFeatures,
                 (static_cast<uint64_t>(airplay::kFeatures2) << 32) | airplay::kFeatures1);
     // 换成人话：0x5A7FFEE6 必须落在**低** 32 位上。
-    AD_CHECK_EQ(airplay::kFeatures, static_cast<uint64_t>(0x5A7FFEE6));
+    AD_CHECK_EQ(airplay::kFeatures, static_cast<uint64_t>(0x4005A7FFEE6));
 
     // 字符串里第一个数是低半字 —— 与协议层 snprintf("%X,%X", features1, features2) 一致。
-    AD_CHECK_EQ(airplay::features_string(), std::string("0x5A7FFEE6,0x0"));
+    AD_CHECK_EQ(airplay::features_string(), std::string("0x5A7FFEE6,0x400"));
 }
 
 AD_TEST(airplay_txt_carries_public_key, "_airplay._tcp 必须带 pk") {
@@ -77,7 +93,7 @@ AD_TEST(airplay_txt_carries_public_key, "_airplay._tcp 必须带 pk") {
     AD_CHECK(txt.find("pk") != txt.end());
     AD_CHECK_EQ(txt.at("pk"), std::string("aabbccdd"));
     AD_CHECK_EQ(txt.at("deviceid"), std::string("46:3c:97:d5:d8:3a"));
-    AD_CHECK_EQ(txt.at("features"), std::string("0x5A7FFEE6,0x0"));
+    AD_CHECK_EQ(txt.at("features"), std::string("0x5A7FFEE6,0x400"));
     // 不用 AirPlay 自带的密码：首连确认由我们自己的流程负责，
     // 两套确认叠在一起对用户是纯干扰。
     AD_CHECK_EQ(txt.at("pw"), std::string("false"));
@@ -91,7 +107,7 @@ AD_TEST(airplay_txt_without_key_stays_valid, "公钥缺失时广播仍然合法�
     // 缺公钥不是广播失败。让它照常公布、只是不发 pk —— 这样设备仍然
     // 可见，配合启动日志里的告警，能一眼看出问题在密钥而不在网络。
     AD_CHECK(txt.find("pk") == txt.end());
-    AD_CHECK_EQ(txt.at("features"), std::string("0x5A7FFEE6,0x0"));
+    AD_CHECK_EQ(txt.at("features"), std::string("0x5A7FFEE6,0x400"));
     AD_CHECK_EQ(txt.at("deviceid"), std::string("46:3c:97:d5:d8:3a"));
 }
 
@@ -111,7 +127,7 @@ AD_TEST(raop_txt_carries_required_entries, "_raop._tcp 带齐音频协商所需�
     AD_CHECK_EQ(txt.at("sf"), std::string("0x4"));
     AD_CHECK_EQ(txt.at("pw"), std::string("false"));
     // ft 是 RAOP 侧的能力位，必须与 _airplay._tcp 的 features 同一个值。
-    AD_CHECK_EQ(txt.at("ft"), std::string("0x5A7FFEE6,0x0"));
+    AD_CHECK_EQ(txt.at("ft"), std::string("0x5A7FFEE6,0x400"));
     AD_CHECK_EQ(txt.at("pk"), std::string("1234"));
 }
 

@@ -54,7 +54,14 @@ struct Advert {
 // 连得上、配对与 FairPlay 全部成功，然后不发流」—— 协议层日志里一切正常，
 // 只有把 /info 的应答逐字节对比才看得出来。我们踩过一次。
 constexpr uint32_t kFeatures1 = 0x5A7FFEE6;   // 低位：bit 27（支持传统配对）等
-constexpr uint32_t kFeatures2 = 0x0;          // 高位：不声明用不上的能力
+// 高位只有 bit 42：Supports Screen Multi Codec，也就是「支持 H.265 镜像」。
+//
+// 这个位不能省。手机在分辨率较高时会改用 H.265 编码屏幕，而位没置上时它发来的
+// 参数集包是**空的** —— 协议层认不出来，就判定编解码器不支持并直接关掉会话。
+// 现象是「投屏窗口闪一下就没了，手机上却还显示正在投屏」。协议层日志里的原话是
+//   received type 0x01 packet with no payload:
+//   this indicates non-h264 video but Airplay features bit 42 is not set
+constexpr uint32_t kFeatures2 = 0x400;
 
 // 协议层 /info 应答里那个 64 位整数。
 constexpr uint64_t kFeatures = (static_cast<uint64_t>(kFeatures2) << 32) | kFeatures1;

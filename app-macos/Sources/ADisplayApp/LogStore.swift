@@ -31,6 +31,12 @@ final class LogStore: ObservableObject {
 
     @Published private(set) var lines: [String] = []
 
+    /// 有新行发布时调用（主线程）。
+    ///
+    /// 日志窗口用它做**增量追加**：每次都重设整块文本的话，代价会随总行数增长，
+    /// 而这里真正需要的只是接上新增的那几行。没有窗口在听时它是 nil，不产生开销。
+    var onAppend: (([String]) -> Void)?
+
     private var pending: [String] = []
     private var flushScheduled = false
 
@@ -87,10 +93,14 @@ final class LogStore: ObservableObject {
         if pending.isEmpty {
             return
         }
-        lines.append(contentsOf: pending)
+        let batch = pending
         pending.removeAll(keepingCapacity: true)
+        lines.append(contentsOf: batch)
         if lines.count > LogStore.maxLines {
             lines.removeFirst(lines.count - LogStore.maxLines)
+        }
+        if let handler = onAppend {
+            handler(batch)
         }
     }
 }
