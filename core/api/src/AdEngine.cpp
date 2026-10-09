@@ -14,6 +14,8 @@
 #include <adisplay/common/Config.h>
 #include <adisplay/discovery/DiscoveryService.h>
 #include <adisplay/dlna/DlnaRenderer.h>
+#include <chrono>
+
 #include <adisplay/pipeline/AacEldConfig.h>
 #include <adisplay/pipeline/AacEldDecoder.h>
 #include <adisplay/pipeline/MediaRelay.h>
@@ -734,6 +736,15 @@ public:
     std::atomic<uint64_t> audio_frames_decoded{0};
     std::atomic<uint64_t> audio_frames_failed{0};
 
+    // 伴音这条路的耗时拆分。CPU 高了必须先知道是「解码」还是「交给平台播放」——
+    // 这两段的归属完全不同：解码在核心里，播放是回调进界面层再进系统音频。
+    // 采样工具对实时音频线程的归属不可靠（它记录的是采样命中数，不是占用），
+    // 所以这里直接计时，落在日志里。
+    std::atomic<uint64_t> audio_decode_nanos{0};
+    std::atomic<uint64_t> audio_notify_nanos{0};
+    std::atomic<uint64_t> audio_timed_frames{0};
+    std::atomic<int64_t> audio_timing_log_ms{0};
+
     void on_audio_frame(const unsigned char* data, int size, int compression_type) override {
         if (data == nullptr || size <= 0) {
             return;
@@ -749,7 +760,13 @@ public:
 
         std::vector<float> pcm;
         int frames = 0;
-        if (!audio_decoder_->decode(data, size, &pcm, &frames)) {
+        const auto decode_started = std::chrono::steady_clock::now();
+        const bool decoded = audio_decoder_->decode(data, size, &pcm, &frames);
+        const auto decode_finished = std::chrono::steady_clock::now();
+        audio_decode_nanos.fetch_add(static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(decode_finished - decode_started)
+                .count()));
+        if (!decoded) {
             // 单帧解不出来不致命：丢一帧十几毫秒，听感上是一声极短的静音，
             // 比为此中断整条流好得多。只在第一帧失败时报一次，避免刷屏。
             if (audio_frames_failed.fetch_add(1) == 0) {
@@ -768,11 +785,43 @@ public:
         // 时间戳给 0：协议层交下来的音频帧不带可达的本地时间（视频那条回调会
         // 单独给 ntp_time_local，音频这条没有）。伴音按到达顺序播即可 —— 它与
         // 画面同源，十几毫秒的帧长本身就把节奏定死了。
+        const auto notify_started = std::chrono::steady_clock::now();
         engine_->notify_audio_frame(
             session, pcm.data(), frames,
             static_cast<uint32_t>(pipeline::kAirplayMirrorAudioSampleRate),
             static_cast<uint32_t>(pipeline::kAirplayMirrorAudioChannels),
             0);
+        const auto notify_finished = std::chrono::steady_clock::now();
+        audio_notify_nanos.fetch_add(static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(notify_finished - notify_started)
+                .count()));
+        audio_timed_frames.fetch_add(1);
+        log_audio_timing_if_due();
+    }
+
+    // 每 5 秒一行：解码与「交给平台播放」各花多少毫秒。CPU 高了要看的正是这两半。
+    void log_audio_timing_if_due() {
+        // 只用来算间隔，所以取 steady_clock 自己的计数即可，不必换算成挂钟时间。
+        const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now().time_since_epoch())
+                                .count();
+        int64_t previous = audio_timing_log_ms.load();
+        if (previous != 0 && now - previous < 5000) {
+            return;
+        }
+        if (!audio_timing_log_ms.compare_exchange_strong(previous, now)) {
+            return;
+        }
+        const uint64_t counted = audio_timed_frames.load();
+        if (counted == 0) {
+            return;
+        }
+        const double decode_ms =
+            static_cast<double>(audio_decode_nanos.load()) / static_cast<double>(counted) / 1e6;
+        const double notify_ms =
+            static_cast<double>(audio_notify_nanos.load()) / static_cast<double>(counted) / 1e6;
+        AD_LOG_INFO("AirPlay 镜像伴音：{} 帧，解码每帧 {:.3f} 毫秒，交给平台每帧 {:.3f} 毫秒",
+                    counted, decode_ms, notify_ms);
     }
 
     // 解码器按需创建：不投声音的会话不该白白开一个。失败只报一次 ——
