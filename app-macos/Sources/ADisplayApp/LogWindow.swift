@@ -65,6 +65,11 @@ final class LogTextView: NSView {
     // 已从 LogStore 淘汰的内容；但也不能无限长，超过就从头裁掉一半。
     private static let maxLines = 1500
 
+    // 窗口内的留白。正文不能贴着窗口边 —— 贴着看久了很累，而且和设置页那圈
+    // 内边距对不上，两个窗口并排会显得不是一套东西。
+    private static let outerInset: CGFloat = 14
+    private static let headerHeight: CGFloat = 34
+
     private let scrollView = NSScrollView()
     private let textView = NSTextView()
     private let copyButton = NSButton()
@@ -82,6 +87,8 @@ final class LogTextView: NSView {
         textView.backgroundColor = NSColor.textBackgroundColor
         textView.textColor = NSColor.labelColor
         textView.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        // 正文再留一层内边距，别直接顶着边框 —— NSTextView 默认是 0。
+        textView.textContainerInset = NSSize(width: 10, height: 10)
         // 长行不折行：日志一行往往很长，折了反而更难读，横着滚更好。
         textView.isHorizontallyResizable = true
         textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude,
@@ -97,6 +104,11 @@ final class LogTextView: NSView {
         scrollView.borderType = .noBorder
         scrollView.drawsBackground = true
         scrollView.backgroundColor = NSColor.textBackgroundColor
+        // 圆角加一圈细描边，和设置页里那些块是同一种观感。
+        scrollView.wantsLayer = true
+        scrollView.layer?.cornerRadius = 6
+        scrollView.layer?.borderWidth = 1
+        scrollView.layer?.masksToBounds = true
         addSubview(scrollView)
 
         copyButton.title = "复制全部"
@@ -131,10 +143,26 @@ final class LogTextView: NSView {
 
     override func layout() {
         super.layout()
-        let headerHeight: CGFloat = 36
-        copyButton.frame = NSRect(x: 10, y: bounds.height - headerHeight + 7, width: 90, height: 22)
-        scrollView.frame = NSRect(x: 0, y: 0, width: bounds.width,
-                                  height: max(0, bounds.height - headerHeight))
+        let inset = LogTextView.outerInset
+        copyButton.frame = NSRect(x: inset,
+                                  y: bounds.height - LogTextView.headerHeight + 6,
+                                  width: 96, height: 22)
+        // 正文不铺满整块：四周留出与设置页一致的留白。
+        scrollView.frame = NSRect(x: inset,
+                                  y: inset,
+                                  width: max(0, bounds.width - inset * 2),
+                                  height: max(0, bounds.height - LogTextView.headerHeight - inset))
+        updateBorderColor()
+    }
+
+    // 描边要跟着外观走：写死一个颜色的话，切到深色就成了一条突兀的深线。
+    private func updateBorderColor() {
+        scrollView.layer?.borderColor = NSColor.separatorColor.cgColor
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        updateBorderColor()
     }
 
     override func setFrameSize(_ newSize: NSSize) {
