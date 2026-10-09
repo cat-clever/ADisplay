@@ -121,7 +121,16 @@ struct DiscoveryService::Impl {
             info.instance_name = instance_name;
             info.port = port;
             info.txt = std::move(txt);
-            info.host_name = address;   // 让 A 记录指向我们选定的网卡
+            // 这里刻意不设 host_name。
+            //
+            // 原来填的是 address，也就是本机 IP（如 192.168.137.167）。那是错的：
+            // 这个字段要的是域名，DNS-SD 拿它去发 SRV/A 记录，填 IP 不会报错，
+            // 但记录会指向一个解析不出地址的名字 —— 手机能搜到设备却连不上，
+            // 而日志里一切正常。DLNA 之所以没事，是因为 SSDP 直接给 IP。
+            //
+            // 留空交给系统更对：系统公布本机主机名，并为所有网卡发地址记录，
+            // 于是处在哪个网段的设备都能连上。这台机器同时挂在两个网段上时，
+            // 这一点尤其要紧。
 
             std::string error;
             if (!publisher->publish(info, &error)) {

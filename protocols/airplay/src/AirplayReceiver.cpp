@@ -624,9 +624,15 @@ bool AirplayReceiver::start(const AirplayConfig& config, std::string* out_error)
     }
 
     raop_set_log_callback(raop, &cb_log, nullptr);
-    // INFO 级别：它记的是配对、握手、流协商每一步的结果，正是排查需要的。
-    // 逐帧的数据要 DEBUG_DATA 才打，那个量级不能常开。
-    raop_set_log_level(raop, LOGGER_INFO);
+    // DEBUG 级别。
+    //
+    // 协议层把「收到哪个请求、走了哪条分支」记在 DEBUG 上，INFO 只看得到错误。
+    // 而 AirPlay 失败的典型样子恰恰是「iPhone 那边转圈然后放弃」—— 接收端这边
+    // 一句错误都没有，因为请求可能压根没到、或者走到了某个静默返回的分支。
+    // 排查「能搜到、连不上」时唯一能依靠的就是这一层。
+    //
+    // 逐帧的数据要 DEBUG_DATA（它还高一级），那个量级不能开。
+    raop_set_log_level(raop, LOGGER_DEBUG);
 
     // nohold=1：允许新设备抢占已有连接。
     //

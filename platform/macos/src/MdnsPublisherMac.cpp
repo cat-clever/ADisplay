@@ -24,6 +24,32 @@ constexpr std::size_t kMaxTxtValueLength = 255;
 // 用阻塞式 select 的话，注销要等到下一次有报文进来才会执行。
 constexpr int kSelectTimeoutUsec = 200 * 1000;
 
+// 形如 IPv4 / IPv6 字面量？只用于挡住「把 IP 当主机名」这一种误用，
+// 所以判得宽松些也够：宁可漏判（那就照传，行为退回到从前），
+// 不要误判把合法域名挡掉。
+bool looks_like_ip_literal(const std::string& text) {
+    if (text.empty()) {
+        return false;
+    }
+
+    bool only_digits_and_dots = true;
+    bool only_hex_and_colons = true;
+    for (const char raw : text) {
+        const unsigned char c = static_cast<unsigned char>(raw);
+        const bool digit = (c >= '0' && c <= '9');
+        const bool hex = digit || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+        if (!digit && raw != '.') {
+            only_digits_and_dots = false;
+        }
+        if (!hex && raw != ':') {
+            only_hex_and_colons = false;
+        }
+    }
+
+    // "1.2.3.4" 这类；以及含冒号的 IPv6 字面量（域名里不会有冒号）。
+    return only_digits_and_dots || (only_hex_and_colons && text.find(':') != std::string::npos);
+}
+
 class MdnsPublisherMac final : public IMdnsPublisher {
 public:
     MdnsPublisherMac() = default;
@@ -70,7 +96,18 @@ public:
         }
 
         DNSServiceRef ref = nullptr;
-        const char* host = info.host_name.empty() ? nullptr : info.host_name.c_str();
+        // host 只在看起来是域名时才传下去。
+        //
+        // 传 IP 进来不会报错，但注册出的 SRV 记录会指向一个解析不出地址的名字，
+        // 表现是「手机能搜到、却永远连不上」，而日志里一切正常 —— 极难查，
+        // 我们踩过一次。所以这里直接挡掉并说出来，而不是照传。
+        const bool usable_host =
+            !info.host_name.empty() && !looks_like_ip_literal(info.host_name);
+        if (!info.host_name.empty() && !usable_host) {
+            AD_LOG_WARN("mDNS 主机名填的是 IP（{}），已忽略 —— 这个字段要的是域名；"
+                        "本次改为由系统公布本机主机名", info.host_name);
+        }
+        const char* host = usable_host ? info.host_name.c_str() : nullptr;
 
         const DNSServiceErrorType error = DNSServiceRegister(
             &ref,
@@ -191,6 +228,8 @@ private:
     std::atomic<bool> running_{false};
     std::thread worker_;
 };
+
+
 
 }  // namespace
 
