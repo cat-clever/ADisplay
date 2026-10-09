@@ -14,6 +14,8 @@
 #include <adisplay/common/Config.h>
 #include <adisplay/discovery/DiscoveryService.h>
 #include <adisplay/dlna/DlnaRenderer.h>
+#include <adisplay/pipeline/AacEldConfig.h>
+#include <adisplay/pipeline/AacEldDecoder.h>
 #include <adisplay/pipeline/MediaRelay.h>
 #include <adisplay/common/DeviceIdentity.h>
 #include <adisplay/common/DeviceName.h>
@@ -97,6 +99,10 @@ bool is_valid_log_level(int level) {
     return level >= static_cast<int>(common::LogLevel::Trace) &&
            level <= static_cast<int>(common::LogLevel::Off);
 }
+
+// 协议层用 ct 标记音频编码。8 是 AAC(-ELD)，也就是屏幕镜像的伴音；
+// 2 是 ALAC，走的是音频模式那条路。
+constexpr int kAacEldCompressionType = 8;
 
 bool is_valid_quality_preset(int preset) {
     return preset >= static_cast<int>(AD_QUALITY_SMOOTH) &&
@@ -318,6 +324,37 @@ struct AdEngine {
         frame.height = height;
         frame.pts_us = pts_us;
         snapshot.on_mirror_frame(user, &frame);
+    }
+
+    // 镜像伴音。与视频是同一路 AirPlay 会话的两条流，所以共用会话号 ——
+    // 界面层据此知道这段声音属于哪块画面。
+    //
+    // data 是**解码后**的交错 float32（LRLRLR…）。解码在核心里做是有意的：
+    // AAC-ELD 在 Windows 的 Media Foundation 与 Android 的 MediaCodec 上都不
+    // 保证支持，而核心已经有 FFmpeg —— 一份实现三端通用。这也正是 AdAudioFrame
+    // 从一开始就按交错 float32 定义的原因。
+    void notify_audio_frame(uint32_t session_id, const float* data, int frame_count,
+                            uint32_t sample_rate, uint32_t channels, int64_t pts_us) {
+        AdCallbacks snapshot{};
+        void* user = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            snapshot = callbacks;
+            user = user_data;
+        }
+        if (snapshot.on_audio_frame == nullptr) {
+            return;
+        }
+        AdAudioFrame frame{};
+        frame.struct_size = static_cast<uint32_t>(sizeof(AdAudioFrame));
+        frame.session_id = session_id;
+        frame.pts_us = pts_us;
+        frame.sample_rate = sample_rate;
+        frame.channels = channels;
+        frame.frame_count = static_cast<uint32_t>(frame_count);
+        frame.data = data;
+        frame.reserved = 0;
+        snapshot.on_audio_frame(user, &frame);
     }
 
     void notify_playback_command(uint32_t session_id, int command, int64_t value) {
@@ -691,11 +728,72 @@ public:
         engine_->notify_mirror_frame(session, data, size, is_h265, width, height, pts_us);
     }
 
+    // 镜像伴音（AAC-ELD）的解码器，以及几个只用于日志的标记。
+    std::unique_ptr<pipeline::AacEldDecoder> audio_decoder_;
+    std::atomic<bool> audio_decoder_failed{false};
+    std::atomic<uint64_t> audio_frames_decoded{0};
+    std::atomic<uint64_t> audio_frames_failed{0};
+
     void on_audio_frame(const unsigned char* data, int size, int compression_type) override {
-        // 镜像的伴音与视频同属一路会话，帧本身由渲染层处理，这里无需额外动作。
-        (void) data;
-        (void) size;
-        (void) compression_type;
+        if (data == nullptr || size <= 0) {
+            return;
+        }
+        // 协议层用 ct 标记音频编码：8 是 AAC(-ELD)，2 是 ALAC（音频模式那条路）。
+        // 屏幕镜像的伴音只有 AAC-ELD 这一种，其余的这里不管。
+        if (compression_type != kAacEldCompressionType) {
+            return;
+        }
+        if (audio_decoder_failed.load() || !ensure_audio_decoder()) {
+            return;
+        }
+
+        std::vector<float> pcm;
+        int frames = 0;
+        if (!audio_decoder_->decode(data, size, &pcm, &frames)) {
+            // 单帧解不出来不致命：丢一帧十几毫秒，听感上是一声极短的静音，
+            // 比为此中断整条流好得多。只在第一帧失败时报一次，避免刷屏。
+            if (audio_frames_failed.fetch_add(1) == 0) {
+                AD_LOG_WARN("AirPlay 镜像伴音：首帧解码失败，继续尝试后续帧");
+            }
+            return;
+        }
+        audio_frames_decoded.fetch_add(1);
+
+        const uint32_t session = session_id_.load() != 0
+                                     ? session_id_.load()
+                                     : open_session(AD_STREAM_MIRROR_VIDEO);
+        if (session == 0) {
+            return;
+        }
+        // 时间戳给 0：协议层交下来的音频帧不带可达的本地时间（视频那条回调会
+        // 单独给 ntp_time_local，音频这条没有）。伴音按到达顺序播即可 —— 它与
+        // 画面同源，十几毫秒的帧长本身就把节奏定死了。
+        engine_->notify_audio_frame(
+            session, pcm.data(), frames,
+            static_cast<uint32_t>(pipeline::kAirplayMirrorAudioSampleRate),
+            static_cast<uint32_t>(pipeline::kAirplayMirrorAudioChannels),
+            0);
+    }
+
+    // 解码器按需创建：不投声音的会话不该白白开一个。失败只报一次 ——
+    // 每帧都报会把日志刷满，而原因始终是同一个。
+    bool ensure_audio_decoder() {
+        if (audio_decoder_ != nullptr) {
+            return true;
+        }
+        auto decoder = std::make_unique<pipeline::AacEldDecoder>();
+        std::string error;
+        if (!decoder->init(pipeline::kAirplayMirrorAudioSampleRate,
+                           pipeline::kAirplayMirrorAudioChannels, &error)) {
+            AD_LOG_WARN("AirPlay 镜像伴音：解码器起不来 —— {}（这一路会没有声音）", error);
+            audio_decoder_failed.store(true);
+            return false;
+        }
+        AD_LOG_INFO("AirPlay 镜像伴音：解码器已就绪（AAC-ELD {} Hz / {} 声道）",
+                    pipeline::kAirplayMirrorAudioSampleRate,
+                    pipeline::kAirplayMirrorAudioChannels);
+        audio_decoder_ = std::move(decoder);
+        return true;
     }
 
     double on_volume_requested() override {

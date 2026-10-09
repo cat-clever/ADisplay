@@ -19,6 +19,7 @@ set(ADISPLAY_TEST_SOURCES
     test_pipeline_hls_playlist.cpp
     test_pipeline_media_relay.cpp
     test_pipeline_http_fetch.cpp
+    test_pipeline_aac_eld.cpp
 )
 
 foreach(test_source IN LISTS ADISPLAY_TEST_SOURCES)

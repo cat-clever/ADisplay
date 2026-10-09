@@ -27,6 +27,9 @@ if(ADISPLAY_PIPELINE_WITH_REMUX)
         src/HttpFetch.cpp
         # TS 分片 → fMP4 的换封装。只依赖 libavformat。
         src/Mp4Remuxer.cpp
+        # AAC-ELD 解码（AirPlay 镜像伴音）。用 FFmpeg 是因为 AAC-ELD 在
+        # Media Foundation 与 MediaCodec 上都不保证支持，而这里一份实现三端通用。
+        src/AacEldDecoder.cpp
         # 一次中转会话：分片的按需生产与缓存，以及那套并发模型。
         src/RelaySession.cpp
         # 本地 HTTP 中转服务与对外接口。
@@ -43,6 +46,9 @@ add_library(adisplay_pipeline STATIC
     # 本地 HLS 播放列表的改写。同样是纯函数，必须能被单元测试直接覆盖。
     # Android 上也要跑单测，所以不放上面的条件里。
     src/HlsPlaylist.cpp
+    # AAC-ELD 的 AudioSpecificConfig。不依赖 FFmpeg，所以同样不放上面的条件里 ——
+    # 它最容易写错（位序错了只表现为「没有声音」），必须能在本机直接跑单测。
+    src/AacEldConfig.cpp
     ${ADISPLAY_PIPELINE_REMUX_SOURCES}
 )
 

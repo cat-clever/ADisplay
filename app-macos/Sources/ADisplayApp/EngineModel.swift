@@ -134,6 +134,8 @@ final class EngineModel: ObservableObject {
                                                         UnsafePointer<AdPeerInfo>?, Int32) -> Void)?
     private var mirrorFrameCallback: (@convention(c) (UnsafeMutableRawPointer?,
                                                       UnsafePointer<AdMirrorFrame>?) -> Void)?
+    private var audioFrameCallback: (@convention(c) (UnsafeMutableRawPointer?,
+                                                     UnsafePointer<AdAudioFrame>?) -> Void)?
 
     deinit {
         if let handle = engine {
@@ -235,6 +237,22 @@ final class EngineModel: ObservableObject {
 
         // 帧刻意不切回主线程：每帧跳一次会把解码队列压满、平白多出延迟。
         // 转接处自己加锁取指针，剩下的在调用线程上做完（显示层是线程安全的）。
+        // 镜像伴音。与视频同理不切主线程 —— 音频帧更经不起排队，一跳主线程就
+        // 可能晚几十毫秒，听感上是断续。核心里已经解成 PCM，这里直接交给播放端。
+        audioFrameCallback = { _, frame in
+            guard let frame = frame, let data = frame.pointee.data else { return }
+            let channels = Int(frame.pointee.channels)
+            let frames = Int(frame.pointee.frame_count)
+            if channels <= 0 || frames <= 0 {
+                return
+            }
+            let rate = Double(frame.pointee.sample_rate)
+            if rate > 0 {
+                MirrorAudioPlayer.shared.start(sampleRate: rate, channels: channels)
+            }
+            MirrorAudioPlayer.shared.enqueue(interleaved: data, frameCount: frames, channels: channels)
+        }
+
         mirrorFrameCallback = { rawUserData, frame in
             guard rawUserData != nil, let frame = frame, let data = frame.pointee.data else { return }
             MirrorFrameRouter.shared.deliver(data,
@@ -260,6 +278,7 @@ final class EngineModel: ObservableObject {
         callbacks.on_session_closed = sessionClosedCallback
         callbacks.on_session_opened = sessionOpenedCallback
         callbacks.on_mirror_frame = mirrorFrameCallback
+        callbacks.on_audio_frame = audioFrameCallback
 
         // 渲染面的日志从这条路进日志窗口。黑屏那类故障全部发生在渲染面内部，
         // 那里没有别的通道能把「为什么这一帧没显示」说出来。
@@ -340,8 +359,9 @@ final class EngineModel: ObservableObject {
         // 镜像会话与媒体会话共用同一个会话号空间，两边都要按会话号收尾。
         if mirrorSessionId == sessionId {
             mirrorSessionId = nil
-            // 会话结束了就不该再往渲染面送帧。
+            // 会话结束了就不该再往渲染面送帧，也不该继续放声音。
             MirrorFrameRouter.shared.attach(nil)
+            MirrorAudioPlayer.shared.stop()
             // 暂存里可能是流开头的参数集与关键帧 —— 但它们属于刚结束的这个会话，
             // 下一个会话有自己的一套，混着喂解码器会出错。
             MirrorFrameRouter.shared.resetPending()
