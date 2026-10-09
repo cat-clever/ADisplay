@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
   "name": "adisplay",
-  "version": "0.5.8",
+  "version": "0.5.9",
   "description": "跨平台投屏接收端：AirPlay / DLNA 接收，支持 Windows、macOS、Android TV",
   "homepage": "https://github.com/cat-clever/ADisplay",
   "license": "AGPL-3.0-or-later",
