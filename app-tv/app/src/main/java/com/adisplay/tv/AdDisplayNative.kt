@@ -127,6 +127,15 @@ object AdDisplayNative {
     external fun nativeSetDeviceName(handle: Long, name: String): Int
 
     /**
+     * AirPlay 广播所需的一切（若干行 key=value，见 AirplayAdvert.h）。
+     *
+     * Android 上发布 mDNS 只能用 Java 层的 NsdManager，核心够不着，所以广播
+     * 内容要由这里取出来、由 Kotlin 去注册。必须在服务启动之后调用 —— 端口
+     * 那时才确定。
+     */
+    external fun nativeGetAirplayAdvert(handle: Long): String
+
+    /**
      * 校验一个设备名称。[返回空串表示合法][不合法时返回原因]。
      *
      * 不需要句柄：它是一条纯函数（字符数、控制字符这些规则），与引擎无关。

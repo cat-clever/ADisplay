@@ -77,4 +77,22 @@ std::vector<TxtRecord> raop_txt(const Advert& advert);
 // 而 mDNS 由各平台系统 API 负责编码，所以只有协议层用得到它。
 std::string txt_wire(const std::vector<TxtRecord>& records);
 
+// 给「自己发不了 mDNS」的平台准备的一份广播描述。
+//
+// 为什么需要它：Android 上发布 mDNS 只能用 Java 层的 NsdManager，核心够不着
+// （见 platform/android/src/MdnsPublisherAndroid.cpp），所以广播内容必须跨过
+// C ABI 交给界面层，由它去注册。
+//
+// 格式刻意做成几行 key=value：界面层按行切开、把十六进制解回字节即可，
+// 不需要 JSON 解析器。TXT 的值**一律**十六进制 —— 里面既有纯文本（am、vs），
+// 也有二进制（pk 是设备公钥），统一编码省得界面层分辨，也不会因为某个字节
+// 恰好是换行把格式拆坏。名字是 UTF-8 原文（核心的名称校验已经挡掉了控制字符）。
+//
+//   port=7001
+//   airplay_name=<显示名>
+//   raop_name=<deviceid>@<显示名>
+//   airplay.<TXT 键>=<值的十六进制>
+//   raop.<TXT 键>=<值的十六进制>
+std::string advert_for_platform(const Advert& advert, uint16_t port);
+
 }  // namespace adisplay::discovery::airplay

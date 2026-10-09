@@ -193,6 +193,15 @@ class EngineModel(context: Context) {
 
     private val appContext = context.applicationContext
 
+    /**
+     * mDNS 广播。核心在桌面上自己发（macOS 用系统 Bonjour、Windows 用 DNS-SD），
+     * Android 上发不了 —— NsdManager 只在 Java 层，NDK 里没有等价接口。所以这条
+     * 路由界面层接手，而**内容**仍由核心给（见 MdnsAdvertiser 的文件头）。
+     */
+    private val mdns = MdnsAdvertiser(appContext) { message ->
+        post { appendLog(LogLevel.INFO, message) }
+    }
+
     /** 日志行，格式 "[HH:mm:ss] [LEVEL] 正文"，与另外两端一致。 */
     val logs = mutableStateListOf<String>()
 
@@ -412,7 +421,12 @@ class EngineModel(context: Context) {
             appendLog(LogLevel.ERROR, "启动失败：" + AdResult.describe(result))
             serviceEnabled = false
             releaseMulticastLock()
+            return
         }
+
+        // 服务起来了才广播：端口这时才确定，而且「广播了却没东西应答」比
+        // 「没广播」更难查 —— 手机上看得到设备、点下去毫无反应。
+        mdns.publish(AdDisplayNative.nativeGetAirplayAdvert(handle))
     }
 
     /** 关闭接收服务。未开启时调用是安全的空操作。 */
@@ -426,6 +440,9 @@ class EngineModel(context: Context) {
             return
         }
         serviceEnabled = false
+        // 先撤广播再停服务：反过来的话，撤下之前的那一小段时间里手机看到的
+        // 是一个已经不应答的设备。
+        mdns.withdraw()
         AdDisplayNative.nativeStop(handle)
         releaseMulticastLock()
     }

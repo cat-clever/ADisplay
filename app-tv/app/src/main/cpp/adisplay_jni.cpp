@@ -562,6 +562,26 @@ Java_com_adisplay_tv_AdDisplayNative_nativeSetDeviceName(JNIEnv* env, jobject /*
 }
 
 extern "C" JNIEXPORT jstring JNICALL
+Java_com_adisplay_tv_AdDisplayNative_nativeGetAirplayAdvert(JNIEnv* env, jobject /*thiz*/,
+                                                            jlong handle) {
+    AdEngine* engine = reinterpret_cast<AdEngine*>(handle);
+    if (engine == nullptr) {
+        return env->NewStringUTF("");
+    }
+    // 8 KB 绰绰有余：里面是几十行文本加若干条十六进制。
+    char buffer[8192] = {0};
+    size_t length = 0;
+    const AdResult result =
+        ad_engine_get_airplay_advert(engine, buffer, sizeof(buffer), &length);
+    if (result != AD_OK) {
+        __android_log_print(ANDROID_LOG_WARN, kLogTag, "取 AirPlay 广播数据失败：%d",
+                            static_cast<int>(result));
+        return env->NewStringUTF("");
+    }
+    return env->NewStringUTF(buffer);
+}
+
+extern "C" JNIEXPORT jstring JNICALL
 Java_com_adisplay_tv_AdDisplayNative_nativeValidateDeviceName(JNIEnv* env, jobject /*thiz*/,
                                                               jstring name) {
     // 校验不需要引擎句柄：它是一条纯函数，判的是字符数、控制字符这些规则。

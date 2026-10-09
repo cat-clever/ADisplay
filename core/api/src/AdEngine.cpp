@@ -16,6 +16,7 @@
 #include <adisplay/dlna/DlnaRenderer.h>
 #include <chrono>
 
+#include <adisplay/discovery/AirplayAdvert.h>
 #include <adisplay/pipeline/AacEldConfig.h>
 #include <adisplay/pipeline/AacEldDecoder.h>
 #include <adisplay/pipeline/MediaRelay.h>
@@ -1730,6 +1731,37 @@ AdResult AD_CALL ad_engine_set_quality_preset(AdEngine* engine, int preset) {
     AD_LOG_INFO("画质档位已切换：建议显示尺寸 {}x{}（手机下次连接时生效）",
                 suggestion.width, suggestion.height);
     return engine->persist();
+}
+
+AdResult AD_CALL ad_engine_get_airplay_advert(AdEngine* engine, char* buffer,
+                                             size_t buffer_size, size_t* out_length) {
+    if (engine == nullptr) {
+        return AD_ERR_NOT_INITIALIZED;
+    }
+    if (buffer == nullptr || out_length == nullptr) {
+        return AD_ERR_INVALID_ARG;
+    }
+
+    std::string text;
+    {
+        std::lock_guard<std::mutex> lock(engine->mutex);
+        if (!engine->airplay_receiver) {
+            // 还没启动，端口无从谈起。界面层应当先开服务再要这份数据。
+            return AD_ERR_NOT_INITIALIZED;
+        }
+        // 型号、版本、设备 id 全部取自**运行中的接收端** —— 与 ad_engine_start
+        // 里构造广播时用的是同一批来源。设备 id 尤其要紧：必须是协议层规范化
+        // 之后的那一份（小写、冒号分隔），换一种写法 iOS 会当成两台设备。
+        adisplay::discovery::airplay::Advert advert;
+        advert.name = engine->device_name;
+        advert.device_id = engine->airplay_receiver->device_id();
+        advert.public_key = engine->airplay_public_key;
+        advert.model = engine->airplay_receiver->model();
+        advert.srcvers = engine->airplay_receiver->srcvers();
+        text = adisplay::discovery::airplay::advert_for_platform(
+            advert, engine->airplay_receiver->port());
+    }
+    return copy_to_buffer(text, buffer, buffer_size, out_length);
 }
 
 AdResult AD_CALL ad_engine_get_quality_preset(AdEngine* engine, int* out_preset) {

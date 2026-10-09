@@ -182,6 +182,51 @@ AD_TEST(raop_txt_wire_round_trips, "整条 RAOP 记录能从线上格式原样�
     AD_CHECK_EQ(parsed.at("am"), std::string("AppleTV3,2"));
 }
 
+// 这个格式是**跨语言的契约**：Android 侧（Kotlin）按行切开、把十六进制解回
+// 字节，再交给 NsdManager。格式一变两边就对不上，而症状是「iPhone 里看不到
+// 这台设备」—— 和广播内容出错时一样难查。
+AD_TEST(airplay_advert_for_platform, "给平台的广播描述：行格式稳定，TXT 值一律十六进制") {
+    airplay::Advert advert = make_advert("abcd");
+    const std::string text = airplay::advert_for_platform(advert, 7001);
+
+    // 按行切开 —— 与 Android 侧的做法一致。
+    std::vector<std::string> lines;
+    std::string current;
+    for (const char c : text) {
+        if (c == '\n') {
+            lines.push_back(current);
+            current.clear();
+        } else {
+            current.push_back(c);
+        }
+    }
+    if (!current.empty()) {
+        lines.push_back(current);
+    }
+    AD_CHECK(lines.size() >= 3);
+    if (lines.size() < 3) {
+        return;
+    }
+
+    AD_CHECK_EQ(lines[0], std::string("port=7001"));
+    // 名字是 UTF-8 原文，不做转义 —— 中文设备名要能原样过去。
+    AD_CHECK_EQ(lines[1], std::string("airplay_name=我的电脑"));
+    // RAOP 的实例名必须是 <deviceid>@<名字>：iOS 靠它把音频流关联回 AirPlay
+    // 那条记录，少了 @ 或大小写不同就会当成两台设备。
+    AD_CHECK_EQ(lines[2], std::string("raop_name=46:3c:97:d5:d8:3a@我的电脑"));
+
+    // TXT 的值全部十六进制：pk 是设备公钥（二进制），am/vs 是纯文本，
+    // 统一编码省得界面层分辨。
+    const std::string pk_line = "airplay.pk=" + std::string("61626364");
+    bool found_pk = false;
+    for (const std::string& line : lines) {
+        if (line == pk_line) {
+            found_pk = true;
+        }
+    }
+    AD_CHECK(found_pk);
+}
+
 int main() {
     return adtest::run_all("AirPlay 广播内容测试");
 }

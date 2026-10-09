@@ -476,6 +476,23 @@ AD_API AdResult AD_CALL ad_engine_get_device_name(AdEngine* engine,
 
 /* 切换画质档位，见 AdQualityPreset。 */
 AD_API AdResult AD_CALL ad_engine_set_quality_preset(AdEngine* engine, int preset);
+/* AirPlay 广播所需的一切（文档 3.1），供「自己发不了 mDNS 的平台」使用。
+ *
+ * 为什么要有它：Android 上发布 mDNS 只能用 Java 层的 NsdManager，核心够不着
+ * （见 platform/android/src/MdnsPublisherAndroid.cpp），所以广播内容必须跨过
+ * ABI 交给界面层，由它去注册。桌面上这件事由核心自己做，不需要这个接口。
+ *
+ * 输出是若干行 key=value（UTF-8），格式见 AirplayAdvert.h 的 advert_for_platform：
+ *
+ *     port=7001
+ *     airplay_name=<显示名>
+ *     raop_name=<deviceid>@<显示名>
+ *     airplay.<TXT 键>=<值的十六进制>
+ *     raop.<TXT 键>=<值的十六进制>
+ *
+ * 必须在服务启动之后调用 —— 端口那时才确定。缓冲区不够时返回 AD_ERR_BUFFER_TOO_SMALL。 */
+AD_API AdResult AD_CALL ad_engine_get_airplay_advert(AdEngine* engine, char* buffer,
+                                                    size_t buffer_size, size_t* out_length);
 /* 读取当前档位（取值见 AdQualityPreset）。界面启动时用它把选择器拨到已保存的那一档。 */
 AD_API AdResult AD_CALL ad_engine_get_quality_preset(AdEngine* engine, int* out_preset);
 

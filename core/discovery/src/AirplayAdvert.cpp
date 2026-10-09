@@ -99,6 +99,44 @@ std::vector<TxtRecord> raop_txt(const Advert& advert) {
     return records;
 }
 
+namespace {
+
+std::string to_hex(const std::string& value) {
+    static const char* kDigits = "0123456789abcdef";
+    std::string out;
+    out.reserve(value.size() * 2);
+    for (const unsigned char byte : value) {
+        out.push_back(kDigits[(byte >> 4) & 0x0F]);
+        out.push_back(kDigits[byte & 0x0F]);
+    }
+    return out;
+}
+
+void append_records(std::string* out, const char* prefix,
+                    const std::vector<TxtRecord>& records) {
+    for (const TxtRecord& record : records) {
+        *out += prefix;
+        *out += record.key;
+        *out += "=";
+        *out += to_hex(record.value);
+        *out += "\n";
+    }
+}
+
+}  // namespace
+
+std::string advert_for_platform(const Advert& advert, uint16_t port) {
+    std::string out;
+    out += "port=" + std::to_string(port) + "\n";
+    out += "airplay_name=" + advert.name + "\n";
+    // RAOP 的实例名有固定格式，iOS 靠它把音频流关联回 _airplay._tcp 那条记录，
+    // 少了 @ 或大小写不同就会当成两台设备。
+    out += "raop_name=" + advert.device_id + "@" + advert.name + "\n";
+    append_records(&out, "airplay.", airplay_txt(advert));
+    append_records(&out, "raop.", raop_txt(advert));
+    return out;
+}
+
 std::string txt_wire(const std::vector<TxtRecord>& records) {
     std::string wire;
     for (const TxtRecord& record : records) {
