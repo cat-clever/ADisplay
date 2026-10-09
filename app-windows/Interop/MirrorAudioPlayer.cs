@@ -15,9 +15,12 @@ using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
+using Windows.Foundation;
 using Windows.Media;
 using Windows.Media.Audio;
 using Windows.Media.MediaProperties;
+// AudioRenderCategory 不在 Windows.Media 里，而在 Windows.Media.Render。
+using Windows.Media.Render;
 
 namespace ADisplay.Windows.Interop;
 
