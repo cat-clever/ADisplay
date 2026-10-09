@@ -42,13 +42,22 @@ struct Advert {
     std::string srcvers = "220.68";
 };
 
-// 能力位（features）。
+// 能力位（features），拆成两个 32 位半字。
 //
-// 与 UxPlay 一致。其中 bit 27（0x08000000）表示「支持传统配对」，关掉它
-// 部分 iOS 版本会连「屏幕镜像」入口都不给。第二位 0x0 表示不声明
-// AirPlay 2 多房间等我们用不上的能力 —— 声明了做不到的能力，
-// 手机的连接流程会走到我们接不住的分支上。
-constexpr uint64_t kFeatures = (0x5A7FFEE6ULL << 32) | 0x0ULL;
+// 约定与协议层一致，而且**半字的高低顺序不能弄反**：
+//   features1 是**低** 32 位，features2 是**高** 32 位，
+//   /info 里那个 64 位整数 = (features2 << 32) | features1。
+// mDNS 的 TXT 字符串则按「features1,features2」的顺序拼。
+//
+// 写反的后果非常隐蔽：TXT 字符串仍然对得上，只有 /info 里的整数不一样，
+// 而 iOS 正是拿那个整数决定要不要走屏幕镜像这条路的。现象是「手机能搜到、
+// 连得上、配对与 FairPlay 全部成功，然后不发流」—— 协议层日志里一切正常，
+// 只有把 /info 的应答逐字节对比才看得出来。我们踩过一次。
+constexpr uint32_t kFeatures1 = 0x5A7FFEE6;   // 低位：bit 27（支持传统配对）等
+constexpr uint32_t kFeatures2 = 0x0;          // 高位：不声明用不上的能力
+
+// 协议层 /info 应答里那个 64 位整数。
+constexpr uint64_t kFeatures = (static_cast<uint64_t>(kFeatures2) << 32) | kFeatures1;
 
 // features 的字串形态，形如 "0x5A7FFEE6,0x0"。TXT 记录与 /info 都用它。
 std::string features_string();

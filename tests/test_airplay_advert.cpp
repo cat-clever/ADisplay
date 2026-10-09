@@ -48,6 +48,27 @@ AD_TEST(airplay_features_value, "能力位取值与 UxPlay 一致") {
     AD_CHECK_EQ(airplay::features_string(), std::string("0x5A7FFEE6,0x0"));
 }
 
+AD_TEST(airplay_features_half_words, "能力位的两个半字不能写反：/info 的整数要跟 TXT 串对得上") {
+    // 这一条是补上来的，因为原先的用例只钉了 TXT 字符串 —— 而把两个半字写反时，
+    // 字符串照样是对的，只有 /info 里那个 64 位整数不一样。
+    //
+    // 而 iOS 正是拿 /info 里那个整数决定要不要走屏幕镜像这条路的。写反的表现是
+    // 「手机能搜到、连得上、配对与 FairPlay 全部成功，然后不发流」——
+    // 协议层日志里一切正常，只有逐字节比对 /info 的应答才看得出来。
+    AD_CHECK_EQ(airplay::kFeatures1, 0x5A7FFEE6u);
+    AD_CHECK_EQ(airplay::kFeatures2, 0x0u);
+
+    // 协议层 dnssd_get_airplay_features 返回的是 (features2 << 32) | features1。
+    // 这里逐字复刻那个表达式，等于把两边钉在一起：谁改了约定都会红。
+    AD_CHECK_EQ(airplay::kFeatures,
+                (static_cast<uint64_t>(airplay::kFeatures2) << 32) | airplay::kFeatures1);
+    // 换成人话：0x5A7FFEE6 必须落在**低** 32 位上。
+    AD_CHECK_EQ(airplay::kFeatures, static_cast<uint64_t>(0x5A7FFEE6));
+
+    // 字符串里第一个数是低半字 —— 与协议层 snprintf("%X,%X", features1, features2) 一致。
+    AD_CHECK_EQ(airplay::features_string(), std::string("0x5A7FFEE6,0x0"));
+}
+
 AD_TEST(airplay_txt_carries_public_key, "_airplay._tcp 必须带 pk") {
     const std::map<std::string, std::string> txt =
         to_map(airplay::airplay_txt(make_advert("aabbccdd")));

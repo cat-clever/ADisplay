@@ -16,14 +16,12 @@ namespace {
 constexpr const char* kPi = "2e388006-13ba-4041-9a67-25dd4a43d536";
 
 std::string format_features() {
-    const uint32_t high = static_cast<uint32_t>(kFeatures >> 32);
-    const uint32_t low = static_cast<uint32_t>(kFeatures & 0xffffffffULL);
-
-    // 必须与协议层拼这个字串时用的格式逐字符相同（它用的是
-    // snprintf("%X")，即大写十六进制、不补前导零）。数值相同而字串不同
+    // 顺序是「features1,features2」，也就是「低半字,高半字」——
+    // 协议层拼这个串时用的是 snprintf("0x%X,0x%X", features1, features2)。
+    // 格式也必须逐字符相同（大写十六进制、不补前导零）：数值相同而字串不同
     // 同样会让 /info 与广播对不上 —— 这正是本模块存在的意义。
     char buffer[32];
-    std::snprintf(buffer, sizeof(buffer), "0x%X,0x%X", high, low);
+    std::snprintf(buffer, sizeof(buffer), "0x%X,0x%X", kFeatures1, kFeatures2);
     return std::string(buffer);
 }
 

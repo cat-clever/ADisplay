@@ -124,10 +124,13 @@ dnssd_t* dnssd_init(const char* name, int name_len, const char* hw_addr, int hw_
                           reinterpret_cast<const unsigned char*>(hw_addr) + hw_addr_len);
     dnssd->pin_pw = pin_pw;
 
-    // 能力位取自共享定义 —— 广播与 /info 用的是同一个值。
-    dnssd->features1 = static_cast<uint32_t>(adisplay::discovery::airplay::kFeatures >> 32);
-    dnssd->features2 =
-        static_cast<uint32_t>(adisplay::discovery::airplay::kFeatures & 0xffffffffULL);
+    // 能力位取自共享定义。
+    //
+    // 半字归属必须与协议层一致：features1 是低 32 位、features2 是高 32 位
+    // （见 dnssd_get_airplay_features）。写反了广播字符串仍然对得上，
+    // 只有 /info 里的整数不一样 —— 那正是 iOS 决定走不走屏幕镜像的依据。
+    dnssd->features1 = adisplay::discovery::airplay::kFeatures1;
+    dnssd->features2 = adisplay::discovery::airplay::kFeatures2;
 
     if (error != nullptr) {
         *error = DNSSD_ERROR_NOERROR;
@@ -184,22 +187,25 @@ const char* dnssd_get_hw_addr(dnssd_t* dnssd, int* length) {
 }
 
 void dnssd_set_airplay_features(dnssd_t* dnssd, int bit, int val) {
-    // 只支持 64 位以内的位号；越界直接忽略，而不是让移位行为未定义。
+    // 位号 0-31 落在 features1（低半字），32-63 落在 features2（高半字）——
+    // 与协议层 dnssd_set_airplay_features 的划分完全相同。
     if (bit < 0 || bit > 63) {
         return;
     }
-    uint64_t features = (static_cast<uint64_t>(dnssd->features1) << 32) | dnssd->features2;
-    if (val) {
-        features |= (1ULL << bit);
+    if (bit >= 32) {
+        const uint32_t mask = 1u << (bit - 32);
+        dnssd->features2 = val ? (dnssd->features2 | mask) : (dnssd->features2 & ~mask);
     } else {
-        features &= ~(1ULL << bit);
+        const uint32_t mask = 1u << bit;
+        dnssd->features1 = val ? (dnssd->features1 | mask) : (dnssd->features1 & ~mask);
     }
-    dnssd->features1 = static_cast<uint32_t>(features >> 32);
-    dnssd->features2 = static_cast<uint32_t>(features & 0xffffffffULL);
 }
 
 uint64_t dnssd_get_airplay_features(dnssd_t* dnssd) {
-    return (static_cast<uint64_t>(dnssd->features1) << 32) | dnssd->features2;
+    // 与我替代掉的那份上游实现逐字一致：features2 在高 32 位，features1 在低 32 位。
+    uint64_t features = static_cast<uint64_t>(dnssd->features2) << 32;
+    features += static_cast<uint64_t>(dnssd->features1);
+    return features;
 }
 
 void dnssd_set_pk(dnssd_t* dnssd, char* pk_str) {
