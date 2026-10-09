@@ -32,10 +32,11 @@ struct ContentView: View {
 
     /// 没有投屏时的设置页。
     private var settingsPage: some View {
-        // 四块都按内容取高，剩下的空间留白。窗口因此可以缩到很小 ——
+        // 每块都按内容取高，剩下的空间留白。窗口因此可以缩到很小 ——
         // 日志移到独立窗口之后，这里不再有「吃掉剩余空间」的那一块。
         VStack(alignment: .leading, spacing: 20) {
             deviceNameSection
+            qualitySection
             serviceSection
             infoSection
             logEntry
@@ -83,6 +84,31 @@ struct ContentView: View {
             nameError = nil
         } catch {
             nameError = error.localizedDescription
+        }
+    }
+
+    // MARK: - 画质档位（文档 2.3）
+
+    private var qualitySection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("画质")
+                .font(.headline)
+
+            Picker("画质", selection: Binding(
+                get: { model.qualityPreset },
+                set: { model.setQualityPreset($0) }
+            )) {
+                Text("流畅").tag(QualityPreset.smooth)
+                Text("均衡").tag(QualityPreset.balanced)
+                Text("高清").tag(QualityPreset.sharp)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+
+            Text("画质决定手机按多大的分辨率把屏幕编出来：流畅 1920×1080、均衡 2560×1440、高清 3840×2160。"
+                 + "桌面全屏看推荐「高清」，低端盒子用「流畅」。改动在手机下次连上时生效。")
+                .font(.caption)
+                .foregroundColor(.secondary)
         }
     }
 

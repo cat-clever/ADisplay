@@ -315,6 +315,22 @@ internal sealed class AdEngine : IDisposable
         ThrowIfFailed(AdNative.ad_engine_set_quality_preset(_handle, (int)preset), "切换画质档位");
     }
 
+    /// <summary>
+    /// 当前画质档位（取值同 AdQualityPreset）。
+    /// 界面启动时用它把下拉框拨到已保存的那一项 —— 不读的话每次启动都显示成
+    /// 默认值，而实际用的是上次选的那个。
+    /// </summary>
+    public int QualityPreset
+    {
+        get
+        {
+            EnsureCreated();
+            int preset = (int)AdQualityPreset.Balanced;
+            ThrowIfFailed(AdNative.ad_engine_get_quality_preset(_handle, out preset), "读取画质档位");
+            return preset;
+        }
+    }
+
     public void SaveConfig()
     {
         if (_handle == IntPtr.Zero)

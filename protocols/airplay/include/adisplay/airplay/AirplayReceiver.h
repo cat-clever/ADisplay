@@ -128,6 +128,12 @@ public:
 
     void set_listener(IAirplayListener* listener);
 
+    // 运行中更新「向发送端建议的显示尺寸」（画质档位，见 AdQualityPreset）。
+    //
+    // 协议层每次应答 /info 时都会读这几个值，所以手机**下次**连接就会按新尺寸
+    // 编码，不需要重启接收端。当前这一路镜像已经按旧尺寸编码了，改不了。
+    void set_display_size(int width, int height);
+
 private:
     std::unique_ptr<AirplayReceiverImpl> impl_;
 };

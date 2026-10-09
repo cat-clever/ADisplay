@@ -851,6 +851,27 @@ std::string AirplayReceiver::device_id() const {
 #endif
 }
 
+void AirplayReceiver::set_display_size(int width, int height) {
+#if ADISPLAY_HAVE_AIRPLAY_RECEIVER
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    if (impl_->raop == nullptr) {
+        return;
+    }
+    // 协议层每次应答 /info 都会读这几个值，所以改完不必重启 ——
+    // 手机下次连接就是这个尺寸了。上游把 width/height 列为可配置项
+    // （见 UxPlay raop.c 顶部的注释），走的是它公开的 raop_set_plist。
+    if (width > 0) {
+        raop_set_plist(impl_->raop, "width", width);
+    }
+    if (height > 0) {
+        raop_set_plist(impl_->raop, "height", height);
+    }
+#else
+    (void) width;
+    (void) height;
+#endif
+}
+
 std::string AirplayReceiver::public_key() const {
 #if ADISPLAY_HAVE_AIRPLAY_RECEIVER
     std::lock_guard<std::mutex> lock(impl_->mutex);

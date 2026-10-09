@@ -98,6 +98,8 @@ final class EngineModel: ObservableObject {
     @Published private(set) var localAddresses: String = ""
     @Published private(set) var deviceId: String = ""
     @Published private(set) var version: String = ""
+    /// 画质档位。改动只影响手机下次连接 —— 尺寸是在应答 /info 时给出去的。
+    @Published private(set) var qualityPreset: QualityPreset = .balanced
     @Published private(set) var deviceName: String = ""
 
     /// 设备名称的编辑值。改这个不会立刻生效，要调 applyDeviceName()。
@@ -173,6 +175,7 @@ final class EngineModel: ObservableObject {
         deviceId = readDeviceId()
         localAddresses = readLocalAddresses()
         version = readVersion()
+        qualityPreset = readQualityPreset()
 
         appendLog(level: .info, text: "ADisplay 已就绪，打开开关即可开始接收投屏。")
     }
@@ -396,7 +399,23 @@ final class EngineModel: ObservableObject {
         let result = ad_engine_set_quality_preset(handle, preset.rawValue)
         if result.rawValue != ResultCode.ok {
             appendLog(level: .error, text: "切换画质档位失败：\(describe(result: result))")
+            return
         }
+        qualityPreset = preset
+    }
+
+    /// 读回已保存的档位。界面启动时用它把选择器拨到正确的那一档 ——
+    /// 不读的话每次启动都会显示成默认值，而实际用的是上次选的那个。
+    private func readQualityPreset() -> QualityPreset {
+        guard let handle = engine else { return .balanced }
+        var raw: Int32 = QualityPreset.balanced.rawValue
+        if ad_engine_get_quality_preset(handle, &raw).rawValue != ResultCode.ok {
+            return .balanced
+        }
+        if let preset = QualityPreset(rawValue: raw) {
+            return preset
+        }
+        return .balanced
     }
 
     // MARK: - 设备名称

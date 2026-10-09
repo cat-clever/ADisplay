@@ -40,6 +40,8 @@ public sealed partial class MainWindow : Window
     // 程序化改动 ToggleSwitch.IsOn 时会再次触发 Toggled，
     // 用它避免在失败回滚时递归调用 Start/Stop。
     private bool _suppressToggle;
+    // 同理：程序化设置画质下拉框的选中项也会触发 SelectionChanged。
+    private bool _suppressQuality;
 
     public MainWindow()
     {
@@ -88,6 +90,10 @@ public sealed partial class MainWindow : Window
             StartupLog.Leave("_engine.Create");
 
             DeviceNameBox.Text = _engine.DeviceName;
+            // 档位的下拉项顺序与 AdQualityPreset 的取值一一对应（0/1/2）。
+            _suppressQuality = true;
+            QualityBox.SelectedIndex = ReadQualityIndex();
+            _suppressQuality = false;
             DeviceIdRun.Text = _engine.DeviceId;
             AddressRun.Text = FormatAddresses(_engine.LocalAddresses);
             VersionRun.Text = ReadVersion();
@@ -197,6 +203,44 @@ public sealed partial class MainWindow : Window
             _engine.DeviceName = DeviceNameBox.Text;
             // 核心改完名称会重新注册 mDNS / SSDP，手机端列表几秒内跟着变。
             AppendLog(AdLogLevel.Info, $"设备名称已保存为「{DeviceNameBox.Text}」。手机端列表可能需要几秒刷新。");
+        }
+        catch (Exception ex)
+        {
+            AppendLog(AdLogLevel.Error, ex.Message);
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // 画质档位（文档 2.3）
+    // ---------------------------------------------------------------------
+
+    /// <summary>读回已保存的档位。读不到就用「均衡」。</summary>
+    private int ReadQualityIndex()
+    {
+        try
+        {
+            int preset = _engine.QualityPreset;
+            if (preset >= 0 && preset <= 2)
+            {
+                return preset;
+            }
+        }
+        catch (Exception ex)
+        {
+            AppendLog(AdLogLevel.Error, ex.Message);
+        }
+        return (int)AdQualityPreset.Balanced;
+    }
+
+    private void OnQualityChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressQuality || QualityBox.SelectedIndex < 0)
+        {
+            return;
+        }
+        try
+        {
+            _engine.SetQualityPreset((AdQualityPreset)QualityBox.SelectedIndex);
         }
         catch (Exception ex)
         {

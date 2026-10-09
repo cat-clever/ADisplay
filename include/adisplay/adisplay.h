@@ -101,11 +101,18 @@ typedef enum AdLogLevel {
     AD_LOG_OFF   = 5
 } AdLogLevel;
 
-/* 画质档位（文档 2.3：低端电视盒子用「流畅」，桌面用「高清」）。 */
+/* 画质档位（文档 2.3：低端电视盒子用「流畅」，桌面用「高清」）。
+ *
+ * 它落到实处的杠杆是**向发送端建议的显示尺寸**：手机把自己的屏幕缩放到这个
+ * 尺寸再编码，投出来的视频就是这个分辨率。手机是竖屏，真正起作用的是高度 ——
+ * 建议 1920x1080 时，手机量出来的是 498x1080，在 1080p 屏上 1:1 刚好，放到
+ * Retina 全屏就明显发虚。所以档位是按高度往上抬的。
+ *
+ * 当前这一路镜像不受影响：尺寸在下次连接时才生效。 */
 typedef enum AdQualityPreset {
-    AD_QUALITY_SMOOTH   = 0,  /* 流畅：1080p30，低码率 */
-    AD_QUALITY_BALANCED = 1,  /* 均衡：1080p30/60 自适应 */
-    AD_QUALITY_SHARP    = 2   /* 高清：1080p60，高码率 */
+    AD_QUALITY_SMOOTH   = 0,  /* 流畅：建议 1920x1080，代价最低 */
+    AD_QUALITY_BALANCED = 1,  /* 均衡：建议 2560x1440 */
+    AD_QUALITY_SHARP    = 2   /* 高清：建议 3840x2160，桌面全屏用这个 */
 } AdQualityPreset;
 
 /* 发送端类型。 */
@@ -438,6 +445,8 @@ AD_API AdResult AD_CALL ad_engine_get_device_name(AdEngine* engine,
 
 /* 切换画质档位，见 AdQualityPreset。 */
 AD_API AdResult AD_CALL ad_engine_set_quality_preset(AdEngine* engine, int preset);
+/* 读取当前档位（取值见 AdQualityPreset）。界面启动时用它把选择器拨到已保存的那一档。 */
+AD_API AdResult AD_CALL ad_engine_get_quality_preset(AdEngine* engine, int* out_preset);
 
 /* 把当前配置写回配置文件（设备名称、端口、白名单等）。 */
 AD_API AdResult AD_CALL ad_engine_save_config(AdEngine* engine);

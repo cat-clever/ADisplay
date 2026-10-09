@@ -9,8 +9,8 @@
     Title="ADisplay 投屏接收端">
 
     <!--
-        布局策略：前三块按内容取高（Auto），日志区吃掉剩余空间（*）。
-        窗口缩小时先压日志区，而不是把某一块挤出可视区域 —— 后者会让
+        布局策略：设置项那几块按内容取高（Auto），日志按钮那一行吃掉剩余空间（*）。
+        窗口缩小时先压日志行，而不是把某一块挤出可视区域 —— 后者会让
         用户看不到控件却也不知道为什么。
     -->
     <Grid>
@@ -71,6 +71,7 @@
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
             <RowDefinition Height="*" MinHeight="120" />
         </Grid.RowDefinitions>
 
@@ -113,8 +114,23 @@
             </StackPanel>
         </StackPanel>
 
+        <!-- 画质档位（文档 2.3）。它改的是手机按多大的分辨率编码屏幕，只影响
+             下次连接 —— 尺寸是在应答 /info 时给出去的。 -->
+        <StackPanel Grid.Row="2" Spacing="8">
+            <TextBlock Text="画质" Style="{StaticResource BodyStrongTextBlockStyle}" />
+            <ComboBox x:Name="QualityBox"
+                      MinWidth="220"
+                      SelectionChanged="OnQualityChanged">
+                <ComboBoxItem Content="流畅（1920×1080）" />
+                <ComboBoxItem Content="均衡（2560×1440）" />
+                <ComboBoxItem Content="高清（3840×2160）" />
+            </ComboBox>
+            <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
+                       Text="决定手机按多大的分辨率把屏幕编出来，桌面全屏看推荐「高清」。改动在手机下次连上时生效。" />
+        </StackPanel>
+
         <!-- 本机信息：电视端待机页也要显示这些（文档 2.3） -->
-        <StackPanel Grid.Row="2" Spacing="6">
+        <StackPanel Grid.Row="3" Spacing="6">
             <TextBlock Text="本机信息" Style="{StaticResource BodyStrongTextBlockStyle}" />
             <TextBlock Style="{StaticResource CaptionTextBlockStyle}">
                 <Run Text="局域网地址：" />
@@ -131,7 +147,7 @@
         </StackPanel>
 
         <!-- 日志不画在页面里，改成一个独立的窗口（见 LogWindow.xaml）。 -->
-        <StackPanel Grid.Row="3" Orientation="Horizontal" Spacing="12">
+        <StackPanel Grid.Row="4" Orientation="Horizontal" Spacing="12">
             <Button x:Name="ShowLogButtonSettings"
                     Content="查看日志"
                     Click="OnShowLogClick" />

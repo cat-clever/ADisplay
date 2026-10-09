@@ -103,6 +103,32 @@ bool is_valid_quality_preset(int preset) {
            preset <= static_cast<int>(AD_QUALITY_SHARP);
 }
 
+// 画质档位落到实处的杠杆：向发送端建议的显示尺寸。
+//
+// 手机把自己的屏幕缩放到这个尺寸再编码，投出来的视频就是这个分辨率。手机是
+// 竖屏，所以**高度**才是起作用的那个数：建议 1920x1080 时手机量出来的是
+// 498x1080（屏占比 0.46），在 1080p 屏上 1:1 刚好，放到 Retina 全屏就明显发虚。
+//
+// 宽度取 16:9 的标准值 —— 手机只把它当外框，竖屏用高度、横屏用宽度，两边都合适。
+struct DisplaySuggestion {
+    int width;
+    int height;
+};
+
+DisplaySuggestion display_suggestion_for_preset(int preset) {
+    switch (preset) {
+        case AD_QUALITY_SMOOTH:
+            // 与协议层默认一致。1080p 屏够用，代价最低。
+            return DisplaySuggestion{1920, 1080};
+        case AD_QUALITY_SHARP:
+            // 桌面全屏看，按 Retina 的像素量给足。
+            return DisplaySuggestion{3840, 2160};
+        case AD_QUALITY_BALANCED:
+        default:
+            return DisplaySuggestion{2560, 1440};
+    }
+}
+
 }  // namespace
 
 // ===========================================================================
@@ -1148,6 +1174,13 @@ AdResult AD_CALL ad_engine_start(AdEngine* engine) {
         airplay_config.device_id = engine->identity.device_id();
         airplay_config.port = airplay_port;
 
+        // 画质档位决定建议给手机的显示尺寸。不填的话协议层用它的默认值
+        // （1920x1080），手机就把屏幕缩到 1080 高再编码 —— Retina 上全屏看
+        // 会明显发虚。这里把它接上。
+        const DisplaySuggestion suggestion = display_suggestion_for_preset(engine->quality_preset);
+        airplay_config.display_width = suggestion.width;
+        airplay_config.display_height = suggestion.height;
+
         // 配对密钥要和配置放在一起。它必须落盘：每次启动重新生成的话，
         // iPhone 会把本机当成新设备，每次投屏都要重新配对一遍。
         std::filesystem::path config_file(engine->config_path);
@@ -1486,12 +1519,35 @@ AdResult AD_CALL ad_engine_set_quality_preset(AdEngine* engine, int preset) {
     if (!is_valid_quality_preset(preset)) {
         return AD_ERR_INVALID_ARG;
     }
+    airplay::AirplayReceiver* receiver = nullptr;
     {
         std::lock_guard<std::mutex> lock(engine->mutex);
         engine->quality_preset = preset;
+        receiver = engine->airplay_receiver.get();
     }
-    AD_LOG_INFO("画质档位已切换为 {}", preset);
+
+    // 让正在跑的接收端也用上。协议层在每次 /info 应答时读这几个值，所以手机
+    // 下次连接就会按新尺寸编码 —— 不必重启服务，也不必断开当前这一路。
+    const DisplaySuggestion suggestion = display_suggestion_for_preset(preset);
+    if (receiver != nullptr) {
+        receiver->set_display_size(suggestion.width, suggestion.height);
+    }
+
+    AD_LOG_INFO("画质档位已切换：建议显示尺寸 {}x{}（手机下次连接时生效）",
+                suggestion.width, suggestion.height);
     return engine->persist();
+}
+
+AdResult AD_CALL ad_engine_get_quality_preset(AdEngine* engine, int* out_preset) {
+    if (engine == nullptr) {
+        return AD_ERR_NOT_INITIALIZED;
+    }
+    if (out_preset == nullptr) {
+        return AD_ERR_INVALID_ARG;
+    }
+    std::lock_guard<std::mutex> lock(engine->mutex);
+    *out_preset = engine->quality_preset;
+    return AD_OK;
 }
 
 AdResult AD_CALL ad_engine_save_config(AdEngine* engine) {
