@@ -18,8 +18,19 @@
 
 struct AVFormatContext;
 struct AVIOContext;
+struct AVBSFContext;
 
 namespace adisplay::pipeline {
+
+// 输出字节的落脚点：一块内存，但像文件一样有「当前位置」。
+//
+// 类型放在这里而不是 .cpp 里，是因为写/定位回调是 .cpp 中的自由函数，需要
+// 这个类型名；而回调拿到的正是它的地址，所以地址必须由持有者保证稳定。
+// 它不是对外接口的一部分，只是没有别的地方可放。
+struct OutputSink {
+    std::vector<uint8_t>* bytes = nullptr;
+    std::size_t pos = 0;
+};
 
 class Mp4Remuxer {
 public:
@@ -45,8 +56,12 @@ private:
 
     AVFormatContext* output_ = nullptr;
     AVIOContext* output_io_ = nullptr;
-    std::vector<uint8_t> buffer_;              // 输出字节的落脚点，写回调往这里追加
+    std::vector<uint8_t> buffer_;              // 输出字节的落脚点，写回调往这里写
+    OutputSink sink_;                          // 与 buffer_ 配套的当前位置
     std::vector<uint8_t> init_segment_;
+    // 每条输出流的码流过滤器（下标与输出流对齐），nullptr 表示这条流不需要。
+    // 目前只有 AAC 用得上：TS 里它是 ADTS 封装，而 MP4 要裸 AAC。
+    std::vector<AVBSFContext*> bsf_;
     std::vector<int> stream_map_;              // 输入流下标 → 输出流下标，-1 表示丢弃
     std::vector<int64_t> offsets_;             // 每条输出流在当前分片上的时间戳平移量
     std::vector<int64_t> timeline_next_dts_;   // 每条输出流的全局时间轴末尾（输入时基）

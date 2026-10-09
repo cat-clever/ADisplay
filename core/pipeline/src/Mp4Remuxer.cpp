@@ -7,6 +7,7 @@
 // 改编过的符号。
 extern "C" {
 #include <libavcodec/avcodec.h>
+#include <libavcodec/bsf.h>
 #include <libavformat/avformat.h>
 #include <libavutil/error.h>
 #include <libavutil/mem.h>
@@ -21,54 +22,67 @@ namespace {
 // AVIO 的缓冲区大小。TS 分片普遍是几百 KB，32KB 一进一出足够。
 constexpr int kIoBufferSize = 32768;
 
+// FFmpeg 的错误文案。数值也一并带上，因为有几个码的文案会把人带偏：
+// 裸的 -1 被 av_strerror 翻成 "Operation not permitted"，看着像文件权限问题，
+// 实际上大量地方用 -1 表示「通用失败」（比如 movenc 拒绝 ADTS 格式的 AAC）。
+// 没有数值时，看到那句话会往完全错误的方向查。
 std::string av_error_text(int error) {
     char buffer[AV_ERROR_MAX_STRING_SIZE] = {0};
     av_strerror(error, buffer, sizeof(buffer));
-    return std::string(buffer);
+    return std::string(buffer) + "（错误码 " + std::to_string(error) + "）";
 }
 
-// 输出字节的落脚点：写回调把复用器吐出来的字节追加到 vector 后面。
 int write_callback(void* opaque, const uint8_t* data, int size) {
-    if (opaque == nullptr || size <= 0) {
+    auto* sink = static_cast<OutputSink*>(opaque);
+    if (sink == nullptr || sink->bytes == nullptr || size <= 0) {
         return 0;
     }
-    auto* sink = static_cast<std::vector<uint8_t>*>(opaque);
-    sink->insert(sink->end(), data, data + size);
+    const std::size_t end = sink->pos + static_cast<std::size_t>(size);
+    if (sink->bytes->size() < end) {
+        sink->bytes->resize(end);
+    }
+    std::memcpy(sink->bytes->data() + sink->pos, data, static_cast<std::size_t>(size));
+    sink->pos = end;
     return size;
 }
 
 // 输出侧的定位。内存流的定位本来就没有代价，给它一个真实现是有原因的：
-// MOV 复用器在写分片时会去 seek（回填长度、跳转之类），而 FFmpeg 对
-// 「不可寻址的输出」上的 seek 返回的正是 AVERROR(EPERM) —— 它的文案是
-// "Operation not permitted"，看起来像文件权限问题，实际与权限毫无关系。
-// 之前把 seekable 置 0 就是撞在这上面：每个分片都写失败。
+// MOV 复用器在写分片时会去 seek，而 FFmpeg 对「不可寻址的输出」上的 seek
+// 返回的正是 AVERROR(EPERM) —— 文案是 "Operation not permitted"，
+// 看起来像文件权限问题，实际与权限毫无关系。
 int64_t seek_callback(void* opaque, int64_t offset, int whence) {
-    auto* sink = static_cast<std::vector<uint8_t>*>(opaque);
-    if (sink == nullptr) {
+    auto* sink = static_cast<OutputSink*>(opaque);
+    if (sink == nullptr || sink->bytes == nullptr) {
         return AVERROR(EINVAL);
     }
 
-    int64_t base = 0;
     if ((whence & AVSEEK_SIZE) != 0) {
         // 复用器问「你有多大」，直接给答案，不要动位置。
-        return static_cast<int64_t>(sink->size());
+        return static_cast<int64_t>(sink->bytes->size());
     }
-    if (whence == SEEK_CUR) {
-        base = 0;   // AVIO 传来的 offset 已经是相对量，由调用方保证
-    } else if (whence == SEEK_END) {
-        base = static_cast<int64_t>(sink->size());
-    } else if (whence != SEEK_SET) {
+
+    const int mode = whence & ~AVSEEK_FORCE;
+    const int64_t size = static_cast<int64_t>(sink->bytes->size());
+    int64_t target = 0;
+    if (mode == SEEK_SET) {
+        target = offset;
+    } else if (mode == SEEK_CUR) {
+        target = static_cast<int64_t>(sink->pos) + offset;
+    } else if (mode == SEEK_END) {
+        target = size + offset;
+    } else {
         return AVERROR(EINVAL);
     }
 
-    const int64_t target = base + offset;
     if (target < 0) {
         return AVERROR(EINVAL);
     }
-    // 往前跳（回填）不能越过已有内容；往后退则把中间补零，复用器随后会覆盖。
-    if (static_cast<std::size_t>(target) > sink->size()) {
-        sink->resize(static_cast<std::size_t>(target), 0);
+    // 往前跳（回填之后又跳回来）不能缩短已有内容；往后退则补零，
+    // 随后写入的字节会覆盖它。
+    if (target > size) {
+        sink->bytes->resize(static_cast<std::size_t>(target), 0);
     }
+    sink->pos = static_cast<std::size_t>(target);
     return target;
 }
 
@@ -117,6 +131,13 @@ Mp4Remuxer::~Mp4Remuxer() {
 }
 
 void Mp4Remuxer::close_output() {
+    for (AVBSFContext*& ctx : bsf_) {
+        if (ctx != nullptr) {
+            av_bsf_free(&ctx);
+        }
+    }
+    bsf_.clear();
+
     if (output_ != nullptr) {
         if (header_written_) {
             // 收尾只是把最后一段刷出来落地，失败也没什么可做的。没写过头的
@@ -180,6 +201,15 @@ bool Mp4Remuxer::ensure_output(const AVFormatContext* input, std::string* error)
         out_stream->time_base = in_stream->time_base;
         out_stream->avg_frame_rate = in_stream->avg_frame_rate;
         out_stream->sample_aspect_ratio = in_stream->sample_aspect_ratio;
+        if (in_stream->codecpar->codec_id == AV_CODEC_ID_AAC &&
+            (out_stream->codecpar->extradata == nullptr ||
+             out_stream->codecpar->extradata_size == 0)) {
+            // AAC 在 MP4 里需要一份 AudioSpecificConfig（esds 里的那点内容），
+            // 它由解复用时从 ADTS 头里提取。正常路径上 find_stream_info 已经
+            // 填好了，缺了说明这条流没有 —— 写出来的 mp4 会没有声音，
+            // 而界面上只表现为「有画面没声音」，不说出来很难判断。
+            AD_LOG_WARN("AAC 音轨缺少解码配置（extradata），写出的 fMP4 可能没有声音");
+        }
         stream_map_[i] = static_cast<int>(output_->nb_streams) - 1;
     }
 
@@ -188,12 +218,59 @@ bool Mp4Remuxer::ensure_output(const AVFormatContext* input, std::string* error)
         return false;
     }
 
+    // AAC 要过一道 aac_adtstoasc。
+    //
+    // TS 里的 AAC 是 ADTS 封装（每帧前面带 0xFFF 同步头和采样率等字段），
+    // 而 MP4 要的是裸 AAC 帧加一份独立的 AudioSpecificConfig。mp4 复用器遇到
+    // ADTS 帧会直接拒绝，报的是
+    //   "Malformed AAC bitstream detected: use the audio bitstream filter
+    //    'aac_adtstoasc' to fix it"
+    // 而且它的返回码是裸的 -1，av_strerror 把它翻成 "Operation not permitted" ——
+    // 文案与权限毫无关系，我上一轮就是被这句话带偏去改了 seek。
+    //
+    // 视频那条路不需要过滤器：H.264/H.265 的起始码与长度前缀由复用器自己处理。
+    bsf_.assign(output_->nb_streams, nullptr);
+    for (unsigned int i = 0; i < input->nb_streams; ++i) {
+        const int out_index = stream_map_[i];
+        if (out_index < 0) {
+            continue;
+        }
+        if (input->streams[i]->codecpar->codec_id != AV_CODEC_ID_AAC) {
+            continue;
+        }
+
+        const AVBitStreamFilter* filter = av_bsf_get_by_name("aac_adtstoasc");
+        if (filter == nullptr) {
+            AD_LOG_WARN("这份 FFmpeg 没有 aac_adtstoasc 过滤器，AAC 音轨写不进 fMP4");
+            continue;
+        }
+        AVBSFContext* ctx = nullptr;
+        if (av_bsf_alloc(filter, &ctx) < 0 || ctx == nullptr) {
+            AD_LOG_WARN("分配 aac_adtstoasc 过滤器失败，AAC 音轨写不进 fMP4");
+            continue;
+        }
+        if (avcodec_parameters_copy(ctx->par_in, input->streams[i]->codecpar) < 0) {
+            AD_LOG_WARN("复制 AAC 编码参数失败，AAC 音轨写不进 fMP4");
+            av_bsf_free(&ctx);
+            continue;
+        }
+        ctx->time_base_in = input->streams[i]->time_base;
+        if (av_bsf_init(ctx) < 0) {
+            AD_LOG_WARN("初始化 aac_adtstoasc 过滤器失败，AAC 音轨写不进 fMP4");
+            av_bsf_free(&ctx);
+            continue;
+        }
+        bsf_[static_cast<std::size_t>(out_index)] = ctx;
+    }
+
     unsigned char* io_buffer = static_cast<unsigned char*>(av_malloc(kIoBufferSize));
     if (io_buffer == nullptr) {
         *error = "内存不足（输出缓冲）";
         return false;
     }
-    output_io_ = avio_alloc_context(io_buffer, kIoBufferSize, 1, &buffer_, nullptr,
+    sink_.bytes = &buffer_;
+    sink_.pos = 0;
+    output_io_ = avio_alloc_context(io_buffer, kIoBufferSize, 1, &sink_, nullptr,
                                     write_callback, seek_callback);
     if (output_io_ == nullptr) {
         av_free(io_buffer);
@@ -229,6 +306,7 @@ bool Mp4Remuxer::ensure_output(const AVFormatContext* input, std::string* error)
     avio_flush(output_io_);
     init_segment_.assign(buffer_.begin(), buffer_.end());
     buffer_.clear();
+    sink_.pos = 0;
     has_init_ = true;
 
     offsets_.assign(output_->nb_streams, 0);
@@ -308,6 +386,65 @@ bool Mp4Remuxer::append_ts_segment(const uint8_t* data, std::size_t size,
     const std::size_t before = buffer_.size();
     std::vector<bool> first_packet(stream_map_.size(), true);
 
+    // 一个包走完「时间戳整平 → 交给复用器」，返回 FFmpeg 错误码（>=0 为成功）。
+    //
+    // 抽成 lambda 是因为音频包要先过码流过滤器：过滤前是读进来的那个包，
+    // 过滤后是过滤器吐出来的包，但两者的后续处理完全一样，不该写两遍。
+    auto emit_packet = [&](AVPacket* pkt, std::size_t index,
+                           unsigned int input_index) -> int {
+        const int64_t dts = pkt->dts != AV_NOPTS_VALUE ? pkt->dts : pkt->pts;
+        const int64_t pts = pkt->pts != AV_NOPTS_VALUE ? pkt->pts : dts;
+        if (dts == AV_NOPTS_VALUE) {
+            return 0;   // 丢掉：没有时间戳的包只会让复用器报错
+        }
+        if (first_packet[index]) {
+            // 每份分片的时间戳起点都不一样（有的从 0 开始，有的接着上一段，
+            // 有的回退），所以把这条流在本分片里的第一个包对齐到全局时间轴的
+            // 末尾，本分片后续的包跟着平移同样的量。平移量对 pts/dts 相同，
+            // 两者之差（B 帧的显示顺序）保持不变。
+            offsets_[index] = timeline_next_dts_[index] - dts;
+            first_packet[index] = false;
+        }
+        pkt->dts = dts + offsets_[index];
+        pkt->pts = pts + offsets_[index];
+
+        // 源给的包时长未必有值，没有就按一个时基单位推进：目的只是让全局时间轴
+        // 严格向前，下一份分片的平移量会在此基础上重新对齐。
+        const int64_t duration = pkt->duration > 0 ? pkt->duration : 1;
+        timeline_next_dts_[index] = pkt->dts + duration;
+
+        pkt->pos = -1;   // 内存输入的位置对输出没有意义
+        pkt->stream_index = static_cast<int>(index);
+        // movenc 会在写头时给每条轨挑自己的 timescale，输出流的 time_base
+        // 与输入的通常并不相等，所以写之前必须按两者重采样。
+        av_packet_rescale_ts(pkt, input->streams[input_index]->time_base,
+                             output_->streams[index]->time_base);
+        // 复用器要求同一条流的 dts 严格递增。重采样是舍入的，极窄的时间间隔
+        // 可能被压平，所以在交出去之前再确认一次。
+        if (pkt->dts <= last_written_dts_[index]) {
+            pkt->dts = last_written_dts_[index] + 1;
+            if (pkt->pts < pkt->dts) {
+                pkt->pts = pkt->dts;
+            }
+        }
+        last_written_dts_[index] = pkt->dts;
+
+        // 写成功时包已经被复用器接管并置空；失败时它会留下内容，由调用方放掉。
+        return av_interleaved_write_frame(output_, pkt);
+    };
+
+    // 出错时的统一收尾：包与输入都还回去，已攒的半截输出清掉 —— 它没有意义，
+    // 留着只会让上层的分片内容对不上。
+    auto fail = [&](AVPacket** pkt, int code, const char* what) -> bool {
+        av_packet_unref(*pkt);
+        av_packet_free(pkt);
+        release_input(&input, &input_io);
+        buffer_.clear();
+        sink_.pos = 0;
+        *error = std::string(what) + av_error_text(code);
+        return false;
+    };
+
     while (true) {
         // 探测阶段读过的包被 libavformat 缓在内部队列里，这里会原样吐出来，
         // 分片开头不会丢。
@@ -321,55 +458,38 @@ bool Mp4Remuxer::append_ts_segment(const uint8_t* data, std::size_t size,
         }
         const std::size_t index = static_cast<std::size_t>(stream_map_[input_index]);
 
-        const int64_t dts = packet->dts != AV_NOPTS_VALUE ? packet->dts : packet->pts;
-        const int64_t pts = packet->pts != AV_NOPTS_VALUE ? packet->pts : dts;
-        if (dts == AV_NOPTS_VALUE) {
-            av_packet_unref(packet);
-            continue;   // 连时间戳都没有的包，留着只会让复用器报错
-        }
-        if (first_packet[index]) {
-            // 每份分片的时间戳起点都不一样（有的从 0 开始，有的接着上一段，
-            // 有的回退），所以把这条流在本分片里的第一个包对齐到全局时间轴的
-            // 末尾，本分片后续的包跟着平移同样的量。平移量对 pts/dts 相同，
-            // 两者之差（B 帧的显示顺序）保持不变。
-            offsets_[index] = timeline_next_dts_[index] - dts;
-            first_packet[index] = false;
-        }
-        packet->dts = dts + offsets_[index];
-        packet->pts = pts + offsets_[index];
-
-        // 源给的包时长未必有值，没有就按一个时基单位推进：目的只是让全局时间轴
-        // 严格向前，下一份分片的平移量会在此基础上重新对齐。
-        const int64_t duration = packet->duration > 0 ? packet->duration : 1;
-        timeline_next_dts_[index] = packet->dts + duration;
-
-        packet->pos = -1;   // 内存输入的位置对输出没有意义
-        packet->stream_index = static_cast<int>(index);
-        // movenc 会在写头时给每条轨挑自己的 timescale，输出流的 time_base
-        // 与输入的通常并不相等，所以写之前必须按两者重采样。
-        av_packet_rescale_ts(packet, input->streams[input_index]->time_base,
-                             output_->streams[index]->time_base);
-        // 复用器要求同一条流的 dts 严格递增。重采样是舍入的，极窄的时间间隔
-        // 可能被压平，所以在交出去之前再确认一次。
-        if (packet->dts <= last_written_dts_[index]) {
-            packet->dts = last_written_dts_[index] + 1;
-            if (packet->pts < packet->dts) {
-                packet->pts = packet->dts;
+        AVBSFContext* filter = bsf_[index];
+        if (filter == nullptr) {
+            const int write_ret = emit_packet(packet, index, input_index);
+            if (write_ret < 0) {
+                return fail(&packet, write_ret, "写 fMP4 分片失败：");
             }
+            continue;
         }
-        last_written_dts_[index] = packet->dts;
 
-        const int write_ret = av_interleaved_write_frame(output_, packet);
-        // 写成功时包已经被复用器接管并置空；失败时它会留下内容，我们自己放掉。
-        if (write_ret < 0) {
+        // 送进码流过滤器。send 成功时包的所有权归过滤器，调用方这个对象被置空。
+        int ret = av_bsf_send_packet(filter, packet);
+        if (ret < 0) {
+            return fail(&packet, ret, "音频包交给 aac_adtstoasc 失败：");
+        }
+        // 把过滤器能吐的都取走。aac_adtstoasc 是一进一出，循环是为了不漏 ——
+        // 过滤器内部可能压着上一轮的包。EAGAIN 表示它还要更多输入。
+        while (true) {
+            ret = av_bsf_receive_packet(filter, packet);
+            if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
+                break;
+            }
+            if (ret < 0) {
+                return fail(&packet, ret, "从 aac_adtstoasc 取包失败：");
+            }
+            const int write_ret = emit_packet(packet, index, input_index);
+            if (write_ret < 0) {
+                return fail(&packet, write_ret, "写 fMP4 分片失败：");
+            }
             av_packet_unref(packet);
-            av_packet_free(&packet);
-            release_input(&input, &input_io);
-            buffer_.clear();
-            *error = "写 fMP4 分片失败：" + av_error_text(write_ret);
-            return false;
         }
     }
+
     av_packet_free(&packet);
     release_input(&input, &input_io);
 
@@ -377,6 +497,7 @@ bool Mp4Remuxer::append_ts_segment(const uint8_t* data, std::size_t size,
     const int drain_ret = av_interleaved_write_frame(output_, nullptr);
     if (drain_ret < 0) {
         buffer_.clear();
+    sink_.pos = 0;
         *error = "写 fMP4 分片失败（排空交织队列）：" + av_error_text(drain_ret);
         return false;
     }
@@ -392,6 +513,7 @@ bool Mp4Remuxer::append_ts_segment(const uint8_t* data, std::size_t size,
     // 输出字节只留到被取走为止：init 段已经单独存了一份，分片的字节由调用方
     // 持有，这里没必要把整部片子的输出一直攒着。
     buffer_.clear();
+    sink_.pos = 0;
     return true;
 }
 
