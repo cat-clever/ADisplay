@@ -10,6 +10,7 @@
 #include <process.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "pthread.h"
 
@@ -93,7 +94,10 @@ int pthread_join(pthread_t thread, void** retval) {
 }
 
 // ---------------------------------------------------------------------------
-// 互斥量：临界区正好是这个语义（同线程可重入）
+// 互斥量
+//
+// 用 SRWLOCK。这里要的是「全零即有效」这个性质，理由见 compat/win32/pthread.h ——
+// 上游有一处互斥量从未初始化就直接上锁，而零初始化的 SRWLOCK 恰好合法。
 // ---------------------------------------------------------------------------
 
 int pthread_mutex_init(pthread_mutex_t* mutex, const void* attr) {
@@ -101,7 +105,8 @@ int pthread_mutex_init(pthread_mutex_t* mutex, const void* attr) {
     if (mutex == NULL) {
         return 1;
     }
-    InitializeCriticalSection(mutex);
+    // SRWLOCK_INIT 就是全零，所以清零即为初始化。
+    memset(mutex, 0, sizeof(*mutex));
     return 0;
 }
 
@@ -109,7 +114,7 @@ int pthread_mutex_lock(pthread_mutex_t* mutex) {
     if (mutex == NULL) {
         return 1;
     }
-    EnterCriticalSection(mutex);
+    AcquireSRWLockExclusive(mutex);
     return 0;
 }
 
@@ -117,7 +122,7 @@ int pthread_mutex_unlock(pthread_mutex_t* mutex) {
     if (mutex == NULL) {
         return 1;
     }
-    LeaveCriticalSection(mutex);
+    ReleaseSRWLockExclusive(mutex);
     return 0;
 }
 
@@ -125,7 +130,7 @@ int pthread_mutex_destroy(pthread_mutex_t* mutex) {
     if (mutex == NULL) {
         return 1;
     }
-    DeleteCriticalSection(mutex);
+    memset(mutex, 0, sizeof(*mutex));
     return 0;
 }
 
@@ -159,9 +164,9 @@ int pthread_cond_wait(pthread_cond_t* cond, pthread_mutex_t* mutex) {
     if (cond == NULL || mutex == NULL) {
         return 1;
     }
-    // 这个调用会原子地释放临界区并在被唤醒后重新获取 ——
-    // 与 pthread_cond_wait 的约定一致，上游就是靠它把睡眠放在锁外的。
-    SleepConditionVariableCS(&cond->cv, mutex, INFINITE);
+    // 这个调用会原子地释放锁并在被唤醒后重新获取 —— 与 pthread_cond_wait
+    // 的约定一致，上游就是靠它把睡眠放在锁外的。
+    SleepConditionVariableSRW(&cond->cv, mutex, INFINITE, 0);
     return 0;
 }
 
@@ -192,7 +197,7 @@ int pthread_cond_timedwait(pthread_cond_t* cond, pthread_mutex_t* mutex,
 
     // 返回 0 表示被唤醒，非 0 表示超时 —— 与 POSIX 一致。
     // 上游不检查这个返回值（它只是拿它当一次定时睡眠用），但语义给对总是好的。
-    if (!SleepConditionVariableCS(&cond->cv, mutex, (DWORD) wait_ms)) {
+    if (!SleepConditionVariableSRW(&cond->cv, mutex, (DWORD) wait_ms, 0)) {
         return 1;
     }
     return 0;

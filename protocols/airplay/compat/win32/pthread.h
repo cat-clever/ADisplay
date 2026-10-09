@@ -20,10 +20,26 @@
 // pthreads-win32 的原因。
 typedef HANDLE pthread_t;
 
-// 临界区与 POSIX 互斥量语义一致（同一线程可重入），够用了。
-typedef CRITICAL_SECTION pthread_mutex_t;
+// 用 SRWLOCK 而不是临界区（CRITICAL_SECTION）—— 这一点很关键，不是随手选的。
+//
+// 上游的 httpd.c 有一个潜在缺陷：struct httpd_s 里的 run_mutex 是 calloc 出来
+// 的，全零，而 httpd.c 里一处 MUTEX_CREATE 都没有，httpd_start 第一行就
+// MUTEX_LOCK(httpd->run_mutex)。也就是说它一直在锁一个**从未初始化**的互斥量。
+//
+// 这在 Linux/glibc 和 macOS 上恰好是合法的：两边都把全零的 pthread_mutex_t
+// 当作「静态初始化的默认互斥量」，所以上游多年没暴露这个问题。
+//
+// 而全零的 CRITICAL_SECTION 对 EnterCriticalSection 是未定义行为 —— 在
+// Windows 上表现为进程当场消失，连日志都不留（第一次接 AirPlay 时就是这个现象）。
+//
+// SRWLOCK 正好满足两个条件：SRWLOCK_INIT 就是全零，零初始化天然合法；
+// 而且它与 POSIX 的默认互斥量一样**不可重入**（临界区是可重入的，那是我这层
+// 垫片多出来的语义，不该有）。条件变量用它也有配套的 SleepConditionVariableSRW。
+typedef SRWLOCK pthread_mutex_t;
 
 // Win32 的条件变量没有独立的销毁动作，包一层只为对齐类型名。
+// CONDITION_VARIABLE_INIT 同样是全零，所以零初始化的条件变量也合法 ——
+// 道理和上面的互斥量一样。
 typedef struct {
     CONDITION_VARIABLE cv;
 } pthread_cond_t;

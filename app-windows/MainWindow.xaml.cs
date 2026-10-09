@@ -131,12 +131,18 @@ public sealed partial class MainWindow : Window
 
         if (ServiceToggle.IsOn)
         {
+            // 成对记录进出。原生崩溃不会抛托管异常，try/catch 接不住 ——
+            // 那种情况下日志会停在「进入」而没有「离开」，一眼就能看出
+            // 是死在核心库里，而不是界面层或配置读写。
+            StartupLog.Enter("_engine.Start");
             try
             {
                 _engine.Start();
+                StartupLog.Leave("_engine.Start");
             }
             catch (Exception ex)
             {
+                StartupLog.Failed("_engine.Start", ex);
                 // 启动失败（最常见的是端口被占）要立刻把开关拨回去，
                 // 否则界面会显示成「已开启」但实际没在监听。
                 AppendLog(AdLogLevel.Error, ex.Message);

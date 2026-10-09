@@ -23,6 +23,7 @@
 #include <atomic>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <filesystem>
 #include <memory>
 #include <mutex>
@@ -1126,22 +1127,42 @@ AdResult AD_CALL ad_engine_start(AdEngine* engine) {
             airplay_config.key_file = "airplay-pairing.key";
         }
 
-        engine->airplay_receiver = std::make_unique<airplay::AirplayReceiver>();
-        engine->airplay_bridge = std::make_unique<AirplayBridge>(engine);
-        engine->airplay_receiver->set_listener(engine->airplay_bridge.get());
+        // 这一段包了 try：它要碰文件系统（配对密钥落盘）与协议层的初始化，
+        // 而那些都可能抛 C++ 异常。ad_engine_start 是 C ABI 入口，异常一旦
+        // 越过这个边界就是直接 terminate —— 用户的感受是「点开关程序就没了」，
+        // 而且不留任何日志。宁可 AirPlay 起不来、DLNA 照常，也不要这样退。
+        try {
+            engine->airplay_receiver = std::make_unique<airplay::AirplayReceiver>();
+            engine->airplay_bridge = std::make_unique<AirplayBridge>(engine);
+            engine->airplay_receiver->set_listener(engine->airplay_bridge.get());
 
-        std::string airplay_error;
-        if (engine->airplay_receiver->start(airplay_config, &airplay_error)) {
-            airplay_ready = true;
-            airplay_port = engine->airplay_receiver->port();
-            airplay_device_id = engine->airplay_receiver->device_id();
-            airplay_public_key = engine->airplay_receiver->public_key();
-            AD_LOG_INFO("AirPlay 接收端已就绪，控制通道端口 {}", airplay_port);
-        } else {
+            std::string airplay_error;
+            if (engine->airplay_receiver->start(airplay_config, &airplay_error)) {
+                airplay_ready = true;
+                airplay_port = engine->airplay_receiver->port();
+                airplay_device_id = engine->airplay_receiver->device_id();
+                airplay_public_key = engine->airplay_receiver->public_key();
+                AD_LOG_INFO("AirPlay 接收端已就绪，控制通道端口 {}", airplay_port);
+            } else {
+                engine->airplay_receiver.reset();
+                engine->airplay_bridge.reset();
+                const std::string message =
+                    "AirPlay 接收端启动失败，本次不广播 AirPlay：" + airplay_error;
+                AD_LOG_ERROR("{}", message);
+                engine->set_last_error(message);
+            }
+        } catch (const std::exception& ex) {
             engine->airplay_receiver.reset();
             engine->airplay_bridge.reset();
             const std::string message =
-                "AirPlay 接收端启动失败，本次不广播 AirPlay：" + airplay_error;
+                std::string("AirPlay 接收端启动时抛出异常，本次不广播 AirPlay：") + ex.what();
+            AD_LOG_ERROR("{}", message);
+            engine->set_last_error(message);
+        } catch (...) {
+            engine->airplay_receiver.reset();
+            engine->airplay_bridge.reset();
+            const std::string message =
+                "AirPlay 接收端启动时抛出未知异常，本次不广播 AirPlay";
             AD_LOG_ERROR("{}", message);
             engine->set_last_error(message);
         }
