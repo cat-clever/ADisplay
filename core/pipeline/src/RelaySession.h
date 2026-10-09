@@ -2,11 +2,18 @@
 //
 // 会话 = 一份远端播放列表定下来的分片清单 + 这些分片的按需生产与缓存。
 //
-// 生产是严格按播放列表顺序、同一时刻只有一个线程在做：fMP4 的时间戳要一条道
-// 走到底（见 Mp4Remuxer），乱序生产会让 dts 倒退，复用器直接报错。所以谁先来
-// 谁当生产者 —— 请求第 n 份分片的线程负责把前面还没产的一并产出来，其余请求
-// 在同一把锁上等自己的那一份就绪。这样既满足「并行请求不打乱顺序」，也满足
-// 「同一份分片只下载一次、只换封装一次」。
+// 同一时刻只有一个线程在生产：fMP4 的时间戳要一条道走到底（见 Mp4Remuxer），
+// 乱序生产会让 dts 倒退，复用器直接报错。
+//
+// 跨度小的时候就顺序补 —— 谁先来谁当生产者，请求第 n 份分片的线程把前面还没产
+// 的一并产出来，其余请求在同一把锁上等自己那一份就绪。这样既满足了「不打乱顺序」，
+// 也满足了「同一份分片只下载一次、只换封装一次」。
+//
+// 跨度大时不这么做：顺序补的代价是要把中间每一份都下载、换封装一遍，用户拖一下
+// 进度条跳到几百份之后，那就成了几百次网络往返加换封装 —— 播放器那边表现出来
+// 就是「卡住不动」。所以大跨度直接从目标那一份重开一个换封装器，并把它的时间轴
+// 起点抬到那一份的起始时刻（见 Mp4Remuxer::set_timeline_start_ms），
+// 新旧分片的时间戳照样接得上。
 //
 // 请求可能早于播放列表到达的次序被打乱（播放器会先要 init 段、再要它当前需要
 // 的那份分片），等待是被允许的：等不到就停不下来的是 stop() —— 它会把所有等待
@@ -27,7 +34,10 @@ namespace adisplay::pipeline {
 
 class RelaySession {
 public:
-    RelaySession(std::string playlist_url, std::vector<std::string> segment_urls);
+    // segment_start_ms 与 segment_urls 一一对应，是每份分片的起始时刻（毫秒）。
+    // 可以传空 —— 那样跳转时的起点都按 0 算，时间戳会不连续，但不会崩。
+    RelaySession(std::string playlist_url, std::vector<std::string> segment_urls,
+                 std::vector<int64_t> segment_start_ms);
     ~RelaySession();
 
     RelaySession(const RelaySession&) = delete;
@@ -66,7 +76,11 @@ private:
     };
 
     // 把下标 index 为止还没产的分片一次产完（失败过的跳过）。不持锁调用。
+    // 跨度大时会先把生产位置跳到 index 再开始（见 restart_at）。
     void produce_until(std::size_t index);
+    // 从 index 重新开始生产：换一个新的换封装器，并把时间轴起点抬到那一份的
+    // 起始时刻。持锁调用（内部自己加锁）。
+    void restart_at(std::size_t index);
     // 下载 + 换封装一份分片。不持锁调用，只由生产者线程调用。
     Produced produce_one(std::size_t index);
 
@@ -74,6 +88,7 @@ private:
 
     const std::string playlist_url_;
     const std::vector<std::string> segment_urls_;
+    const std::vector<int64_t> segment_start_ms_;
 
     mutable std::mutex mutex_;
     std::condition_variable condition_;

@@ -13,11 +13,24 @@ namespace {
 // 十秒还没回来基本就是断了，早点失败让播放器自己重试。
 constexpr int kSegmentTimeoutSeconds = 10;
 
+// 顺序补的最大跨度（份）。
+//
+// 这个数权衡的是「跳一次多久能出画面」和「时间戳有多连续」：顺序补出来的时间戳
+// 天然连续，但每多补一份就多一次下载加换封装；跳转重开则立刻可用，代价是新旧
+// 分片之间可能有一帧上下的错位（起点取的是 EXTINF 的累加值，而顺序补累加的是
+// 实际包时长，两者本就差一点点）。
+//
+// 三份大约一秒的内容，播放器那边感觉不到等待，也足够吸收「拖了一点点」这种
+// 常见的拖动。
+constexpr std::size_t kSequentialGap = 3;
+
 }  // namespace
 
-RelaySession::RelaySession(std::string playlist_url, std::vector<std::string> segment_urls)
+RelaySession::RelaySession(std::string playlist_url, std::vector<std::string> segment_urls,
+                           std::vector<int64_t> segment_start_ms)
     : playlist_url_(std::move(playlist_url)),
       segment_urls_(std::move(segment_urls)),
+      segment_start_ms_(std::move(segment_start_ms)),
       slots_(segment_urls_.size()) {}
 
 RelaySession::~RelaySession() {
@@ -107,7 +120,37 @@ bool RelaySession::init_segment(std::vector<uint8_t>* out, std::string* error) {
     }
 }
 
+void RelaySession::restart_at(std::size_t index) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (index >= slots_.size()) {
+        return;
+    }
+    // 换一个新的换封装器，并把时间轴起点抬到目标那一份的起始时刻。
+    // 不换的话它的时间轴还停在上一次生产到的位置，新分片的时间戳会往回跳。
+    remuxer_ = std::make_unique<Mp4Remuxer>();
+    if (index < segment_start_ms_.size()) {
+        remuxer_->set_timeline_start_ms(segment_start_ms_[index]);
+    }
+    next_index_ = index;
+    AD_LOG_INFO("本地中转：跳到第 {} 份分片，从那里重新换封装", index);
+}
+
 void RelaySession::produce_until(std::size_t index) {
+    // 先决定这一份是顺序补出来，还是从它重开。
+    bool restart = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (stopping_ || broken_) {
+            return;
+        }
+        // 目标在下一个待产位置之前（它被更早的一次跳转跳过了），
+        // 或者离得太远 —— 两种都只能重开。
+        restart = index < next_index_ || index - next_index_ > kSequentialGap;
+    }
+    if (restart) {
+        restart_at(index);
+    }
+
     for (;;) {
         std::size_t current = 0;
         {

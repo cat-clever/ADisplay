@@ -300,7 +300,8 @@ void MediaRelay::Impl::handle_local_playlist(const httplib::Request& request,
             // 已经产好的分片不必重来。
             active = this->session;
         } else {
-            active = std::make_shared<RelaySession>(playlist_url, local.segment_urls);
+            active = std::make_shared<RelaySession>(playlist_url, local.segment_urls,
+                                                    local.segment_start_ms);
             this->session = active;
         }
     }

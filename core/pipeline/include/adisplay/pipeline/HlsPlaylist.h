@@ -43,6 +43,14 @@ std::string first_variant_url(const std::string& body, const std::string& playli
 struct LocalVodPlaylist {
     std::string body;                       // 空表示生成失败
     std::vector<std::string> segment_urls;  // 与 seg-<n>.m4s 一一对应的远端地址
+
+    // 每份分片的起始时刻（毫秒），由前面所有分片的 EXTINF 累加得来。
+    //
+    // 中转跳转时要用它：换封装的时间轴是「一条道走到底」的，从中间某一份重新
+    // 开始时必须把时间轴抬到它的起始时刻，否则新分片的时间戳会退回到零，
+    // 播放器那边就是一次时间轴断裂。取 EXTINF 的累加值是准的 —— 播放器自己
+    // 也是按这些 EXTINF 算时间轴的。
+    std::vector<int64_t> segment_start_ms;
 };
 
 // 按远端播放列表正文生成一份指向本地 init.mp4 / seg-<n>.m4s 的 VOD 播放列表。

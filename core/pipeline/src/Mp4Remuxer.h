@@ -41,6 +41,14 @@ public:
     Mp4Remuxer(const Mp4Remuxer&) = delete;
     Mp4Remuxer& operator=(const Mp4Remuxer&) = delete;
 
+    // 设定时间轴起点（毫秒）。默认 0。
+    //
+    // 中转从中间某一份分片重新开始时（用户拖了进度条）用它：换封装的时间轴是
+    // 一条道走到底的，不抬起点的话新分片的时间戳会从零开始，播放器那边就是
+    // 一次时间轴倒退 —— 表现是卡住或者花屏。抬到那份分片的真实起始时刻，
+    // 新旧分片就接得上。
+    void set_timeline_start_ms(int64_t start_ms) { timeline_start_ms_ = start_ms; }
+
     // 把一段 TS 字节换成 fMP4，out 收到这一段新增的 moof+mdat 字节。
     // 第一次调用会顺带建好输出流并写出 ftyp+moov，可以用 init_segment() 取走。
     // 同一份源的分片必须按播放顺序调用 —— 时间戳是一条道走到底的。
@@ -80,6 +88,7 @@ private:
     std::vector<int64_t> offsets_;             // 每条输出流在当前分片上的时间戳平移量
     std::vector<int64_t> timeline_next_dts_;   // 每条输出流的全局时间轴末尾（输入时基）
     std::vector<int64_t> last_written_dts_;    // 已写出的最后一个 dts（输出时基），保严格递增
+    int64_t timeline_start_ms_ = 0;
     bool has_init_ = false;
     bool header_written_ = false;
 };

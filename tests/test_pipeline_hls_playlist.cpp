@@ -117,6 +117,18 @@ AD_TEST(hls_local_playlist_from_real_ts, "生成的本地 VOD 播放列表逐行
     AD_CHECK_EQ(local_init_name(), std::string("init.mp4"));
 }
 
+AD_TEST(hls_local_playlist_segment_start_times, "每份分片的起始时刻按 EXTINF 累加") {
+    const LocalVodPlaylist local = build_local_vod_playlist(real_ts_playlist(), kRemoteUrl);
+
+    // 中转跳转要靠这个值把换封装的时间轴抬到目标那一份的起始时刻。
+    // 算错了就是时间轴不连续 —— 表现是拖完进度条卡住或者花屏，而这条路径
+    // 光看日志是看不出来的（日志只会说「跳转到第 N 份」）。
+    AD_CHECK_EQ(local.segment_start_ms.size(), static_cast<std::size_t>(2));
+    AD_CHECK_EQ(local.segment_start_ms[0], static_cast<int64_t>(0));
+    // 第一份 7.68 秒。
+    AD_CHECK_EQ(local.segment_start_ms[1], static_cast<int64_t>(7680));
+}
+
 AD_TEST(hls_local_playlist_absolute_segments, "源里是绝对地址时也要能生成") {
     const std::string body =
         "#EXTM3U\n"

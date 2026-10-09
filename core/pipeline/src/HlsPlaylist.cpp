@@ -333,7 +333,13 @@ LocalVodPlaylist build_local_vod_playlist(const std::string& remote_body,
 
     result.body = std::move(body);
     result.segment_urls.reserve(segments.size());
+    result.segment_start_ms.reserve(segments.size());
+    int64_t elapsed_ms = 0;
     for (HlsSegment& segment : segments) {
+        result.segment_start_ms.push_back(elapsed_ms);
+        // 累加的是写进播放列表的那个时长（四舍五入到毫秒），不是原始浮点值 ——
+        // 两边用同一个数，播放器按 EXTINF 算出来的位置才和我们对得上。
+        elapsed_ms += static_cast<int64_t>(segment.duration * 1000.0 + 0.5);
         result.segment_urls.push_back(std::move(segment.url));
     }
     return result;

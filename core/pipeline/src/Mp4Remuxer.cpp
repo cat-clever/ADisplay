@@ -10,6 +10,7 @@ extern "C" {
 #include <libavcodec/bsf.h>
 #include <libavformat/avformat.h>
 #include <libavutil/error.h>
+#include <libavutil/mathematics.h>
 #include <libavutil/mem.h>
 }
 
@@ -431,6 +432,19 @@ bool Mp4Remuxer::ensure_output(const AVFormatContext* input, std::string* error)
 
     offsets_.assign(output_->nb_streams, 0);
     timeline_next_dts_.assign(output_->nb_streams, 0);
+    if (timeline_start_ms_ > 0) {
+        // 把起点从毫秒换算到每条流自己的输入时基上 —— 后面的时间轴都是在这个
+        // 时基上累加的（见 emit_packet）。
+        for (unsigned int i = 0; i < input->nb_streams; ++i) {
+            const int out_index = stream_map_[i];
+            if (out_index < 0) {
+                continue;
+            }
+            const AVRational milliseconds = {1, 1000};
+            timeline_next_dts_[static_cast<std::size_t>(out_index)] =
+                av_rescale_q(timeline_start_ms_, milliseconds, input->streams[i]->time_base);
+        }
+    }
     last_written_dts_.assign(output_->nb_streams, std::numeric_limits<int64_t>::min());
 
     AD_LOG_INFO("fMP4 复用器就绪：{} 条流，init 段 {} 字节", output_->nb_streams,
