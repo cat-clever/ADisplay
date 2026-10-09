@@ -68,6 +68,25 @@ import kotlinx.coroutines.delay
 /** 控件出现后停留多久自动收起。 */
 private const val CONTROLS_TIMEOUT_MS = 4000L
 
+/** 一次快进/快退跨多少毫秒。 */
+private const val SEEK_STEP_MS = 10_000L
+
+/**
+ * 悬浮条上的传输控制。
+ *
+ * 为什么要有它：焦点只能有一个主人。遥控器的按键落到我们这条上，播放器自带
+ * 的控制条就够不到了（它的控制条要靠 PlayerView 自己拿到按键才弹得出来）——
+ * 遥控器用户于是按不了暂停、快进快退。所以遥控器那条路得由我们这条把传输
+ * 也管起来（文档 2.3 要的是「遥控器完成全部操作」）。
+ *
+ * 触屏那条路不用它：点击直接落到播放器上，它自带的控制条照常出现。
+ */
+class PlaybackTransport(
+    val isPlaying: Boolean,
+    val onTogglePlay: () -> Unit,
+    val onSeekBy: (Long) -> Unit,
+)
+
 /**
  * 全屏播放画面，控件悬浮其上。
  *
@@ -79,6 +98,8 @@ private const val CONTROLS_TIMEOUT_MS = 4000L
  *   上**。镜像那路画面是个纯 Surface，不处理触摸，所以默认 true（点画面唤出控件）。
  * @param showToken 外部信号：每递增一次就把控件亮出来一遍。播放器把控制条亮出来时
  *   由它递增，于是「点画面」一次就让播放器的进度条和我们的悬浮条一起出现。
+ * @param transport 传输控制（暂停、快进、快退）。遥控器那条路必须给，否则遥控器
+ *   用户碰不到播放器的控制条；触屏那条路给 null 就行（播放器自己带）。
  * @param content 画面本身：镜像是一条 Surface，DLNA 是一个 PlayerView。
  */
 @Composable
@@ -88,6 +109,7 @@ fun PlaybackFullScreen(
     onShowLog: () -> Unit,
     captureTouches: Boolean = true,
     showToken: Int = 0,
+    transport: PlaybackTransport? = null,
     content: @Composable BoxScope.() -> Unit,
 ) {
     val view = LocalView.current
@@ -136,6 +158,9 @@ fun PlaybackFullScreen(
     }
 
     val catchFocus = remember { FocusRequester() }
+    val backFocus = remember { FocusRequester() }
+    val playFocus = remember { FocusRequester() }
+    val forwardFocus = remember { FocusRequester() }
     val logFocus = remember { FocusRequester() }
     val stopFocus = remember { FocusRequester() }
 
@@ -250,6 +275,42 @@ fun PlaybackFullScreen(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.Center,
             ) {
+                // 传输控制。只在遥控器那条路上给（见 PlaybackTransport 的说明）。
+                if (transport != null) {
+                    ActionButton(
+                        text = "-10秒",
+                        textStyle = layout.actionStyle,
+                        minWidth = 0.dp,
+                        focusRequester = backFocus,
+                        compact = true,
+                        onClick = { transport.onSeekBy(-SEEK_STEP_MS) },
+                    )
+
+                    Spacer(modifier = Modifier.width(12.dp))
+
+                    ActionButton(
+                        text = if (transport.isPlaying) "暂停" else "播放",
+                        textStyle = layout.actionStyle,
+                        minWidth = 0.dp,
+                        focusRequester = playFocus,
+                        compact = true,
+                        onClick = transport.onTogglePlay,
+                    )
+
+                    Spacer(modifier = Modifier.width(12.dp))
+
+                    ActionButton(
+                        text = "+10秒",
+                        textStyle = layout.actionStyle,
+                        minWidth = 0.dp,
+                        focusRequester = forwardFocus,
+                        compact = true,
+                        onClick = { transport.onSeekBy(SEEK_STEP_MS) },
+                    )
+
+                    Spacer(modifier = Modifier.width(12.dp))
+                }
+
                 // 紧凑尺寸：这条是盖在画面上的，按最小可点范围给就够了。
                 ActionButton(
                     text = "日志",

@@ -118,6 +118,13 @@ fun PlaybackScreen(
     // 播放器把控制条亮出来时递增，让我们的悬浮条跟着一起出现。
     var controlsToken by remember { mutableStateOf(0) }
 
+    // 在不在播。悬浮条上那个按钮的文字靠它切换。
+    var playing by remember { mutableStateOf(false) }
+
+    // 遥控器那条路：传输控制由悬浮条提供（见 PlaybackTransport 的说明）。
+    // 触屏那条路不给 —— 点击直接落到播放器上，它自带的那套更顺手。
+    val inputMode = rememberInputMode()
+
     var buffering by remember { mutableStateOf(false) }
     var speedBytesPerSecond by remember { mutableStateOf(0L) }
 
@@ -125,6 +132,10 @@ fun PlaybackScreen(
         val stateListener = object : Player.Listener {
             override fun onPlaybackStateChanged(playbackState: Int) {
                 buffering = playbackState == Player.STATE_BUFFERING
+            }
+
+            override fun onIsPlayingChanged(isPlayingNow: Boolean) {
+                playing = isPlayingNow
             }
         }
 
@@ -160,6 +171,20 @@ fun PlaybackScreen(
         // 我们只跟着它的控制条一起亮相（见 showToken）。
         captureTouches = false,
         showToken = controlsToken,
+        transport = if (inputMode == InputMode.Remote) {
+            PlaybackTransport(
+                isPlaying = playing,
+                onTogglePlay = {
+                    if (exoPlayer.isPlaying) exoPlayer.pause() else exoPlayer.play()
+                },
+                onSeekBy = { delta ->
+                    val target = exoPlayer.currentPosition + delta
+                    exoPlayer.seekTo(if (target < 0L) 0L else target)
+                },
+            )
+        } else {
+            null
+        },
     ) {
         AndroidView(
             factory = { ctx ->
@@ -173,11 +198,18 @@ fun PlaybackScreen(
                     controllerAutoShow = true
                     // 它一亮，我们的悬浮条（日志 / 停止接收投屏）跟着亮 ——
                     // 一次点击两样都出来，用户不用分两次点。
-                    setControllerVisibilityListener { visibility ->
-                        if (visibility == View.VISIBLE) {
-                            controlsToken += 1
+                    //
+                    // 显式写出 SAM 构造器：这个 setter 还有一个接收
+                    // Player.ControlDispatcher 的旧重载（已废弃），只给 lambda
+                    // 的话 Kotlin 推不出该用哪个，报「Overload resolution
+                    // ambiguity」。
+                    setControllerVisibilityListener(
+                        PlayerView.ControllerVisibilityListener { visibility ->
+                            if (visibility == View.VISIBLE) {
+                                controlsToken += 1
+                            }
                         }
-                    }
+                    )
                     // 起播缓冲时转圈。电视上拉流慢是常事，黑屏和「正在缓冲」
                     // 在用户眼里是两回事。
                     setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING)
