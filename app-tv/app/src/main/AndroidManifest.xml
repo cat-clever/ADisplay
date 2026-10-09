@@ -7,7 +7,15 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
 
-    <!-- 电视端开机自启与前台服务常驻（文档 2.3），随批次 5 接入。 -->
+    <!-- 前台服务：接收服务要在应用退到后台之后继续跑（文档 2.3）。 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <!-- Android 14 起前台服务要声明类型，类型对应的权限也得申请。 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <!-- Android 13 起，那条常驻通知要用户允许通知才显示得出来。
+         拒绝了不影响接收，只是没有通知。 -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- 电视端开机自启还没做，那是批次 5 的事。 -->
 
     <!-- 文档 4.5：触屏设为非必需，否则纯遥控器设备在应用商店会被过滤。 -->
     <uses-feature
@@ -48,5 +56,18 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!--
+            接收服务的前台服务外壳：只负责让进程在后台活着（见 ReceiverService）。
+            类型取 mediaPlayback —— 本应用做的就是接收媒体流并把它显示出来。
+
+            stopWithTask=false 是从最近任务里划掉应用也**不**停服务，投屏继续。
+            这是默认值，写出来是为了表明有意为之，而不是漏配。
+        -->
+        <service
+            android:name=".ReceiverService"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback"
+            android:stopWithTask="false" />
     </application>
 </manifest>

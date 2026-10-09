@@ -441,10 +441,19 @@ class EngineModel(context: Context) {
         // 服务起来了才广播：端口这时才确定，而且「广播了却没东西应答」比
         // 「没广播」更难查 —— 手机上看得到设备、点下去毫无反应。
         mdns.publish(AdDisplayNative.nativeGetAirplayAdvert(handle))
+
+        // 起前台服务保活。手机切到后台、锁屏之后接收不能断，而那时候整个进程
+        // 都不再是前台进程，系统随时能把它回收 —— 前台服务那条常驻通知就是
+        // 用来换这个的（见 ReceiverService）。
+        ReceiverService.start(appContext)
     }
 
     /** 关闭接收服务。未开启时调用是安全的空操作。 */
     fun stopService() {
+        // 前台服务先撤。它只是保活用的外壳，撤晚了会留下一条「正在接收」的通知，
+        // 而底下其实已经没有接收了。
+        ReceiverService.stop(appContext)
+
         val handle = engine
         if (handle == 0L) return
         if (!serviceEnabled) {
@@ -503,16 +512,6 @@ class EngineModel(context: Context) {
     }
 
     /** 销毁引擎。由 Activity 的 onDestroy 调用。 */
-    fun release() {
-        stopService()
-        val handle = engine
-        engine = 0L
-        if (handle != 0L) {
-            AdDisplayNative.nativeDestroy(handle)
-        }
-        releaseMulticastLock()
-    }
-
     /**
      * 拿一个 WiFi 组播锁。
      *
