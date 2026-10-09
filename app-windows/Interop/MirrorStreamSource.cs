@@ -19,6 +19,7 @@ using System.Collections.Generic;
 using Windows.Media.Core;
 using Windows.Media.MediaProperties;
 using Windows.Security.Cryptography;
+using Windows.Storage.Streams;
 
 namespace ADisplay.Windows.Interop;
 
@@ -202,9 +203,13 @@ public sealed class MirrorStreamSource
         args.Request.Sample = MakeSample(frame, keyFrame);
     }
 
-    private Windows.Media.Core.MediaStreamSample MakeSample(byte[] avcc, bool keyFrame)
+    // 这里刻意不写全限定名：本项目自己的命名空间里有 ADisplay.Windows，
+    // 而 C# 解析 `Windows.Media.Core.X` 这种写法时先从当前命名空间找起 ——
+    // 它会命中 ADisplay.Windows 然后在里面找 Media，报「ADisplay.Windows 里
+    // 没有 Media」。文件顶部的 using 不受影响（那里是从全局命名空间解析的）。
+    private MediaStreamSample MakeSample(byte[] avcc, bool keyFrame)
     {
-        Windows.Storage.Streams.IBuffer buffer =
+        IBuffer buffer =
             CryptographicBuffer.CreateFromByteArray(avcc);
         // 时间戳只是用来排队与显示的，按 60fps 递推即可 —— 镜像的帧率跟着发送端走。
         // 计数器要原子自增：这条路径既会被核心的工作线程走到（有请求在等时直接答复），
