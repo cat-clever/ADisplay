@@ -696,9 +696,18 @@ class EngineModel(context: Context) {
         while (logs.size > MAX_LOG_LINES) {
             logs.removeAt(0)
         }
-        // 也往 logcat 打一份：CI 之外真机排障时 adb logcat 往往比看屏幕方便。
-        if (level == LogLevel.ERROR) {
-            Log.e(TAG, message)
+        // 也往 logcat 打一份，而且**不分级别**。
+        //
+        // 原来只有 ERROR 才进 logcat（注释里写着「比看屏幕方便」，代码却只做了
+        // 一级）。结果是真机出问题时只剩两条路：截图，或者看那块一次只显示得下
+        // 两行、又不可聚焦因而滚不动的日志区 —— 排查等于没有手段。接上之后
+        // adb logcat 就能拿到全量。
+        when (level) {
+            LogLevel.ERROR -> Log.e(TAG, message)
+            LogLevel.WARN -> Log.w(TAG, message)
+            LogLevel.DEBUG -> Log.d(TAG, message)
+            LogLevel.TRACE -> Log.v(TAG, message)
+            else -> Log.i(TAG, message)
         }
     }
 }

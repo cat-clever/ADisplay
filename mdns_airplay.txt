@@ -1,0 +1,23 @@
+Browsing for _airplay._tcp.local
+DATE: ---Fri 09 Oct 2026---
+14:07:00.018  ...STARTING...
+Timestamp     A/R    Flags  if Domain               Service Type         Instance Name
+14:07:00.018  Add        3  16 local.               _airplay._tcp.       clever-cat
+14:07:00.018  Add        3   1 local.               _airplay._tcp.       clever-cat
+14:07:00.018  Add        3  30 local.               _airplay._tcp.       clever-cat
+14:07:00.018  Add        3  32 local.               _airplay._tcp.       clever-cat
+14:07:00.018  Add        3  34 local.               _airplay._tcp.       clever-cat
+14:07:00.018  Add        3   7 local.               _airplay._tcp.       clever-cat
+14:07:00.018  Add        3  38 local.               _airplay._tcp.       clever-cat
+14:07:00.018  Add        3  20 local.               _airplay._tcp.       clever-cat
+14:07:00.018  Add        3  16 local.               _airplay._tcp.       王沛超’s Mac mini
+14:07:00.018  Add        3  16 local.               _airplay._tcp.       cccss
+14:07:00.018  Add        3   1 local.               _airplay._tcp.       cccss
+14:07:00.018  Add        3  30 local.               _airplay._tcp.       cccss
+14:07:00.018  Add        3  32 local.               _airplay._tcp.       cccss
+14:07:00.018  Add        3  34 local.               _airplay._tcp.       cccss
+14:07:00.018  Add        3   7 local.               _airplay._tcp.       cccss
+14:07:00.018  Add        3  38 local.               _airplay._tcp.       cccss
+14:07:00.018  Add        3  20 local.               _airplay._tcp.       cccss
+14:07:00.018  Add        2  20 local.               _airplay._tcp.       localhost
+14:07:00.208  Add        2  16 local.               _airplay._tcp.       kinzun的Mac mini (4)
