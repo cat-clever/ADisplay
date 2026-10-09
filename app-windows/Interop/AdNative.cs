@@ -162,6 +162,26 @@ internal struct AdMirrorFrame
 }
 
 /// <summary>
+/// 一帧解码后的镜像伴音，对应 C 的 AdAudioFrame。
+///
+/// Data 是**交错** float32（LRLRLR…），已经解码 —— AAC-ELD 在 Windows 的
+/// Media Foundation 上不保证支持，所以解码放在核心里做（FFmpeg），平台只播放。
+/// 它只在回调期间有效，托管侧要留存必须自己拷一份。
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct AdAudioFrame
+{
+    public uint StructSize;
+    public uint SessionId;
+    public long PtsUs;
+    public uint SampleRate;
+    public uint Channels;
+    public uint FrameCount;
+    public uint Reserved;
+    public IntPtr Data;
+}
+
+/// <summary>
 /// 界面层播放器的当前状态，对应 C 的 AdPlaybackStatus。
 ///
 /// 界面层是播放状态的唯一权威来源：核心不碰播放器，手机的 GetTransportInfo /

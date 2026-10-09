@@ -33,6 +33,8 @@ public sealed partial class MainWindow : Window
     private DispatcherTimer? _reportTimer;
     // 镜像会话的帧源。null 表示当前不是镜像会话。
     private MirrorStreamSource? _mirrorSource;
+    // 镜像伴音的播放端。核心里已经解成 PCM，这里只负责送进系统音频。
+    private readonly MirrorAudioPlayer _mirrorAudio = new();
     // 独立的日志窗口。null 表示当前没开着。
     private LogWindow? _logWindow;
     private readonly ObservableCollection<string> _logLines = new();
@@ -64,6 +66,8 @@ public sealed partial class MainWindow : Window
         _engine.CastingEnded += OnCastingEnded;
         _engine.MirrorStarted += OnMirrorStarted;
         _engine.MirrorFrameReceived += OnMirrorFrameReceived;
+        _engine.AudioFrameReceived += OnAudioFrameReceived;
+        _mirrorAudio.Notice += OnMirrorNotice;
 
         Closed += OnWindowClosed;
 
@@ -324,6 +328,13 @@ public sealed partial class MainWindow : Window
         });
     }
 
+    private void OnAudioFrameReceived(float[] samples, int sampleRate, int channels)
+    {
+        // 不切回 UI 线程：伴音每秒约 92 帧，每帧跳一次会把主线程压满、声音断续。
+        // 播放端只入队，音频图按自己的节奏来取。
+        _mirrorAudio.Enqueue(samples, sampleRate, channels);
+    }
+
     private void OnMirrorNotice(string message)
     {
         // 回调在核心的工作线程上触发，日志集合只能在 UI 线程碰。
@@ -377,6 +388,8 @@ public sealed partial class MainWindow : Window
         _castSessionId = 0;
 
         PlayerElement.Source = null;
+        // 伴音也停掉：会话结束了不该继续出声。
+        _mirrorAudio.Stop();
         // 镜像的帧源要显式收掉：它挂着一次可能还没答复的拉取请求，
         // 放着不管会让管线一直等下去。
         if (_mirrorSource != null)

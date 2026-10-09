@@ -36,6 +36,7 @@ internal sealed class AdEngine : IDisposable
     private delegate void SessionClosedCallback(IntPtr userData, uint sessionId, int reason);
     private delegate void SessionOpenedCallback(IntPtr userData, uint sessionId, IntPtr peer, int streamKind);
     private delegate void MirrorFrameCallback(IntPtr userData, IntPtr frame);
+    private delegate void AudioFrameCallback(IntPtr userData, IntPtr frame);
 
     private IntPtr _handle = IntPtr.Zero;
     private bool _disposed;
@@ -52,6 +53,7 @@ internal sealed class AdEngine : IDisposable
     private SessionClosedCallback? _sessionClosedCallback;
     private SessionOpenedCallback? _sessionOpenedCallback;
     private MirrorFrameCallback? _mirrorFrameCallback;
+    private AudioFrameCallback? _audioFrameCallback;
 
     public event Action<AdServiceState>? StateChanged;
     public event Action<AdLogLevel, string>? LogEmitted;
@@ -67,6 +69,14 @@ internal sealed class AdEngine : IDisposable
 
     /// <summary>iPhone 开始屏幕镜像。界面据此把播放源换成镜像流。</summary>
     public event Action? MirrorStarted;
+
+    /// <summary>
+    /// 收到一帧镜像伴音。samples 是**交错** float32（LRLRLR…），已解码。
+    ///
+    /// 与视频帧同理不切回 UI 线程：伴音每秒约 92 帧，每帧跳一次主线程会让声音
+    /// 断续。播放端自己入队，音频图按它自己的节奏来取。
+    /// </summary>
+    public event Action<float[], int, int>? AudioFrameReceived;
 
     /// <summary>
     /// 收到一帧镜像视频。data 是 AVCC 格式的 H.264/H.265，已解密。
@@ -132,6 +142,7 @@ internal sealed class AdEngine : IDisposable
         _sessionClosedCallback = OnSessionClosedFromCore;
         _sessionOpenedCallback = OnSessionOpenedFromCore;
         _mirrorFrameCallback = OnMirrorFrameFromCore;
+        _audioFrameCallback = OnAudioFrameFromCore;
 
         AdCallbacks callbacks = default;
         callbacks.StructSize = (uint)Marshal.SizeOf<AdCallbacks>();
@@ -143,6 +154,7 @@ internal sealed class AdEngine : IDisposable
         callbacks.OnSessionClosed = Marshal.GetFunctionPointerForDelegate(_sessionClosedCallback);
         callbacks.OnSessionOpened = Marshal.GetFunctionPointerForDelegate(_sessionOpenedCallback);
         callbacks.OnMirrorFrame = Marshal.GetFunctionPointerForDelegate(_mirrorFrameCallback);
+        callbacks.OnAudioFrame = Marshal.GetFunctionPointerForDelegate(_audioFrameCallback);
 
         AdResult result = AdNative.ad_engine_set_callbacks(_handle, ref callbacks, IntPtr.Zero);
         ThrowIfFailed(result, "注册回调");
@@ -201,6 +213,32 @@ internal sealed class AdEngine : IDisposable
         {
             handler();
         }
+    }
+
+    private void OnAudioFrameFromCore(IntPtr userData, IntPtr frame)
+    {
+        if (frame == IntPtr.Zero)
+        {
+            return;
+        }
+
+        Action<float[], int, int>? handler = AudioFrameReceived;
+        if (handler == null)
+        {
+            return;
+        }
+
+        AdAudioFrame data = Marshal.PtrToStructure<AdAudioFrame>(frame);
+        if (data.Data == IntPtr.Zero || data.FrameCount == 0 || data.Channels == 0)
+        {
+            return;
+        }
+
+        // 拷成托管数组再交出去：核心那个指针只在回调期间有效。
+        int count = checked((int)(data.FrameCount * data.Channels));
+        float[] samples = new float[count];
+        Marshal.Copy(data.Data, samples, 0, count);
+        handler(samples, (int)data.SampleRate, (int)data.Channels);
     }
 
     private void OnMirrorFrameFromCore(IntPtr userData, IntPtr frame)
