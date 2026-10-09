@@ -2,11 +2,13 @@ package com.adisplay.tv.ui
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -74,6 +76,7 @@ private fun StandbyContent(model: EngineModel) {
     val inputMode = rememberInputMode()
 
     val buttonFocus = remember { FocusRequester() }
+    val clearLogFocus = remember { FocusRequester() }
 
     Surface(modifier = Modifier.fillMaxSize()) {
         Column(
@@ -115,16 +118,36 @@ private fun StandbyContent(model: EngineModel) {
                 // 按钮紧跟状态文字、排在说明之前 —— 矮屏上它必须在首屏可见区内。
                 Spacer(modifier = Modifier.height(layout.spacingMedium))
 
-                ActionButton(
-                    text = if (model.serviceEnabled) "关闭接收服务" else "开启接收服务",
-                    textStyle = layout.actionStyle,
-                    minWidth = layout.buttonMinWidth,
-                    focusRequester = buttonFocus,
-                    // 核心库没加载起来时按钮压暗且不可聚焦：让用户看出是这一块
-                    // 坏了，而不是对着一个按了没反应的按钮猜网络。
-                    enabled = model.isNativeAvailable,
-                    onClick = { model.toggleService() },
-                )
+                // 两个按钮并排而不是上下叠：叠起来会多占一行高度，而矮屏上
+                // 这个位置是算着放的（见上面的注释），日志区会被挤掉。
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.Center,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    ActionButton(
+                        text = if (model.serviceEnabled) "关闭接收服务" else "开启接收服务",
+                        textStyle = layout.actionStyle,
+                        minWidth = layout.buttonMinWidth,
+                        focusRequester = buttonFocus,
+                        // 核心库没加载起来时按钮压暗且不可聚焦：让用户看出是这一块
+                        // 坏了，而不是对着一个按了没反应的按钮猜网络。
+                        enabled = model.isNativeAvailable,
+                        onClick = { model.toggleService() },
+                    )
+
+                    Spacer(modifier = Modifier.width(16.dp))
+
+                    ActionButton(
+                        text = "清除日志",
+                        textStyle = layout.actionStyle,
+                        minWidth = layout.buttonMinWidth,
+                        focusRequester = clearLogFocus,
+                        // 没有日志时压暗：一眼看出这一项此刻没意义。
+                        enabled = model.logs.isNotEmpty(),
+                        onClick = { model.clearLogs() },
+                    )
+                }
 
                 Spacer(modifier = Modifier.height(layout.spacingLoose))
 

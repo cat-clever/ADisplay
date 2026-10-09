@@ -24,9 +24,10 @@
                 日志每行是独立的 TextBlock（便于虚拟化），代价是只能一行行选。
                 贴给别人排查时很不方便，所以给一个一键复制的入口。
             -->
-            <Button Content="复制全部"
-                    HorizontalAlignment="Right"
-                    Click="OnCopyLogClick" />
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8">
+                <Button Content="复制全部" Click="OnCopyLogClick" />
+                <Button Content="清除日志" Click="OnClearLogClick" />
+            </StackPanel>
         </Grid>
 
         <Border Grid.Row="1"

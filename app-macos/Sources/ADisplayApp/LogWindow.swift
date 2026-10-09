@@ -73,6 +73,7 @@ final class LogTextView: NSView {
     private let scrollView = NSScrollView()
     private let textView = NSTextView()
     private let copyButton = NSButton()
+    private let clearButton = NSButton()
 
     private var lineCount = 0
 
@@ -117,6 +118,13 @@ final class LogTextView: NSView {
         copyButton.action = #selector(copyAll)
         copyButton.isEnabled = false
         addSubview(copyButton)
+
+        clearButton.title = "清除日志"
+        clearButton.bezelStyle = .rounded
+        clearButton.target = self
+        clearButton.action = #selector(clearLog)
+        clearButton.isEnabled = false
+        addSubview(clearButton)
     }
 
     required init?(coder: NSCoder) {
@@ -131,7 +139,7 @@ final class LogTextView: NSView {
         if !existing.isEmpty {
             append(lines: existing)
         } else {
-            refreshCopyButton()
+            refreshButtons()
         }
 
         store.onAppend = { [weak self] lines in
@@ -144,9 +152,9 @@ final class LogTextView: NSView {
     override func layout() {
         super.layout()
         let inset = LogTextView.outerInset
-        copyButton.frame = NSRect(x: inset,
-                                  y: bounds.height - LogTextView.headerHeight + 6,
-                                  width: 96, height: 22)
+        let buttonY = bounds.height - LogTextView.headerHeight + 6
+        copyButton.frame = NSRect(x: inset, y: buttonY, width: 96, height: 22)
+        clearButton.frame = NSRect(x: inset + 104, y: buttonY, width: 96, height: 22)
         // 正文不铺满整块：四周留出与设置页一致的留白。
         scrollView.frame = NSRect(x: inset,
                                   y: inset,
@@ -184,7 +192,7 @@ final class LogTextView: NSView {
         storage.append(NSAttributedString(string: lines.joined(separator: "\n") + "\n"))
         lineCount += lines.count
         trimIfNeeded()
-        refreshCopyButton()
+        refreshButtons()
 
         if wasAtBottom {
             scrollToBottom()
@@ -225,11 +233,21 @@ final class LogTextView: NSView {
         textView.scrollRangeToVisible(end)
     }
 
-    private func refreshCopyButton() {
-        copyButton.isEnabled = lineCount > 0
+    private func refreshButtons() {
+        let hasLines = lineCount > 0
+        copyButton.isEnabled = hasLines
+        clearButton.isEnabled = hasLines
     }
 
     // MARK: - 复制
+
+    @objc private func clearLog() {
+        // 清的是界面上的这一份。核心写的日志文件不动 —— 那是给事后排查用的。
+        LogStore.shared.clear()
+        textView.string = ""
+        lineCount = 0
+        refreshButtons()
+    }
 
     @objc private func copyAll() {
         // 复制的是 LogStore 里那份完整的（上限 500 行），而不是文本视图里

@@ -535,6 +535,15 @@ class EngineModel(context: Context) {
         }
     }
 
+    /**
+     * 清空界面上的日志。
+     *
+     * 核心写的日志文件不动 —— 那份是给事后排查用的，界面上清掉的只是眼前这一屏。
+     */
+    fun clearLogs() {
+        logs.clear()
+    }
+
     private fun appendLog(level: LogLevel, message: String) {
         logs.add("[" + timeFormat.format(Date()) + "] [" + level.label + "] " + message)
         // 限长：电视上这个页面会一挂就是一整天，不封顶的话日志迟早把内存吃光。

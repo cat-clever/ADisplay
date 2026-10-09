@@ -55,6 +55,14 @@ public sealed partial class LogWindow : Window
         _lines.CollectionChanged -= OnLinesChanged;
     }
 
+    private void OnClearLogClick(object sender, RoutedEventArgs e)
+    {
+        // 清的是界面上这一份（主窗口与这里共用同一个集合），清空后
+        // CollectionChanged 会把文本一起刷新掉。核心写的日志文件不动 ——
+        // 那是给事后排查用的。
+        _lines.Clear();
+    }
+
     private void OnCopyLogClick(object sender, RoutedEventArgs e)
     {
         if (_lines.Count == 0)

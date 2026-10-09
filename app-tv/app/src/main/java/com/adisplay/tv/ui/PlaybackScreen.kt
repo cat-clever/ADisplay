@@ -77,6 +77,7 @@ fun PlaybackScreen(
 
     val stopFocus = remember { FocusRequester() }
     val logToggleFocus = remember { FocusRequester() }
+    val clearLogFocus = remember { FocusRequester() }
 
     var logExpanded by remember { mutableStateOf(false) }
 
@@ -180,6 +181,18 @@ fun PlaybackScreen(
                     minWidth = layout.buttonMinWidth,
                     focusRequester = logToggleFocus,
                     onClick = { logExpanded = !logExpanded },
+                )
+
+                Spacer(modifier = Modifier.width(16.dp))
+
+                ActionButton(
+                    text = "清除日志",
+                    textStyle = layout.actionStyle,
+                    minWidth = layout.buttonMinWidth,
+                    focusRequester = clearLogFocus,
+                    // 没有日志时压暗：一眼看出这一项此刻没意义。
+                    enabled = model.logs.isNotEmpty(),
+                    onClick = { model.clearLogs() },
                 )
             }
 
