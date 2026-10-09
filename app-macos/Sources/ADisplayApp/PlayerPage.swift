@@ -258,36 +258,33 @@ struct PlayerPage: View {
     @EnvironmentObject private var model: EngineModel
     @StateObject private var viewModel = PlayerViewModel()
 
-    // 投屏一失败，设置页连同它的日志区会被整个盖住 —— 而那正是最需要看日志的
-    // 时候。所以播放页也要能看，默认收起，不占画面。
-    @State private var showLog = false
-
     let media: EngineModel.ActiveMedia
 
     var body: some View {
-        VStack(spacing: 12) {
+        // 画面占满整个区域，四周不留边距 —— 投屏时用户看的就是画面，
+        // 那一圈留白是白扔的像素。控制条紧贴在画面下方，所以画面本身仍然
+        // 被内容包住，不需要额外的框。这一层与 Windows 端一致。
+        VStack(spacing: 0) {
             PlayerSurface(player: viewModel.player)
-                .frame(minWidth: 560, minHeight: 315)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-            HStack {
+            HStack(spacing: 12) {
                 Text("正在接收投屏")
                     .font(.headline)
-                Spacer()
-                Toggle("显示日志", isOn: $showLog)
-                    .toggleStyle(.button)
-                    .font(.caption)
+                Button("查看日志") {
+                    LogWindowController.shared.show(model: model)
+                }
+                Button("全屏") {
+                    toggleFullScreen()
+                }
                 Button("停止接收") {
                     model.stopCasting()
                 }
             }
-
-            if showLog {
-                logPanel
-            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
         }
-        .padding(16)
-        // 日志区展开时要放得下播放器加日志，所以最小高度按展开后的样子留。
-        .frame(minWidth: 640, minHeight: showLog ? 600 : 420)
+        .frame(minWidth: 520, minHeight: 460)
         .onAppear {
             viewModel.attach(engine: model, media: media)
         }
@@ -300,30 +297,11 @@ struct PlayerPage: View {
         }
     }
 
-    /// 播放页的日志区。内容与设置页共用同一份（EngineModel.logs），
-    /// 所以两边看到的东西永远一致，不需要各自维护。
-    private var logPanel: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 2) {
-                    ForEach(Array(model.logs.enumerated()), id: \.offset) { index, line in
-                        Text(line)
-                            .font(.system(size: 11, design: .monospaced))
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .id(index)
-                    }
-                }
-                .padding(8)
-            }
-            .frame(height: 150)
-            .background(Color(nsColor: .textBackgroundColor).opacity(0.5))
-            .cornerRadius(6)
-            // 新日志进来时自动滚到底 —— 排查时盯的就是最后几行。
-            .onChange(of: model.logs.count) { _ in
-                guard let last = model.logs.indices.last else { return }
-                proxy.scrollTo(last, anchor: .bottom)
-            }
-        }
+    /// 窗口级全屏。与 Windows 端一致 —— 那边走的也是窗口全屏，
+    /// 而不是只把画面填满窗口（那样标题栏还在，投屏时不是用户要的效果）。
+    ///
+    /// AVPlayerView 自带的那个全屏按钮做的事一样，所以两个入口不会打架。
+    private func toggleFullScreen() {
+        NSApplication.shared.keyWindow?.toggleFullScreen(nil)
     }
 }

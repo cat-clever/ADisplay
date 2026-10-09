@@ -12,7 +12,6 @@ using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Controls;
-using Windows.ApplicationModel.DataTransfer;
 using Windows.Media.Core;
 using Windows.Media.Playback;
 using ADisplay.Windows.Interop;
@@ -32,6 +31,8 @@ public sealed partial class MainWindow : Window
     // 每秒把播放器状态回报给核心。手机每隔一段时间会拉 GetPositionInfo，
     // 位置必须持续更新，否则手机上的进度条一直停在起点。
     private DispatcherTimer? _reportTimer;
+    // 独立的日志窗口。null 表示当前没开着。
+    private LogWindow? _logWindow;
     private readonly ObservableCollection<string> _logLines = new();
 
     // 程序化改动 ToggleSwitch.IsOn 时会再次触发 Toggled，
@@ -49,9 +50,8 @@ public sealed partial class MainWindow : Window
         StartupLog.Leave("MainWindow.InitializeComponent()");
 
         _dispatcher = DispatcherQueue.GetForCurrentThread();
-        LogList.ItemsSource = _logLines;
-        // 投屏页的日志区跟设置页共用同一个集合，两边同步。
-        CastingLogList.ItemsSource = _logLines;
+        // 日志集合由独立的日志窗口显示（见 LogWindow.xaml）。这里只持有它 ——
+        // 谁显示、显示在哪，都是那个窗口自己的事。
 
         _engine.StateChanged += OnEngineStateChanged;
         _engine.LogEmitted += OnEngineLogEmitted;
@@ -470,37 +470,38 @@ public sealed partial class MainWindow : Window
             _logLines.RemoveAt(0);
         }
 
-        // 刚 Add 完时布局还没更新，此刻读 ScrollableHeight 拿到的是旧值，
-        // 滚动会差一行。再排一次队，等这一帧构建完再滚。
-        _dispatcher.TryEnqueue(() =>
-        {
-            LogScrollViewer.ChangeView(null, LogScrollViewer.ScrollableHeight, null);
-            if (CastingLogPanel.Visibility == Visibility.Visible)
-            {
-                CastingLogScrollViewer.ChangeView(null, CastingLogScrollViewer.ScrollableHeight, null);
-            }
-        });
+        // 日志窗口自己盯着集合变化并滚动（见 LogWindow），
+        // 这里不需要知道有没有窗口开着、开在哪一页。
     }
 
-    private void OnCastingLogToggled(object sender, RoutedEventArgs e)
-    {
-        CastingLogPanel.Visibility = CastingLogToggle.IsChecked == true
-            ? Visibility.Visible
-            : Visibility.Collapsed;
-    }
+    // ---------------------------------------------------------------------
+    // 日志窗口
+    // ---------------------------------------------------------------------
 
-    // 日志区每行是独立的 TextBlock，只能一行行选。这个按钮把全部日志
-    // 一次性放进剪贴板，方便贴到别处排查。
-    private void OnCopyLogClick(object sender, RoutedEventArgs e)
+    private void OnShowLogClick(object sender, RoutedEventArgs e)
     {
-        if (_logLines.Count == 0)
+        if (_logWindow != null)
         {
+            // WinUI 的窗口关了就是销毁，不能重新 Activate；所以只有还活着时
+            // 才把它提到前面。
+            _logWindow.Activate();
             return;
         }
 
-        DataPackage package = new DataPackage();
-        package.SetText(string.Join(Environment.NewLine, _logLines));
-        Clipboard.SetContent(package);
+        _logWindow = new LogWindow(_logLines);
+        // 引用要在关闭时清掉：不清的话下次点「查看日志」会去 Activate 一个
+        // 已经销毁的窗口，什么也不会发生。
+        _logWindow.Closed += OnLogWindowClosed;
+        _logWindow.Activate();
+    }
+
+    private void OnLogWindowClosed(object sender, WindowEventArgs args)
+    {
+        if (_logWindow != null)
+        {
+            _logWindow.Closed -= OnLogWindowClosed;
+            _logWindow = null;
+        }
     }
 
     private void OnWindowClosed(object sender, WindowEventArgs args)

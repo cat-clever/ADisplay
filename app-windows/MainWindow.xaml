@@ -19,7 +19,13 @@
             投屏页。手机推来地址时显示，把整个窗口让给画面；停止后回到设置页。
             与 macOS 端同一套行为。
         -->
-        <Grid x:Name="CastingPanel" Visibility="Collapsed" Padding="16" RowSpacing="12">
+        <!--
+            投屏页：画面满幅，四周不留边距也不留边框。
+
+            投屏时用户看的就是画面，任何一圈留白都是白扔的像素。控制条紧贴在
+            画面下方，画面本身仍然被内容包住，不需要额外的框。
+        -->
+        <Grid x:Name="CastingPanel" Visibility="Collapsed">
             <!-- 全屏时按 Esc 退出。挂在整块投屏面板上，比绑在按钮上精确：
                  绑按钮的话窗口模式下按 Esc 也会进全屏，而用户按 Esc 通常是想
                  关掉某个东西。 -->
@@ -30,56 +36,33 @@
             <Grid.RowDefinitions>
                 <RowDefinition Height="*" />
                 <RowDefinition Height="Auto" />
-                <RowDefinition Height="Auto" />
             </Grid.RowDefinitions>
 
-            <!-- 背后的 Media Foundation 负责拉流、硬解与音画同步，
-                 传输控制条（播放/暂停、进度、音量、全屏）都是现成的。 -->
+            <!-- 黑底：画面比例与窗口不一致时，留出来的是黑边而不是主题色的
+                 一块，看起来才像播放器。 -->
             <MediaPlayerElement x:Name="PlayerElement"
                                 Grid.Row="0"
+                                Background="Black"
                                 AreTransportControlsEnabled="True"
                                 Stretch="Uniform" />
 
-            <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="12">
+            <StackPanel Grid.Row="1"
+                        Orientation="Horizontal"
+                        Spacing="12"
+                        Padding="12,8">
                 <TextBlock x:Name="CastingTitleText"
                            VerticalAlignment="Center"
                            Style="{StaticResource BodyStrongTextBlockStyle}" />
-                <Button x:Name="StopCastingButton"
-                        Content="停止接收"
-                        Click="OnStopCastingClick" />
+                <Button x:Name="ShowLogButton"
+                        Content="查看日志"
+                        Click="OnShowLogClick" />
                 <Button x:Name="FullScreenButton"
                         Content="全屏"
                         Click="OnToggleFullScreenClick" />
-                <ToggleButton x:Name="CastingLogToggle"
-                              Content="显示日志"
-                              Checked="OnCastingLogToggled"
-                              Unchecked="OnCastingLogToggled" />
+                <Button x:Name="StopCastingButton"
+                        Content="停止接收"
+                        Click="OnStopCastingClick" />
             </StackPanel>
-
-            <!--
-                投屏页也要能看日志。投屏一失败，设置页连同它的日志区会被整个
-                盖住 —— 而那正是最需要看日志的时候。默认收起，不挡画面。
-            -->
-            <Border x:Name="CastingLogPanel"
-                    Grid.Row="2"
-                    Height="160"
-                    Visibility="Collapsed"
-                    Background="{ThemeResource LayerFillColorDefaultBrush}"
-                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                    BorderThickness="1">
-                <ScrollViewer x:Name="CastingLogScrollViewer" VerticalScrollBarVisibility="Auto">
-                    <ItemsControl x:Name="CastingLogList">
-                        <ItemsControl.ItemTemplate>
-                            <DataTemplate>
-                                <TextBlock Text="{Binding}"
-                                           FontFamily="Consolas"
-                                           FontSize="12"
-                                           TextWrapping="Wrap" />
-                            </DataTemplate>
-                        </ItemsControl.ItemTemplate>
-                    </ItemsControl>
-                </ScrollViewer>
-            </Border>
         </Grid>
 
         <Grid x:Name="SettingsPanel" Padding="28" RowSpacing="20" MinWidth="480" MinHeight="480">
@@ -146,45 +129,15 @@
             </TextBlock>
         </StackPanel>
 
-        <!-- 日志 -->
-        <Grid Grid.Row="3" RowSpacing="8">
-            <Grid.RowDefinitions>
-                <RowDefinition Height="Auto" />
-                <RowDefinition Height="*" />
-            </Grid.RowDefinitions>
-            <Grid Grid.Row="0">
-                <TextBlock Text="日志" Style="{StaticResource BodyStrongTextBlockStyle}" />
-                <!--
-                    日志区每行是独立的 TextBlock（便于虚拟化），代价是只能
-                    一行行选。想贴给别人时很不方便，所以给个一键复制的入口。
-                -->
-                <Button x:Name="CopyLogButton"
-                        Content="复制全部"
-                        HorizontalAlignment="Right"
-                        Padding="8,2"
-                        FontSize="11"
-                        Click="OnCopyLogClick" />
-            </Grid>
-            <Border Grid.Row="1"
-                    CornerRadius="4"
-                    Padding="8"
-                    Background="{ThemeResource LayerFillColorDefaultBrush}"
-                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                    BorderThickness="1">
-                <ScrollViewer x:Name="LogScrollViewer" VerticalScrollBarVisibility="Auto">
-                    <ItemsControl x:Name="LogList">
-                        <ItemsControl.ItemTemplate>
-                            <DataTemplate>
-                                <TextBlock Text="{Binding}"
-                                           FontFamily="Consolas"
-                                           FontSize="12"
-                                           TextWrapping="Wrap" />
-                            </DataTemplate>
-                        </ItemsControl.ItemTemplate>
-                    </ItemsControl>
-                </ScrollViewer>
-            </Border>
-        </Grid>
+        <!-- 日志不画在页面里，改成一个独立的窗口（见 LogWindow.xaml）。 -->
+        <StackPanel Grid.Row="3" Orientation="Horizontal" Spacing="12">
+            <Button x:Name="ShowLogButtonSettings"
+                    Content="查看日志"
+                    Click="OnShowLogClick" />
+            <TextBlock VerticalAlignment="Center"
+                       Style="{StaticResource CaptionTextBlockStyle}"
+                       Text="日志在单独的窗口里显示，投屏时也能一直开着。" />
+        </StackPanel>
         </Grid>
     </Grid>
 </Window>

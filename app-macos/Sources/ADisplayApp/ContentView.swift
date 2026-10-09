@@ -1,7 +1,8 @@
 // ADisplay —— macOS 主界面
 //
-// 与 Windows 端保持同样的信息结构：设备名称、服务开关、本机信息、日志。
-// 界面本身不做任何协议相关的判断，全部状态来自 castcore。
+// 与 Windows 端保持同样的信息结构：设备名称、服务开关、本机信息，
+// 外加一个打开日志窗口的入口。界面本身不做任何协议相关的判断，
+// 全部状态来自 castcore。
 
 import AppKit
 import SwiftUI
@@ -28,20 +29,17 @@ struct ContentView: View {
 
     /// 没有投屏时的设置页。
     private var settingsPage: some View {
-        // 布局策略：前三块按内容取高，日志区吃掉剩余空间。
-        //
-        // 这样窗口缩小时先压日志区，而不是把某一块挤出可视区域 ——
-        // 后者会让用户看不到控件却也不知道为什么。日志区的 minHeight
-        // 与窗口的 minHeight 配合，保证压到极限时仍能显示几行。
+        // 四块都按内容取高，剩下的空间留白。窗口因此可以缩到很小 ——
+        // 日志移到独立窗口之后，这里不再有「吃掉剩余空间」的那一块。
         VStack(alignment: .leading, spacing: 20) {
             deviceNameSection
             serviceSection
             infoSection
-            logSection
-                .frame(minHeight: 120, maxHeight: .infinity)
+            logEntry
+            Spacer(minLength: 0)
         }
         .padding(24)
-        .frame(minWidth: 520, minHeight: 520)
+        .frame(minWidth: 520, minHeight: 460)
     }
 
     // MARK: - 设备名称（文档 2.4）
@@ -143,51 +141,20 @@ struct ContentView: View {
 
     // MARK: - 日志
 
-    private func copyAllLogs() {
-        let text = model.logs.joined(separator: "\n")
-        let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
-        pasteboard.setString(text, forType: .string)
-    }
-
-    private var logSection: some View {
+    /// 日志入口。日志本身在独立的窗口里（见 LogWindow.swift）——
+    /// 投屏时画面要占满窗口，日志挤在同一页只会两边都变小。
+    private var logEntry: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("日志")
-                    .font(.headline)
+            Text("日志")
+                .font(.headline)
 
-                Spacer()
-
-                // 日志区每行是独立的 Text（为了能懒加载、不一次渲染几百行），
-                // 代价是只能一行一行选。想贴给别人时很不方便，所以给个
-                // 一键复制全部的入口。
-                Button("复制全部") {
-                    copyAllLogs()
+            HStack(spacing: 12) {
+                Button("查看日志") {
+                    LogWindowController.shared.show(model: model)
                 }
-                .buttonStyle(.borderless)
-                .font(.caption)
-                .disabled(model.logs.isEmpty)
-            }
-
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 2) {
-                        ForEach(Array(model.logs.enumerated()), id: \.offset) { index, line in
-                            Text(line)
-                                .font(.system(size: 11, design: .monospaced))
-                                .textSelection(.enabled)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .id(index)
-                        }
-                    }
-                    .padding(8)
-                }
-                .background(Color(nsColor: .textBackgroundColor).opacity(0.5))
-                .cornerRadius(6)
-                .onChange(of: model.logs.count) { _ in
-                    guard let last = model.logs.indices.last else { return }
-                    proxy.scrollTo(last, anchor: .bottom)
-                }
+                Text("日志在单独的窗口里显示，投屏时也能一直开着。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
     }
