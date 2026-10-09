@@ -1755,7 +1755,10 @@ AdResult AD_CALL ad_engine_get_airplay_advert(AdEngine* engine, char* buffer,
         adisplay::discovery::airplay::Advert advert;
         advert.name = engine->device_name;
         advert.device_id = engine->airplay_receiver->device_id();
-        advert.public_key = engine->airplay_public_key;
+        // 公钥同样取自运行中的接收端。它和 discovery_config、airplay_public_key
+        // 一样只是 ad_engine_start 里的局部变量 —— 那里也是从接收端取的，
+        // 所以这里直接问接收端，来源一致。
+        advert.public_key = engine->airplay_receiver->public_key();
         advert.model = engine->airplay_receiver->model();
         advert.srcvers = engine->airplay_receiver->srcvers();
         text = adisplay::discovery::airplay::advert_for_platform(

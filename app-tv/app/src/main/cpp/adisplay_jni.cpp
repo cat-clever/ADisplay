@@ -587,9 +587,7 @@ Java_com_adisplay_tv_AdDisplayNative_nativeValidateDeviceName(JNIEnv* env, jobje
     // 校验不需要引擎句柄：它是一条纯函数，判的是字符数、控制字符这些规则。
     const std::string text = from_java(env, name);
     char reason[256] = {0};
-    size_t length = 0;
-    const AdResult result =
-        ad_device_name_validate(text.c_str(), reason, sizeof(reason), &length);
+    const AdResult result = ad_device_name_validate(text.c_str(), reason, sizeof(reason));
     // 合法时回空串，不合法时回原因 —— 界面据此给出提示，而不是等按了保存才失败。
     if (result == AD_OK) {
         return env->NewStringUTF("");
