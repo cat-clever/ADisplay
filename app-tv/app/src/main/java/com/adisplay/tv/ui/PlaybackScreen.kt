@@ -125,8 +125,9 @@ fun PlaybackScreen(
     // 大码率的片子（4K、B 站的高清源）起播前要拉一大段，这段时间画面是黑的 ——
     // 用户看到的就是「投屏没反应」。所以缓冲期间把速度摆出来：一眼能看出它在动、
     // 动得多快，而不是对着黑屏猜。
-    // 播放器把控制条亮出来时递增，让我们的悬浮条跟着一起出现。
-    var controlsToken by remember { mutableStateOf(0) }
+    // 播放器自己的控制条可不可见。我们的按钮跟着它同进同退 —— 各用各的
+    // 计时器会出现「进度条还在、日志按钮没了」这种错位。
+    var playerControlsVisible by remember { mutableStateOf(false) }
 
     // 在不在播。悬浮条上那个按钮的文字靠它切换。
     var playing by remember { mutableStateOf(false) }
@@ -180,7 +181,7 @@ fun PlaybackScreen(
         // 触摸归播放器：点画面出它的进度条与快进快退，拖进度条也落在它身上。
         // 我们只跟着它的控制条一起亮相（见 showToken）。
         captureTouches = false,
-        showToken = controlsToken,
+        playerControlsVisible = playerControlsVisible,
         transport = if (inputMode == InputMode.Remote) {
             PlaybackTransport(
                 isPlaying = playing,
@@ -215,9 +216,7 @@ fun PlaybackScreen(
                     // ambiguity」。
                     setControllerVisibilityListener(
                         PlayerView.ControllerVisibilityListener { visibility ->
-                            if (visibility == View.VISIBLE) {
-                                controlsToken += 1
-                            }
+                            playerControlsVisible = visibility == View.VISIBLE
                         }
                     )
                     // 起播缓冲时转圈。电视上拉流慢是常事，黑屏和「正在缓冲」

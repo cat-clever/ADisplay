@@ -37,7 +37,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -96,8 +95,9 @@ class PlaybackTransport(
  *   控制条：进度、快进快退）。我们绝不能在它上面再盖一层接触摸的东西 —— 那样点击
  *   会被我们抢走，播放器的控制条永远出不来，而**拖动进度条必须让触摸落到播放器
  *   上**。镜像那路画面是个纯 Surface，不处理触摸，所以默认 true（点画面唤出控件）。
- * @param showToken 外部信号：每递增一次就把控件亮出来一遍。播放器把控制条亮出来时
- *   由它递增，于是「点画面」一次就让播放器的进度条和我们的悬浮条一起出现。
+ * @param playerControlsVisible 画面自己的控制条现在可不可见。给了它（DLNA 那路）
+ *   就以它为准：播放器的进度条一出来我们这条跟着出来、它一收我们跟着收 ——
+ *   两条各用各的计时器的话，用户会看到「进度条还在、日志按钮却没了」这种错位。
  * @param transport 传输控制（暂停、快进、快退）。遥控器那条路必须给，否则遥控器
  *   用户碰不到播放器的控制条；触屏那条路给 null 就行（播放器自己带）。
  * @param content 画面本身：镜像是一条 Surface，DLNA 是一个 PlayerView。
@@ -108,7 +108,7 @@ fun PlaybackFullScreen(
     onExit: () -> Unit,
     onShowLog: () -> Unit,
     captureTouches: Boolean = true,
-    showToken: Int = 0,
+    playerControlsVisible: Boolean? = null,
     transport: PlaybackTransport? = null,
     content: @Composable BoxScope.() -> Unit,
 ) {
@@ -139,23 +139,24 @@ fun PlaybackFullScreen(
     // 重新计起（用户正在看控件，不该正好在这一刻收走）。Boolean 从 true 再赋
     // true 不产生状态变化，LaunchedEffect 不会重启，计时也就不会重置。
     var showRequest by remember { mutableStateOf(0) }
-    var controlsVisible by remember { mutableStateOf(false) }
+
+    // 自己那套计时（点画面 / 遥控器唤出）。镜像那条走它 —— 那路没有播放器控制条。
+    var localVisible by remember { mutableStateOf(false) }
 
     LaunchedEffect(showRequest) {
         if (showRequest == 0) {
             return@LaunchedEffect
         }
-        controlsVisible = true
+        localVisible = true
         delay(CONTROLS_TIMEOUT_MS)
-        controlsVisible = false
+        localVisible = false
     }
 
-    // 画面那边把控制条亮出来了（见 showToken）。跟着亮一次。
-    LaunchedEffect(showToken) {
-        if (showToken > 0) {
-            showRequest += 1
-        }
-    }
+    // 两条信号取「或」：
+    //   自己唤出的（遥控器那条路）—— 会有 4 秒后自动收起；
+    //   画面自己的控制条可见 —— 由它说了算，它收我们跟着收。
+    // 这样点画面那一次，进度条和日志按钮是同时出现、同时消失的。
+    val controlsVisible = localVisible || playerControlsVisible == true
 
     val catchFocus = remember { FocusRequester() }
     val backFocus = remember { FocusRequester() }
@@ -257,23 +258,20 @@ fun PlaybackFullScreen(
             }
         }
 
-        // 底部操作条。同样悬浮。
+        // 操作按钮：贴在右侧竖排。
+        //
+        // 不排底部：播放器自己的进度条与快进快退就在屏幕最下面，两条挤在一起
+        // 既看不清也点不准。竖排还有个好处 —— 拇指 / 遥控器上下走一遍就能全过。
         AnimatedVisibility(
             visible = controlsVisible,
             enter = fadeIn(),
             exit = fadeOut(),
-            modifier = Modifier.align(Alignment.BottomCenter),
+            modifier = Modifier.align(Alignment.CenterEnd),
         ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    // 播放器的控制条（进度、快进快退）就在屏幕最下面，我们这条
-                    // 往上让开它 —— 两条叠在一起既看不清也点不准。
-                    .padding(bottom = if (captureTouches) 0.dp else 104.dp)
-                    .background(Color.Black.copy(alpha = 0.55f))
-                    .padding(horizontal = 24.dp, vertical = 14.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.Center,
+            Column(
+                modifier = Modifier.padding(end = 24.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+                horizontalAlignment = Alignment.End,
             ) {
                 // 传输控制。只在遥控器那条路上给（见 PlaybackTransport 的说明）。
                 if (transport != null) {
@@ -286,8 +284,6 @@ fun PlaybackFullScreen(
                         onClick = { transport.onSeekBy(-SEEK_STEP_MS) },
                     )
 
-                    Spacer(modifier = Modifier.width(12.dp))
-
                     ActionButton(
                         text = if (transport.isPlaying) "暂停" else "播放",
                         textStyle = layout.actionStyle,
@@ -297,7 +293,6 @@ fun PlaybackFullScreen(
                         onClick = transport.onTogglePlay,
                     )
 
-                    Spacer(modifier = Modifier.width(12.dp))
 
                     ActionButton(
                         text = "+10秒",
@@ -308,7 +303,6 @@ fun PlaybackFullScreen(
                         onClick = { transport.onSeekBy(SEEK_STEP_MS) },
                     )
 
-                    Spacer(modifier = Modifier.width(12.dp))
                 }
 
                 // 紧凑尺寸：这条是盖在画面上的，按最小可点范围给就够了。
@@ -321,7 +315,6 @@ fun PlaybackFullScreen(
                     onClick = onShowLog,
                 )
 
-                Spacer(modifier = Modifier.width(12.dp))
 
                 ActionButton(
                     text = "停止接收投屏",
