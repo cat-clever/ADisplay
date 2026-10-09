@@ -207,7 +207,7 @@ fun PlaybackScreen(
                     // 这里。点画面出它、拖进度条也拖它。
                     useController = true
                     controllerAutoShow = true
-                    // 它一亮，我们的悬浮条（日志 / 停止接收投屏）跟着亮 ——
+                    // 它一亮，我们那列按钮（传输控制 / 日志 / 结束投屏）跟着亮 ——
                     // 一次点击两样都出来，用户不用分两次点。
                     //
                     // 显式写出 SAM 构造器：这个 setter 还有一个接收

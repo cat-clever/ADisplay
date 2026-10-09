@@ -485,7 +485,10 @@ struct PlayerPage: View {
     /// 底部操作条。同样悬浮。
     private var controlBar: some View {
         HStack(spacing: 12) {
-            Button("停止接收") {
+            // 「结束投屏」而不是「停止接收」：它只结束本地播放、回设置页，
+            // 接收服务照旧跑着（见 EngineModel.stopCasting）—— 服务一停广播就
+            // 撤了，手机那边立刻找不到这台机器。
+            Button("结束投屏") {
                 model.stopCasting()
             }
             Button("查看日志") {

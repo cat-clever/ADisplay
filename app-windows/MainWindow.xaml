@@ -87,7 +87,7 @@
                                 Content="全屏"
                                 Click="OnToggleFullScreenClick" />
                         <Button x:Name="StopCastingButton"
-                                Content="停止接收"
+                                Content="结束投屏"
                                 Click="OnStopCastingClick" />
                     </StackPanel>
                 </Grid>

@@ -746,7 +746,7 @@ class EngineModel(context: Context) {
         statusText = state.label
 
         // 服务都停了就不可能有媒体在播。这条兜住 onSessionClosed 没到的情况
-        // （核心在停服务时不一定逐个会话回调），否则用户按了「停止接收投屏」
+        // （核心在停服务时不一定逐个会话回调），否则用户按了「结束投屏」
         // 会卡在播放页上出不来。
         if (state == ServiceState.STOPPED || state == ServiceState.ERROR) {
             playingMedia = null

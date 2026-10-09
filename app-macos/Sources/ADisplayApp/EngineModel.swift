@@ -308,7 +308,9 @@ final class EngineModel: ObservableObject {
         playbackHandler = handler
     }
 
-    /// 用户点「停止接收」。只结束本地播放，核心那边下次收到推送会重新开会话。
+    /// 用户点「结束投屏」。只结束本地播放、回设置页，**不停接收服务** ——
+    /// 服务一停广播就撤了，手机那边立刻找不到这台机器。核心那边下次收到推送
+    /// 会重新开会话。
     func stopCasting() {
         activeMedia = nil
         playbackHandler = nil

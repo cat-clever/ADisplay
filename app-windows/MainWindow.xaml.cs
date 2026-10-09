@@ -428,7 +428,8 @@ public sealed partial class MainWindow : Window
 
     private void OnStopCastingClick(object sender, RoutedEventArgs e)
     {
-        // 只结束本地播放：核心那边下次收到推送会重新开会话。
+        // 只结束本地播放、回设置页，**不停接收服务** —— 服务一停广播就撤了，
+        // 手机那边立刻找不到这台机器。核心那边下次收到推送会重新开会话。
         EndCasting();
     }
 
