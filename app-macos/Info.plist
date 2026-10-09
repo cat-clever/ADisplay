@@ -13,12 +13,12 @@
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.5.7</string>
+    <string>0.5.8</string>
     <!-- 构建号。macOS 用它判断是不是新版本，必须随发版递增 ——
          和 Android 的 versionCode 是一回事：不变的话系统不认为有更新。
          规则同 Android：主*10000 + 次*100 + 修订。 -->
     <key>CFBundleVersion</key>
-    <string>507</string>
+    <string>508</string>
     <key>LSMinimumSystemVersion</key>
     <string>12.0</string>
     <key>NSHighResolutionCapable</key>
