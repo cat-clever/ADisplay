@@ -92,6 +92,23 @@
                     </StackPanel>
                 </Grid>
             </Grid>
+
+            <!--
+                缓冲提示。只在缓冲时出现（见 MainWindow.xaml.cs 的 OnBufferingTick）——
+                大码率的片子起播前要拉一大段，那段时间画面是黑的，不给点提示
+                用户会以为「投屏没反应」。
+            -->
+            <Border x:Name="BufferingBadge"
+                    Visibility="Collapsed"
+                    HorizontalAlignment="Center"
+                    VerticalAlignment="Center"
+                    CornerRadius="10"
+                    Padding="22,14"
+                    Background="#9E000000">
+                <TextBlock x:Name="BufferingText"
+                           Foreground="White"
+                           Style="{StaticResource BodyStrongTextBlockStyle}" />
+            </Border>
         </Grid>
 
         <Grid x:Name="SettingsPanel" Padding="28" RowSpacing="20" MinWidth="480" MinHeight="480">

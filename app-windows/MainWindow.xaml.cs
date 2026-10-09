@@ -6,6 +6,8 @@
 
 using System;
 using System.Collections.ObjectModel;
+using System.Globalization;
+using System.Net.Http;
 using System.Runtime.InteropServices;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Windowing;
@@ -326,6 +328,9 @@ public sealed partial class MainWindow : Window
             // 刚进投屏先把控件亮出来一次：让用户知道现在什么状态、退路在哪，
             // 之后它自己会收起。
             ShowCastingControls();
+            // 镜像这条没有 URL（帧是核心直接交下来的，不是渐进式下载），
+            // 所以取不到文件大小，界面上只显示「正在缓冲」。
+            StartBufferingWatch(null);
             AppendLog(AdLogLevel.Info, "iPhone 开始屏幕镜像");
         });
     }
@@ -388,6 +393,8 @@ public sealed partial class MainWindow : Window
         _reportTimer.Tick += OnReportTick;
         _reportTimer.Start();
 
+        StartBufferingWatch(url);
+
         ReportPlayback();
     }
 
@@ -414,6 +421,7 @@ public sealed partial class MainWindow : Window
         }
         ExitFullScreenOnCastingEnd();
         HideCastingControls();
+        StopBufferingWatch();
         CastingPanel.Visibility = Visibility.Collapsed;
         SettingsPanel.Visibility = Visibility.Visible;
     }
@@ -472,6 +480,117 @@ public sealed partial class MainWindow : Window
         {
             SetFullScreen(false);
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // 缓冲提示
+    //
+    // 大码率的片子（4K、B 站的高清源）起播前要拉一大段，那段时间画面是黑的 ——
+    // 用户看到的就是「投屏没反应」。缓冲期间把速度摆出来，一眼能看出它在动、
+    // 动得多快。
+    // ---------------------------------------------------------------------
+
+    private DispatcherTimer? _bufferingTimer;
+
+    /// <summary>上一次 tick 时的下载进度（0..1）。相邻两次之差 × 文件大小 = 速度。</summary>
+    private double _lastDownloadProgress;
+
+    /// <summary>媒体文件的总字节数。取不到就退化成只显示「正在缓冲」。</summary>
+    private long? _mediaSizeBytes;
+
+    private void StartBufferingWatch(string? mediaUrl)
+    {
+        _lastDownloadProgress = 0;
+        _mediaSizeBytes = null;
+
+        if (mediaUrl != null && mediaUrl.Length > 0)
+        {
+            // 想要「多少 MB/s」就得知道总大小 —— MediaPlayerElement 只给 0..1 的
+            // 进度，不给字节数，所以自己发一个 HEAD 问一下。问不到也不要紧。
+            FetchMediaSize(mediaUrl);
+        }
+
+        _bufferingTimer ??= new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+        _bufferingTimer.Tick -= OnBufferingTick;
+        _bufferingTimer.Tick += OnBufferingTick;
+        // 先停再起：连投两段视频时不会留下上一条的计时。
+        _bufferingTimer.Stop();
+        _bufferingTimer.Start();
+    }
+
+    private void StopBufferingWatch()
+    {
+        if (_bufferingTimer != null)
+        {
+            _bufferingTimer.Stop();
+        }
+        BufferingBadge.Visibility = Visibility.Collapsed;
+    }
+
+    private async void FetchMediaSize(string url)
+    {
+        try
+        {
+            using HttpClient client = new HttpClient();
+            using HttpRequestMessage request = new HttpRequestMessage(HttpMethod.Head, url);
+            using HttpResponseMessage response = await client.SendAsync(request);
+            _mediaSizeBytes = response.Content.Headers.ContentLength;
+        }
+        catch (Exception)
+        {
+            // 有些 CDN 不认 HEAD，或者要 Referer。取不到就退回只显示「正在缓冲」。
+            _mediaSizeBytes = null;
+        }
+    }
+
+    private void OnBufferingTick(object? sender, object e)
+    {
+        MediaPlayer? player = PlayerElement.MediaPlayer;
+        if (player == null)
+        {
+            BufferingBadge.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        MediaPlaybackSession session = player.PlaybackSession;
+        // Opening 也算：那是「连上了但还没开始供数据」，在用户眼里同样是黑屏。
+        bool buffering = session.PlaybackState == MediaPlaybackState.Buffering
+                         || session.PlaybackState == MediaPlaybackState.Opening;
+
+        // 一秒内的进度增量 × 总大小 = 字节/秒。
+        double progress = session.DownloadProgress;
+        double bytesPerSecond = 0;
+        if (_mediaSizeBytes.HasValue && progress > _lastDownloadProgress)
+        {
+            bytesPerSecond = (progress - _lastDownloadProgress) * _mediaSizeBytes.Value;
+        }
+        _lastDownloadProgress = progress;
+
+        if (buffering)
+        {
+            BufferingText.Text = bytesPerSecond > 0
+                ? $"正在缓冲　{FormatSpeed(bytesPerSecond)}"
+                : "正在缓冲…";
+        }
+        BufferingBadge.Visibility = buffering ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    /// <summary>
+    /// 把字节/秒写成「1.2 MB/s」这种。
+    /// 用固定区域格式：中文区域下小数点同样是点，但万一落到用逗号做小数点的
+    /// 区域，同一行里「1,2 MB/s」会被读成一千二百。
+    /// </summary>
+    private static string FormatSpeed(double bytesPerSecond)
+    {
+        if (bytesPerSecond >= 1024 * 1024)
+        {
+            return string.Format(CultureInfo.InvariantCulture, "{0:F1} MB/s", bytesPerSecond / 1024 / 1024);
+        }
+        if (bytesPerSecond >= 1024)
+        {
+            return string.Format(CultureInfo.InvariantCulture, "{0:F0} KB/s", bytesPerSecond / 1024);
+        }
+        return string.Format(CultureInfo.InvariantCulture, "{0:F0} B/s", bytesPerSecond);
     }
 
     // ---------------------------------------------------------------------

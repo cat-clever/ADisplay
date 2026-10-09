@@ -51,8 +51,16 @@ final class PlayerViewModel: ObservableObject {
     private weak var engine: EngineModel?
     private var sessionId: UInt32 = 0
 
+    /// 是不是在缓冲。拉流起不来、或者缓冲被掏空时都是 true。
+    @Published private(set) var isBuffering = false
+
+    /// 实测下载速度（字节/秒）。0 表示还不知道 —— 界面上就不显示数字。
+    @Published private(set) var bytesPerSecond: Double = 0
+
     private var timeObserver: Any?
     private var volumeObserver: NSKeyValueObservation?
+    private var bufferEmptyObserver: NSKeyValueObservation?
+    private var keepUpObserver: NSKeyValueObservation?
     private var endObserver: NSObjectProtocol?
     private var failureObserver: NSObjectProtocol?
     private var itemStatusObserver: NSKeyValueObservation?
@@ -102,6 +110,8 @@ final class PlayerViewModel: ObservableObject {
             guard let self = self else { return }
             Task { @MainActor in
                 self.report()
+                // 速度搭这趟车一起更新，不另起一个定时器。
+                self.updateSpeed()
             }
         }
 
@@ -126,6 +136,28 @@ final class PlayerViewModel: ObservableObject {
             Task { @MainActor in
                 self.engine?.log("拉流失败：\(reason)", level: .error)
                 self.report(forceState: .stopped)
+            }
+        }
+
+        // 缓冲状态看两路，缺一不可：
+        //   isPlaybackBufferEmpty     缓冲被掏空了（正等着数据）
+        //   isPlaybackLikelyToKeepUp  照这个速度接下来跟不跟得上
+        // 只看前者，起播那一段会漏报（缓冲是空的但播放器还没开始等）；
+        // 只看后者，卡顿中途会漏报。
+        bufferEmptyObserver = player.currentItem?.observe(
+            \.isPlaybackBufferEmpty, options: [.initial, .new]
+        ) { [weak self] _, _ in
+            guard let self = self else { return }
+            Task { @MainActor in
+                self.refreshBuffering()
+            }
+        }
+        keepUpObserver = player.currentItem?.observe(
+            \.isPlaybackLikelyToKeepUp, options: [.initial, .new]
+        ) { [weak self] _, _ in
+            guard let self = self else { return }
+            Task { @MainActor in
+                self.refreshBuffering()
             }
         }
 
@@ -165,6 +197,10 @@ final class PlayerViewModel: ObservableObject {
         }
         volumeObserver = nil
         itemStatusObserver = nil
+        bufferEmptyObserver = nil
+        keepUpObserver = nil
+        isBuffering = false
+        bytesPerSecond = 0
         for observer in [endObserver, failureObserver] {
             if let observer = observer {
                 NotificationCenter.default.removeObserver(observer)
@@ -177,6 +213,29 @@ final class PlayerViewModel: ObservableObject {
         player.replaceCurrentItem(with: nil)
         lastState = nil
         lastDurationMs = -1
+    }
+
+    /// 重新判断缓冲状态。两个 KVO 回调都走这里 —— 一个信号不足以判断。
+    private func refreshBuffering() {
+        guard let item = player.currentItem else {
+            isBuffering = false
+            return
+        }
+        isBuffering = item.isPlaybackBufferEmpty || !item.isPlaybackLikelyToKeepUp
+    }
+
+    /// 从访问日志里取实测码率。
+    ///
+    /// AVPlayer 自己记着这条 HTTP 连接跑了多少数据，比我们另外去数字节准，
+    /// 也不用再挂一个定时器。日志要等传过一段数据才有，所以拿不到时保持 0，
+    /// 界面就不显示数字（只显示「正在缓冲」）。
+    private func updateSpeed() {
+        guard let log = player.currentItem?.accessLog(), let last = log.events.last else {
+            bytesPerSecond = 0
+            return
+        }
+        // observedBitrate 的单位是比特/秒。
+        bytesPerSecond = last.observedBitrate / 8.0
     }
 
     // MARK: - 执行手机发来的意图
@@ -357,6 +416,15 @@ struct PlayerPage: View {
             MouseMoveReporter { showControls() }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
+            // 缓冲提示。只在缓冲时出现 —— 全屏页上不该有常驻的东西。
+            if viewModel.isBuffering {
+                Text(bufferingLabel)
+                    .font(.title3)
+                    .padding(.horizontal, 22)
+                    .padding(.vertical, 14)
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
+            }
+
             if controlsVisible {
                 VStack(spacing: 0) {
                     statusBar
@@ -384,6 +452,17 @@ struct PlayerPage: View {
             viewModel.detach()
             hideWorkItem?.cancel()
         }
+    }
+
+    /// 缓冲提示的文字。速度还不知道时就只说「正在缓冲」。
+    private var bufferingLabel: String {
+        if viewModel.bytesPerSecond >= 1024 * 1024 {
+            return String(format: "正在缓冲　%.1f MB/s", viewModel.bytesPerSecond / 1024 / 1024)
+        }
+        if viewModel.bytesPerSecond >= 1024 {
+            return String(format: "正在缓冲　%.0f KB/s", viewModel.bytesPerSecond / 1024)
+        }
+        return "正在缓冲…"
     }
 
     /// 顶部状态条。悬浮，不占画面高度。
