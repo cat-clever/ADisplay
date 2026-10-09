@@ -151,10 +151,12 @@ void MirrorNaluNormalizer::reset() {
     parameter_sets_.clear();
     codec_known_ = false;
     last_prepended_ = false;
+    last_keyframe_ = false;
 }
 
 std::vector<uint8_t> MirrorNaluNormalizer::normalize(const uint8_t* data, std::size_t size, bool is_h265) {
     last_prepended_ = false;
+    last_keyframe_ = false;
     if (data == nullptr || size == 0) {
         return {};
     }
@@ -171,6 +173,8 @@ std::vector<uint8_t> MirrorNaluNormalizer::normalize(const uint8_t* data, std::s
         return {};
     }
 
+    last_keyframe_ = contains_keyframe(units, is_h265);
+
     const std::vector<NaluUnit> in_frame = select_parameter_sets(units, is_h265);
     if (!in_frame.empty()) {
         parameter_sets_ = in_frame;
@@ -178,8 +182,7 @@ std::vector<uint8_t> MirrorNaluNormalizer::normalize(const uint8_t* data, std::s
 
     // 帧自带参数集时以帧为准（上面已经存下了）。只有帧里没有、手上有缓存、
     // 而且这是个关键帧时才补 —— 补在非关键帧上解不出来，白占带宽。
-    const bool prepend = in_frame.empty() && !parameter_sets_.empty()
-                         && contains_keyframe(units, is_h265);
+    const bool prepend = in_frame.empty() && !parameter_sets_.empty() && last_keyframe_;
     if (!prepend) {
         return join_annex_b(units);
     }

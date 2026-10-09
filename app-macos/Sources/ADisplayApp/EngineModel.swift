@@ -295,6 +295,8 @@ final class EngineModel: ObservableObject {
         // 镜像那条路没有播放器可停，停的就是「还往渲染面送帧」这件事。
         mirrorSessionId = nil
         MirrorFrameRouter.shared.attach(nil)
+        // 上一个会话暂存的帧绝不能喂给下一个会话的解码器。
+        MirrorFrameRouter.shared.resetPending()
     }
 
     /// 把播放器的真实状态回报给核心。不回报的话手机看到的永远停在「起播中」。
@@ -339,6 +341,9 @@ final class EngineModel: ObservableObject {
             mirrorSessionId = nil
             // 会话结束了就不该再往渲染面送帧。
             MirrorFrameRouter.shared.attach(nil)
+            // 暂存里可能是流开头的参数集与关键帧 —— 但它们属于刚结束的这个会话，
+            // 下一个会话有自己的一套，混着喂解码器会出错。
+            MirrorFrameRouter.shared.resetPending()
             appendLog(level: .info, text: "屏幕镜像已结束")
         }
 

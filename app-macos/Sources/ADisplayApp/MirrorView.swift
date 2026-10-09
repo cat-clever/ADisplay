@@ -42,13 +42,34 @@ final class MirrorFrameRouter {
 
     static let shared = MirrorFrameRouter()
 
+    /// 还没有落点时暂存的一帧。数据必须拷走：核心给的那个指针只在回调期间有效。
+    private struct PendingFrame {
+        let data: [UInt8]
+        let isH265: Bool
+        let ptsUs: Int64
+    }
+
+    // 挂载之前最多暂存这么多帧。它的用途是覆盖「会话回调还在排队回主线程」那段
+    // 空隙，实测只有一帧左右；给到 8 帧（约四分之一秒）足够宽裕，又不至于在挂载
+    // 那一刻补喂一段陈旧的动画。
+    private static let maxPendingFrames = 8
+
     private let lock = NSLock()
     // weak：渲染面被拆掉之后就不该再有帧往里送。取出来的局部变量是强引用，
     // 所以调用期间它不会被释放。
     private weak var sink: MirrorFrameSink?
-    // 没有落点的时候，帧是**静默**丢掉的 —— 而这是黑屏最常见的成因之一
-    // （渲染面比第一帧晚一步挂上来）。所以「没落点」和「刚挂上」都要有记录。
     private var hasSink = false
+
+    // 还没有落点时收到的帧，按顺序存着，等渲染面挂上再补喂回去。
+    //
+    // 这一段里就包括**流开头那几帧** —— 参数集（SPS/PPS）与第一个 IDR 都在里面，
+    // 而那几帧是不可再生的：协议层只在流开头挂一次参数集，iOS 在画面静止时也
+    // 不会插新的 IDR。丢掉它们，解码器就永远配置不起来、也没有可解的关键帧，
+    // 表现就是「帧一直在计数、屏幕始终全黑」。
+    //
+    // 补喂而不是丢弃，是因为这个空隙来自线程模型而不是网络：帧回调在核心线程上
+    // 立刻触发，会话回调却要排队回主线程才能让 SwiftUI 把视图建出来。
+    private var pending: [PendingFrame] = []
 
     // 渲染面自己看不到日志窗口，而黑屏这类故障恰恰全都发生在渲染面内部。
     // 没有这条通道，「帧一直在计数、屏幕始终全黑」就只能靠猜。
@@ -77,20 +98,50 @@ final class MirrorFrameRouter {
         self.sink = sink
         let becameAttached = (sink != nil) && !hasSink
         hasSink = (sink != nil)
+        var replay: [PendingFrame] = []
+        if becameAttached {
+            replay = pending
+            pending.removeAll()
+        }
         lock.unlock()
 
-        if becameAttached {
-            log("镜像渲染面已挂上，开始接收帧。")
+        if let target = sink, becameAttached {
+            // 顺序不能动：参数集必须在关键帧之前，反了就解不出来。
+            for frame in replay {
+                frame.data.withUnsafeBufferPointer { buffer in
+                    if let base = buffer.baseAddress {
+                        target.enqueueMirrorFrame(base, count: buffer.count,
+                                                  isH265: frame.isH265, ptsUs: frame.ptsUs)
+                    }
+                }
+            }
+            log("镜像渲染面已挂上，开始接收帧（补喂 " + String(replay.count) + " 帧）。")
         }
+    }
+
+    /// 会话结束时清掉暂存：上一个会话的帧绝不能喂给下一个会话的解码器。
+    func resetPending() {
+        lock.lock()
+        pending.removeAll()
+        lock.unlock()
     }
 
     func deliver(_ data: UnsafePointer<UInt8>, count: Int, isH265: Bool, ptsUs: Int64) {
         lock.lock()
-        let target = sink
-        lock.unlock()
-        if let target = target {
+        // 取出来就解锁再送：渲染面的 enqueue 不能握在锁里做，否则会和 attach 顶住。
+        if let target = sink {
+            lock.unlock()
             target.enqueueMirrorFrame(data, count: count, isH265: isH265, ptsUs: ptsUs)
+            return
         }
+
+        // 没有落点：存下来等挂载，而不是丢掉。满了就不再收新的 ——
+        // 要保住的是最前面那几帧（参数集与第一个 IDR），不是最新的。
+        if pending.count < MirrorFrameRouter.maxPendingFrames {
+            pending.append(PendingFrame(data: Array(UnsafeBufferPointer(start: data, count: count)),
+                                        isH265: isH265, ptsUs: ptsUs))
+        }
+        lock.unlock()
     }
 }
 

@@ -122,6 +122,11 @@ struct AirplayReceiverImpl {
     std::atomic<uint64_t> audio_frames{0};
     std::atomic<int64_t> last_frame_log_ms{0};
     std::atomic<bool> logged_first_video_frame{false};
+    // 关键帧与「补发参数集」的次数。画面静止时 iOS 很少插 IDR，而补发只发生在
+    // 关键帧上 —— 「一直没有关键帧」是黑屏一类故障的重要线索，值得单独记。
+    std::atomic<uint64_t> video_keyframes{0};
+    std::atomic<uint64_t> video_prepends{0};
+    std::atomic<bool> logged_parameter_sets{false};
 
     // 镜像帧的规范化器（见 MirrorNalu.h）。协议层只在第一帧上带 SPS/PPS，
     // 而渲染面总是晚一步才挂上来 —— 那一帧会被丢在还没有落点的时候。这里
@@ -155,8 +160,9 @@ struct AirplayReceiverImpl {
         if (!last_frame_log_ms.compare_exchange_strong(previous, now)) {
             return;
         }
-        AD_LOG_INFO("AirPlay 镜像中：视频累计 {} 帧，音频累计 {} 帧",
-                    video_frames.load(), audio_frames.load());
+        AD_LOG_INFO("AirPlay 镜像中：视频累计 {} 帧（关键帧 {}，补发参数集 {} 次），音频累计 {} 帧",
+                    video_frames.load(), video_keyframes.load(), video_prepends.load(),
+                    audio_frames.load());
     }
 };
 
@@ -231,6 +237,19 @@ void cb_video_process(void* cls, raop_ntp_t* ntp, video_decode_struct* data) {
                                          data->is_h265);
     if (frame.empty()) {
         return;
+    }
+
+    if (impl->video_normalizer.last_frame_had_keyframe()) {
+        impl->video_keyframes.fetch_add(1);
+    }
+    if (impl->video_normalizer.last_frame_had_prepended_sets()) {
+        impl->video_prepends.fetch_add(1);
+    }
+    if (!impl->logged_parameter_sets.load()
+        && impl->video_normalizer.cached_parameter_set_count() > 0) {
+        impl->logged_parameter_sets.store(true);
+        AD_LOG_INFO("AirPlay 镜像：已取得编码参数（{} 个 NALU），之后每个关键帧都会带上",
+                    impl->video_normalizer.cached_parameter_set_count());
     }
 
     // 协议层给的时间戳是纳秒，这里换算成微秒对齐 C ABI 的约定。

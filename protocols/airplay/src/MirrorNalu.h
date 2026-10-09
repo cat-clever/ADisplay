@@ -57,10 +57,15 @@ public:
     // 这一帧是否被补过参数集。仅供日志观察。
     bool last_frame_had_prepended_sets() const { return last_prepended_; }
 
+    // 这一帧是否含关键帧。同样只用于日志 —— 画面静止时 iOS 很少插 IDR，
+    // 「一直没有关键帧」本身就是一条重要线索。
+    bool last_frame_had_keyframe() const { return last_keyframe_; }
+
 private:
     bool is_h265_ = false;
     bool codec_known_ = false;
     bool last_prepended_ = false;
+    bool last_keyframe_ = false;
     std::vector<NaluUnit> parameter_sets_;
 };
 
