@@ -3,8 +3,15 @@
 // 核心里已经把 AAC-ELD 解成了**交错 float32**（见 core/pipeline/AacEldDecoder），
 // 这里只负责送进系统的音频单元。分工与视频那侧完全一致：核心解码、平台渲染。
 //
-// 不做重采样、也不做格式转换：核心给的就是 44100 / 立体声 / float32，
-// 正好落在 AVAudioEngine 的原生格式里，多一层转换只会多一层延迟。
+// 一个要点：**攒成大块再送**。
+//
+// 核心交下来的是每帧 480 个样本、每秒约 92 帧 —— 直接一帧一次 scheduleBuffer
+// 的话，等于每秒往引擎里塞 92 个小缓冲，而且它们的采样率（44100）通常与设备
+// 不一致。AVAudioEngine 的转换器在「又小又不齐」的喂法下代价很高：实测这条路
+// 让 CPU 多出十几个点，而核心侧计时显示我们自己的解码与拆包只占 1.5~3%，
+// 多出来的都在引擎内部的渲染与重采样上。
+//
+// 所以这里攒到固定帧数再送：每秒约十次，每次大小一致，转换器不必反复重新对齐。
 
 import AVFoundation
 
@@ -20,13 +27,23 @@ final class MirrorAudioPlayer {
     // 声音越来越滞后；宁可丢掉一小段，也要跟住画面。
     private static let maxQueuedFrames = 8
 
+    // 攒够这么多帧才送一次。4096 帧 ≈ 93 毫秒，是延迟与效率之间常见的折中：
+    // 再小就退回「又小又不齐」，再大则口型对不上。
+    private static let chunkFrames = 4096
+    // 队伍上限按**块**算：落后了就丢，跟住画面。
+    private static let maxQueuedChunks = 4
+
     private let engine = AVAudioEngine()
     private let player = AVAudioPlayerNode()
     private let lock = NSLock()
 
     private var format: AVAudioFormat?
     private var running = false
-    private var queuedFrames = 0
+    private var queuedChunks = 0
+
+    // 尚未凑满一块的交错样本（LRLRLR…）。
+    private var pending: [Float] = []
+    private var pendingChannels = 0
 
     private init() {}
 
@@ -62,7 +79,9 @@ final class MirrorAudioPlayer {
         lock.lock()
         format = created
         running = true
-        queuedFrames = 0
+        queuedChunks = 0
+        pending.removeAll(keepingCapacity: true)
+        pendingChannels = 0
         lock.unlock()
 
         MirrorFrameRouter.shared.log("镜像伴音：已开始播放（" + String(Int(sampleRate))
@@ -74,7 +93,9 @@ final class MirrorAudioPlayer {
         let wasRunning = running
         running = false
         format = nil
-        queuedFrames = 0
+        queuedChunks = 0
+        pending.removeAll(keepingCapacity: true)
+        pendingChannels = 0
         lock.unlock()
 
         if !wasRunning {
@@ -85,37 +106,53 @@ final class MirrorAudioPlayer {
         engine.detach(player)
     }
 
-    /// 送一帧**交错** float32（LRLRLR…）。可以在任意线程调用。
+    /// 收一帧**交错** float32（LRLRLR…）。可以在任意线程调用。
+    ///
+    /// 攒够一块（见 chunkFrames）才真正送进引擎 —— 理由见文件开头。
     func enqueue(interleaved: UnsafePointer<Float>, frameCount: Int, channels: Int) {
         if frameCount <= 0 || channels <= 0 {
             return
         }
 
         lock.lock()
-        if !running || format == nil {
-            lock.unlock()
-            return
-        }
-        if queuedFrames >= MirrorAudioPlayer.maxQueuedFrames {
+        if !running || format == nil || queuedChunks >= MirrorAudioPlayer.maxQueuedChunks {
             lock.unlock()   // 落后了：丢这一帧，跟住画面
             return
         }
-        queuedFrames += 1
+        pendingChannels = channels
+        pending.append(contentsOf: UnsafeBufferPointer(start: interleaved,
+                                                       count: frameCount * channels))
+        if pending.count < MirrorAudioPlayer.chunkFrames * channels {
+            lock.unlock()
+            return
+        }
+
+        let samples = pending
+        pending.removeAll(keepingCapacity: true)
+        queuedChunks += 1
         let current = format
         lock.unlock()
 
-        guard let current = current,
-              let buffer = AVAudioPCMBuffer(pcmFormat: current,
+        guard let current = current else {
+            releaseChunk()
+            return
+        }
+        schedule(samples, channels: channels, format: current)
+    }
+
+    private func schedule(_ interleaved: [Float], channels: Int, format: AVAudioFormat) {
+        let frameCount = interleaved.count / channels
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: format,
                                             frameCapacity: AVAudioFrameCount(frameCount)) else {
-            releaseSlot()
+            releaseChunk()
             return
         }
         buffer.frameLength = AVAudioFrameCount(frameCount)
 
-        // AVAudioPCMBuffer 要的是**非交错**（每个声道一块），核心给的是交错 ——
+        // AVAudioPCMBuffer 要的是**非交错**（每声道一块），核心给的是交错 ——
         // 这里拆开。就这一处转换，没有别的。
         if let destination = buffer.floatChannelData {
-            let channelCount = Int(current.channelCount)
+            let channelCount = min(channels, Int(format.channelCount))
             for channel in 0..<channelCount {
                 let plane = destination[channel]
                 for index in 0..<frameCount {
@@ -126,15 +163,15 @@ final class MirrorAudioPlayer {
 
         player.scheduleBuffer(buffer) { [weak self] in
             if let self = self {
-                self.releaseSlot()
+                self.releaseChunk()
             }
         }
     }
 
-    private func releaseSlot() {
+    private func releaseChunk() {
         lock.lock()
-        if queuedFrames > 0 {
-            queuedFrames -= 1
+        if queuedChunks > 0 {
+            queuedChunks -= 1
         }
         lock.unlock()
     }
