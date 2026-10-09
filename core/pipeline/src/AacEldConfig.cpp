@@ -13,8 +13,11 @@ void put_bits(std::vector<uint8_t>& out, uint32_t value, int bits, int* bit_pos)
         if (byte_index >= static_cast<int>(out.size())) {
             out.push_back(0);
         }
-        if (((value >> i) & 1u) != 0u) {
-            out[byte_index] = static_cast<uint8_t>(out[byte_index] | (1u << bit_index));
+        // 移位量用无符号：这里只可能是 0..31，而有符号移位会触发
+        // -Wsign-conversion（Android 的 NDK 把这组警告打开了）。
+        if (((value >> static_cast<unsigned>(i)) & 1u) != 0u) {
+            out[byte_index] =
+                static_cast<uint8_t>(out[byte_index] | (1u << static_cast<unsigned>(bit_index)));
         }
         ++(*bit_pos);
     }

@@ -37,7 +37,12 @@ if(ADISPLAY_PIPELINE_WITH_REMUX)
     )
 else()
     # 同一套接口的「本平台不需要」实现，让调用方无需条件编译。
-    set(ADISPLAY_PIPELINE_REMUX_SOURCES src/MediaRelayUnsupported.cpp)
+    set(ADISPLAY_PIPELINE_REMUX_SOURCES
+        src/MediaRelayUnsupported.cpp
+        # AAC-ELD 解码器同理：它要 FFmpeg，而这套构建没有。没有这个替身的话，
+        # castcore 里对它的引用会在链接期报「undefined symbol」。
+        src/AacEldDecoderUnsupported.cpp
+    )
 endif()
 
 add_library(adisplay_pipeline STATIC
