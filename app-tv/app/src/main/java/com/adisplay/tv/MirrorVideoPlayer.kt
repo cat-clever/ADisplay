@@ -123,18 +123,21 @@ class MirrorVideoPlayer(private val onNotice: (String) -> Unit) {
         val info = MediaCodec.BufferInfo()
         try {
             while (true) {
-                var frame: Frame? = null
-                var target: Surface? = null
-                lock.withLock {
+                // 让 withLock 把取到的东西**返回**，而不是往外层变量里写：
+                // 在 lambda 里赋值的局部变量，Kotlin 之后不肯做智能转换
+                // （"captured by a changing closure"）。
+                val picked = lock.withLock {
                     if (!running) {
                         return
                     }
-                    target = surface
-                    frame = pending.pollFirst()
-                    if (frame == null) {
+                    val next = pending.pollFirst()
+                    if (next == null) {
                         hasFrame.await(WAIT_FOR_FRAME_MS, TimeUnit.MILLISECONDS)
                     }
+                    Pair(next, surface)
                 }
+                val frame = picked.first
+                val target = picked.second
 
                 if (target == null) {
                     continue

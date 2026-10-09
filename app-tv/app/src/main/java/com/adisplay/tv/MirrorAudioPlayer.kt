@@ -100,15 +100,17 @@ class MirrorAudioPlayer(private val onNotice: (String) -> Unit) {
         val info = MediaCodec.BufferInfo()
         try {
             while (true) {
-                var frame: Frame? = null
-                lock.withLock {
+                // 同 MirrorVideoPlayer：让 withLock 返回取到的东西，而不是往
+                // 外层变量里写 —— 后者会让 Kotlin 拒绝做智能转换。
+                val frame = lock.withLock {
                     if (!running) {
                         return
                     }
-                    frame = pending.pollFirst()
-                    if (frame == null) {
+                    val next = pending.pollFirst()
+                    if (next == null) {
                         hasFrame.await(WAIT_FOR_FRAME_MS, TimeUnit.MILLISECONDS)
                     }
+                    next
                 }
 
                 if (frame == null) {
