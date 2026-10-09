@@ -318,7 +318,9 @@ fun PlaybackFullScreen(
 
 
                 ActionButton(
-                    text = "停止接收投屏",
+                    // 只能说「结束投屏」：它已经不停接收服务了（见 EngineModel
+                    // 的 dismissedEpisode）—— 服务一停手机那边就找不到这台设备。
+                    text = "结束投屏",
                     textStyle = layout.actionStyle,
                     minWidth = 0.dp,
                     focusRequester = stopFocus,

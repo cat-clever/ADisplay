@@ -76,7 +76,8 @@ class MainActivity : ComponentActivity() {
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
         val casting = model.mirrorSessionId != null || model.playingMedia != null
         if (keyCode == KeyEvent.KEYCODE_MENU && casting) {
-            model.stopService()
+            // 与界面上的「结束投屏」一致：回主界面，不停服务。
+            model.dismissCasting()
             return true
         }
         return super.onKeyDown(keyCode, event)

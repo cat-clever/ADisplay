@@ -56,19 +56,24 @@ fun StandbyScreen(model: EngineModel) {
 
     Box(modifier = Modifier.fillMaxSize()) {
 
+        // 「结束投屏」只回主界面，**不停接收服务** —— 服务一停广播就撤了，
+        // 手机那边立刻找不到这台设备。核心那边的会话还开着（JNI 面上没有
+        // 「只关掉某一个会话」的接口），所以界面自己记着「这一次我不看了」；
+        // 手机再推一条（castEpisode +1）就重新进播放页。见 EngineModel。
+        val dismissed = model.isCastingDismissed()
         val media = model.playingMedia
-        if (model.mirrorSessionId != null) {
+        if (model.mirrorSessionId != null && !dismissed) {
             MirrorScreen(
                 model = model,
-                onExit = { model.stopService() },
+                onExit = { model.dismissCasting() },
                 onShowLog = { logOpen = true },
             )
-        } else if (media != null) {
+        } else if (media != null && !dismissed) {
             PlaybackScreen(
                 model = model,
                 sessionId = media.sessionId,
                 url = media.url,
-                onExit = { model.stopService() },
+                onExit = { model.dismissCasting() },
                 onShowLog = { logOpen = true },
             )
         } else {

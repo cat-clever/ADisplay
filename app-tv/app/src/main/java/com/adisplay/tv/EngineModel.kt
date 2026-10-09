@@ -334,6 +334,36 @@ class EngineModel(context: Context) {
         }
     }
 
+    /**
+     * 「第几次投屏」。手机每推一条媒体地址、或者每开一次镜像，它就 +1。
+     *
+     * 界面靠它判断「这是不是新的一次」：用户手动结束过第 N 次之后，同一条视频
+     * 再推过来也算新的一次（地址可能一模一样，光比地址认不出来）。
+     */
+    var castEpisode by mutableStateOf(0)
+        private set
+
+    /**
+     * 用户手动结束掉的那一次（castEpisode 的值）。-1 表示没结束过。
+     *
+     * 为什么要有它：手动结束**不停接收服务** —— 服务一停广播就撤了，手机那边
+     * 立刻找不到这台设备，得回去重点一次「开启接收服务」。而核心那边的会话还开
+     * 着（JNI 面上没有「只关掉某一个会话」的接口），所以「结束投屏」在界面这一层
+     * 就是「回主界面、这次不再显示它」，服务照旧跑着，手机随时可以再投一条。
+     */
+    var dismissedEpisode by mutableStateOf(-1)
+        private set
+
+    /** 手动结束当前这一次投屏：回主界面，但不停接收服务。 */
+    fun dismissCasting() {
+        dismissedEpisode = castEpisode
+    }
+
+    /** 当前这一次是不是已经被用户手动结束了。 */
+    fun isCastingDismissed(): Boolean {
+        return dismissedEpisode == castEpisode
+    }
+
     /** 核心库能不能用。装错 ABI 时为 false，界面据此禁用按钮。 */
     val isNativeAvailable: Boolean
         get() = AdDisplayNative.isAvailable
@@ -461,6 +491,8 @@ class EngineModel(context: Context) {
         if (serviceEnabled) return
 
         serviceEnabled = true
+        // 服务重新开启，上一次「手动结束」的记忆作废。
+        dismissedEpisode = -1
         // 锁要在启动【之前】拿到：SSDP 的 M-SEARCH 是在 start 里开始收的，
         // 晚一步拿锁，第一轮搜索就已经被省电机制滤掉了。
         acquireMulticastLock()
@@ -500,6 +532,7 @@ class EngineModel(context: Context) {
             return
         }
         serviceEnabled = false
+        dismissedEpisode = -1
         // 先撤广播再停服务：反过来的话，撤下之前的那一小段时间里手机看到的
         // 是一个已经不应答的设备。
         mdns.withdraw()
@@ -613,6 +646,7 @@ class EngineModel(context: Context) {
             post {
                 // 置上 playingMedia 就等于把界面切到播放页，地址先记出来 ——
                 // 否则用户看到的是「状态跳到投屏中却什么都没发生」。
+                castEpisode += 1
                 playingMedia = PlayingMedia(sessionId, url)
                 appendLog(LogLevel.INFO, "收到媒体地址（会话 " + sessionId + "）：" + url)
             }
@@ -646,6 +680,7 @@ class EngineModel(context: Context) {
                 return
             }
             post {
+                castEpisode += 1
                 mirrorSessionId = sessionId
                 appendLog(LogLevel.INFO, "iPhone 开始屏幕镜像")
             }
