@@ -36,6 +36,17 @@ import com.adisplay.tv.EngineModel
  */
 @Composable
 fun StandbyScreen(model: EngineModel) {
+    // 镜像与「媒体地址」是两条不同的路：前者是持续的帧，后者是一条 URL。
+    // 镜像优先 —— 同一时刻只可能有一条在跑，但先判它更符合因果（镜像会话
+    // 建立时不会有 playingMedia）。
+    if (model.mirrorSessionId != null) {
+        MirrorScreen(
+            model = model,
+            onExit = { model.stopService() },
+        )
+        return
+    }
+
     val media = model.playingMedia
     if (media != null) {
         PlaybackScreen(

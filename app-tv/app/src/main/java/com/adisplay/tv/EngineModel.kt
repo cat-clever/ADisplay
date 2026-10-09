@@ -213,6 +213,12 @@ class EngineModel(context: Context) {
      */
     var mirrorFrameSink: ((ByteArray, Int, Int, Int, Long) -> Unit)? = null
 
+    /**
+     * 镜像画面的渲染端。核心交下来的压缩帧经 mirrorFrameSink 到这里，由 MediaCodec
+     * 解出来写进 SurfaceView 的 Surface —— 解码与送显都不经过 Compose 的重组。
+     */
+    val mirrorPlayer = MirrorVideoPlayer { message -> post { appendLog(LogLevel.INFO, message) } }
+
     /** 服务当前的真实状态，来自核心的状态回调。 */
     var serviceState by mutableStateOf(ServiceState.STOPPED)
         private set
@@ -289,6 +295,8 @@ class EngineModel(context: Context) {
      * 任何人都能直接投过来。文档 2.3 要的是按一下才开。
      */
     fun attach() {
+        // 帧的落点接一次即可（这里可能被多次调用，赋值本身是幂等的）。
+        mirrorFrameSink = mirrorPlayer::push
         if (engine != 0L) return
 
         if (!AdDisplayNative.isAvailable) {
