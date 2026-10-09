@@ -1,5 +1,13 @@
 name: 构建与测试
 
+# 运行标题带上这次改动的内容。
+#
+# 手动触发时标题默认就是这个工作流名，Actions 列表里一排跑下来全叫「构建与测试」，
+# 翻历史只能一个个点开看。所以手动触发时把改动的标题传进来：
+#     gh workflow run 构建与测试 -f title="修中转的换封装"
+# 列表里就能直接看出每一轮跑的是什么。没传就退回分支名。
+run-name: 构建与测试 · ${{ inputs.title || github.event.pull_request.title || github.ref_name }}
+
 # 这个 workflow 既直接响应 push / PR，也被 release.yml 通过 workflow_call 复用 ——
 # 发版时的产物与 CI 上验证过的产物是同一套构建流程，不会出现
 # 「CI 绿了但发出去的包是另一套参数编的」这种事。
@@ -14,6 +22,12 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      # 只用于运行标题，构建本身不看它 —— 所以不是必填。
+      title:
+        description: 这次改动的内容（显示在运行标题里）
+        required: false
+        type: string
   workflow_call:
     # 发布那条路会传 false：发布要的是「构建并打包」，不是在发布时再跑一遍测试。
     # 默认 true，所以手动触发与 PR 都照常跑测试。
