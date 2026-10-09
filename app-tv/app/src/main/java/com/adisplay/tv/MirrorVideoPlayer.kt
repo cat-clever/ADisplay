@@ -21,6 +21,11 @@ import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.view.Surface
 import java.util.ArrayDeque
+import java.util.concurrent.TimeUnit
+// withLock 在 kotlin.concurrent 里，不在默认导入的那几个包里。
+import kotlin.concurrent.withLock
+import java.util.concurrent.locks.Condition
+import java.util.concurrent.locks.ReentrantLock
 
 class MirrorVideoPlayer(private val onNotice: (String) -> Unit) {
 
@@ -40,7 +45,10 @@ class MirrorVideoPlayer(private val onNotice: (String) -> Unit) {
         const val WAIT_FOR_FRAME_MS = 500L
     }
 
-    private val lock = Object()
+    // 用 ReentrantLock + Condition 而不是 Object 的 wait/notify：Kotlin 里
+    // Any 不暴露那两个方法，得处处强制转换成 java.lang.Object，很容易漏一处。
+    private val lock = ReentrantLock()
+    private val hasFrame: Condition = lock.newCondition()
     private val pending = ArrayDeque<Frame>()
 
     private var surface: Surface? = null
@@ -55,7 +63,7 @@ class MirrorVideoPlayer(private val onNotice: (String) -> Unit) {
 
     /** 渲染面就绪。可以重复调用（界面重建时会再来一次）。 */
     fun attach(surface: Surface) {
-        synchronized(lock) {
+        lock.withLock {
             this.surface = surface
             if (!running) {
                 running = true
@@ -64,21 +72,19 @@ class MirrorVideoPlayer(private val onNotice: (String) -> Unit) {
                 thread.start()
                 worker = thread
             }
-            lock.notifyAll()
+            hasFrame.signalAll()
         }
     }
 
     /** 渲染面没了（界面切走、Activity 暂停）。解码器一并收掉，下次重建。 */
     fun detach() {
-        synchronized(lock) {
-            surface = null
-        }
+        lock.withLock { surface = null }
         releaseCodec()
     }
 
     /** 收一帧（Annex B，核心交过来的原始形态）。由核心的工作线程调用。 */
     fun push(data: ByteArray, isH265: Int, width: Int, height: Int, ptsUs: Long) {
-        synchronized(lock) {
+        lock.withLock {
             if (!running || data.isEmpty()) {
                 return
             }
@@ -86,16 +92,16 @@ class MirrorVideoPlayer(private val onNotice: (String) -> Unit) {
                 pending.pollFirst()
             }
             pending.addLast(Frame(data, isH265 != 0, width, height, ptsUs))
-            lock.notifyAll()
+            hasFrame.signalAll()
         }
     }
 
     fun release() {
-        synchronized(lock) {
+        lock.withLock {
             running = false
             pending.clear()
             surface = null
-            lock.notifyAll()
+            hasFrame.signalAll()
         }
         val thread = worker
         if (thread != null) {
@@ -119,14 +125,14 @@ class MirrorVideoPlayer(private val onNotice: (String) -> Unit) {
             while (true) {
                 var frame: Frame? = null
                 var target: Surface? = null
-                synchronized(lock) {
+                lock.withLock {
                     if (!running) {
                         return
                     }
                     target = surface
                     frame = pending.pollFirst()
                     if (frame == null) {
-                        (lock as Object).wait(WAIT_FOR_FRAME_MS)
+                        hasFrame.await(WAIT_FOR_FRAME_MS, TimeUnit.MILLISECONDS)
                     }
                 }
 
