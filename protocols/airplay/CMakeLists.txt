@@ -10,17 +10,15 @@
 # 顶层 project() 只启用了 CXX，而这里要编 C 源码。
 enable_language(C)
 
-# Android 暂不编协议层。
+# 四个平台都编协议层。
 #
-# 不是做不到，是不放在这一批做：APK 要同时操心体积（上游那些源文件会带上
-# libplist 与 OpenSSL）和 Bionic 的缺口（本项目已经为它补过一次 libc 兼容层），
-# 而这两件事在桌面两端验证通过之前都是盲改。等 Windows / macOS 的镜像跑通
-# 再单独做一轮，风险集中在一处。
-if(ANDROID)
-    set(ADISPLAY_HAVE_AIRPLAY_RECEIVER 0)
-else()
-    set(ADISPLAY_HAVE_AIRPLAY_RECEIVER 1)
-endif()
+# Android 曾经不编（批次 4 的决定）：那时桌面两端的镜像都还没跑通，而 APK 要
+# 额外操心体积（上游源码会带上 libplist 与 OpenSSL）和 Bionic 的缺口 —— 在两台
+# 参照设备都没验证过的情况下，那是盲改。现在 macOS 与 Windows 的镜像都通了，
+# 这个前提已经满足，于是把 Android 一起编上。
+#
+# 仍然要付的代价：APK 会变大（libplist + OpenSSL 静态链进 libcastcore.so）。
+set(ADISPLAY_HAVE_AIRPLAY_RECEIVER 1)
 
 add_library(adisplay_airplay STATIC
     src/AirplayReceiver.cpp

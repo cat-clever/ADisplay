@@ -17,8 +17,8 @@ android {
         // 规则固定下来，升级时不用每次临时决定该加多少。
         // 它必须随版本递增 —— 不变的话 Android 会认为是同一个包，
         // 覆盖安装时不会更新。
-        versionCode = 528
-        versionName = "0.5.28"
+        versionCode = 529
+        versionName = "0.5.29"
 
         // 只打 arm64-v8a。
         //
