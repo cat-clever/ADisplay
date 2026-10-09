@@ -92,6 +92,16 @@ fun PlaybackScreen(
     // 控制意图。协程跟着页面生命周期走：页面一离开组合就自动取消，
     // 不会有回调打到已经 release 的播放器上。
     LaunchedEffect(exoPlayer, sessionId) {
+        // 先补上这个会话在页面挂上来之前发出的命令。
+        //
+        // 发送端推完地址紧接着就发播放（实测相隔 8 毫秒），而界面切到播放页要
+        // 晚几帧、中间还要新建一个 ExoPlayer；那个空档里上一个会话的收集者可能
+        // 还活着，会把命令收走后丢掉（见 EngineModel 的 pendingIntents）。
+        // 不补这一步，表现就是媒体加载完了却停在 00:00 不动。
+        for (pending in model.takePendingIntents(sessionId)) {
+            applyIntent(exoPlayer, pending, playerState)
+        }
+
         model.playbackIntents.collect { intent ->
             // 迟到的命令（属于已经结束的上一个会话）不能落到这个播放器上。
             if (intent.sessionId != sessionId) return@collect

@@ -176,6 +176,12 @@ class EngineModel(context: Context) {
          */
         private const val MAX_LOG_LINES = 500
 
+        /**
+         * 每个会话最多替它攒这么多条命令。攒着只是为了跨过「界面切页」那几帧，
+         * 给个上限免得某个没人认领的会话把内存占住。
+         */
+        private const val MAX_PENDING_INTENTS = 32
+
         // 与 adisplay.h 的 AdStreamKind 对应。这里只关心镜像这一条 ——
         // 「媒体 URL」那条路走 onMediaUrl，不经过会话回调。
         const val STREAM_KIND_MIRROR_VIDEO = 0
@@ -296,6 +302,37 @@ class EngineModel(context: Context) {
 
     /** 给播放页的意图流。只有播放页一个消费者。 */
     val playbackIntents: Flow<PlaybackIntent> = intentChannel.receiveAsFlow()
+
+    /**
+     * 还没被播放页取走的命令，按会话号攒着。
+     *
+     * 光靠那条 Channel 会丢命令：发送端是「推地址」和「播放」几乎同时发的
+     * （实测相隔 8 毫秒），而界面切到播放页要晚几帧、中间还要新建一个
+     * ExoPlayer。那个空档里**上一个会话的收集者可能还活着** —— 它会把这条命令
+     * 从 Channel 里收走，然后按「不是我这条会话」丢掉。表现就是：媒体加载完了
+     * （时长都读出来了）却停在 00:00 不动。
+     *
+     * 所以每条命令另外按会话攒一份；播放页挂上来时先取走自己那份补上
+     * （见 takePendingIntents）。同一个会话里重复执行 play / pause / seek 是
+     * 幂等的，多补一次不会出错。
+     *
+     * 只在主线程碰它：写入走 post（回调来自核心的工作线程），读取来自界面。
+     */
+    private val pendingIntents = mutableMapOf<Int, MutableList<PlaybackIntent>>()
+
+    /** 取走某个会话攒下的命令。播放页刚挂上时调用。 */
+    fun takePendingIntents(sessionId: Int): List<PlaybackIntent> {
+        val taken = pendingIntents.remove(sessionId)
+        return if (taken == null) emptyList() else taken
+    }
+
+    private fun rememberPendingIntent(intent: PlaybackIntent) {
+        val queue = pendingIntents.getOrPut(intent.sessionId) { mutableListOf() }
+        queue.add(intent)
+        if (queue.size > MAX_PENDING_INTENTS) {
+            queue.removeAt(0)
+        }
+    }
 
     /** 核心库能不能用。装错 ABI 时为 false，界面据此禁用按钮。 */
     val isNativeAvailable: Boolean
@@ -593,9 +630,14 @@ class EngineModel(context: Context) {
                     LogLevel.DEBUG,
                     "手机发来播放命令 " + command + "，值 " + value + "（会话 " + sessionId + "）"
                 )
+                val intent = PlaybackIntent(sessionId, parsed, value)
+                // 另外攒一份，跨过「界面切页」那几帧（见 pendingIntents 的说明）。
+                post {
+                    rememberPendingIntent(intent)
+                }
                 // 用 trySend 而不是挂起的 send：回调线程不能在这里停住，
                 // 缓冲又是无限的，不可能会失败。
-                intentChannel.trySend(PlaybackIntent(sessionId, parsed, value))
+                intentChannel.trySend(intent)
             }
         }
 
@@ -645,6 +687,8 @@ class EngineModel(context: Context) {
                     playingMedia = null
                 }
                 // 镜像会话结束同样要退出投屏页，否则电视会停在最后一帧上。
+                // 这个会话不会再有人来接命令了，攒着的那份一起丢掉。
+                pendingIntents.remove(sessionId)
                 if (mirrorSessionId == sessionId) {
                     mirrorSessionId = null
                     mirrorAudio.release()
