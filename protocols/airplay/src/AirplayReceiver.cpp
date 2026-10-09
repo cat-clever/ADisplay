@@ -498,8 +498,23 @@ void cb_log(void* cls, int level, const char* msg) {
         case LOGGER_WARNING:
             AD_LOG_WARN("[AirPlay] {}", msg);
             break;
-        default:
+        case LOGGER_DEBUG_DATA:
+            // 逐帧的数据。量级太大，只有把本项目日志级别调到 Debug 时才需要。
             AD_LOG_DEBUG("[AirPlay] {}", msg);
+            break;
+        default:
+            // NOTICE / INFO / DEBUG 一律按 INFO 转发。
+            //
+            // 这一处不是随手定的：协议层把「收到哪个请求、走到哪一步、
+            // fairplay_decrypt 返回了什么」全记在 DEBUG 上，INFO 只有错误。
+            // 而 AirPlay 失败的典型样子恰恰是「接收端这边一句错误都没有」——
+            // 所以这一层必须看得见。
+            //
+            // 之前直接按 DEBUG 转发，结果是全被丢掉：本项目日志默认级别就是
+            // Info。表现是「iPhone 能连上、随后什么日志都没有、然后连不上」，
+            // 排查完全无从下手 —— 就是把协议层级别调到 DEBUG 也没用，
+            // 因为拦在下面一级。
+            AD_LOG_INFO("[AirPlay] {}", msg);
             break;
     }
 }
