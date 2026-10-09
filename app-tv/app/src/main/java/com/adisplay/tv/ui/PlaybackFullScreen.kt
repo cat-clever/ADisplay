@@ -177,7 +177,12 @@ fun PlaybackFullScreen(
                 .align(Alignment.Center)
                 .size(1.dp)
                 .focusRequester(catchFocus)
-                .focusable()
+                // 控件亮着的时候把自己从焦点搜索里摘掉。
+                //
+                // 它是一个焦点节点，又正好杵在两个按钮中间 —— 不摘掉的话，
+                // 遥控器按方向键很可能选中它（然后按确定只会再「显示一次控件」），
+                // 用户就换不到旁边那两个按钮上。
+                .focusable(enabled = !controlsVisible)
                 .onKeyEvent { event ->
                     // 只在抬起时响应，否则按下与抬起各触发一次。
                     if (event.type != KeyEventType.KeyUp) {
@@ -245,21 +250,24 @@ fun PlaybackFullScreen(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.Center,
             ) {
+                // 紧凑尺寸：这条是盖在画面上的，按最小可点范围给就够了。
                 ActionButton(
                     text = "日志",
                     textStyle = layout.actionStyle,
-                    minWidth = layout.buttonMinWidth,
+                    minWidth = 0.dp,
                     focusRequester = logFocus,
+                    compact = true,
                     onClick = onShowLog,
                 )
 
-                Spacer(modifier = Modifier.width(16.dp))
+                Spacer(modifier = Modifier.width(12.dp))
 
                 ActionButton(
                     text = "停止接收投屏",
                     textStyle = layout.actionStyle,
-                    minWidth = layout.buttonMinWidth,
+                    minWidth = 0.dp,
                     focusRequester = stopFocus,
+                    compact = true,
                     onClick = onExit,
                 )
             }

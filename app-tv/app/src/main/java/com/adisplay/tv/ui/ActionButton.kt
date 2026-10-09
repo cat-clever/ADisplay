@@ -57,6 +57,11 @@ fun ActionButton(
     focusRequester: FocusRequester,
     onClick: () -> Unit,
     enabled: Boolean = true,
+    /**
+     * 紧凑尺寸。用在盖在画面上的悬浮条里 —— 那里是「临时露一下」，按遥控器
+     * 能点中的最小范围给就够了，撑成大按钮反而挡画面。
+     */
+    compact: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
     var focused by remember { mutableStateOf(false) }
@@ -87,7 +92,10 @@ fun ActionButton(
             .focusable(enabled = enabled)
             .focusRequester(focusRequester)
             .onFocusChanged { focused = it.isFocused }
-            .padding(horizontal = 28.dp, vertical = 14.dp),
+            .padding(
+                horizontal = if (compact) 16.dp else 28.dp,
+                vertical = if (compact) 8.dp else 14.dp,
+            ),
         contentAlignment = Alignment.Center,
     ) {
         Text(text = text, style = textStyle)
