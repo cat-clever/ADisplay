@@ -103,7 +103,18 @@ class MdnsAdvertiser(private val context: Context, private val onNotice: (String
             if (value.isEmpty()) {
                 continue
             }
-            info.setAttribute(key, value)
+            // 用 setAttribute(String, String) 而不是那个 byte[] 重载：后者在
+            // 这份 SDK 的公开接口里看不到（编译器只认字符串那个）。
+            //
+            // 这样做是安全的，因为 TXT 的值**全是 ASCII** —— pk 装的是十六进制
+            // 字符串而不是原始字节，其余是 features/am/vs 这类文本。ISO-8859-1
+            // 在 ASCII 范围内与 UTF-8 逐字节一致，所以转一道不会改变任何字节。
+            // 这个不变式由核心那侧的单测守着（见 test_airplay_advert.cpp）。
+            if (!isAscii(value)) {
+                onNotice("mDNS 广播：" + key + " 的值不是 ASCII，已跳过（这条 TXT 不会出现在广播里）")
+                continue
+            }
+            info.setAttribute(key, String(value, Charsets.ISO_8859_1))
         }
 
         val listener = object : NsdManager.RegistrationListener {
@@ -126,6 +137,15 @@ class MdnsAdvertiser(private val context: Context, private val onNotice: (String
 
         manager.registerService(info, NsdManager.PROTOCOL_DNS_SD, listener)
         registrations.add(listener)
+    }
+
+    private fun isAscii(value: ByteArray): Boolean {
+        for (byte in value) {
+            if (byte.toInt() and 0xFF > 0x7F) {
+                return false
+            }
+        }
+        return true
     }
 
     /** 把核心给的十六进制解回字节。奇数长度或含非法字符时返回 null。 */

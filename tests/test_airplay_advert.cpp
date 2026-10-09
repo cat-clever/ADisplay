@@ -227,6 +227,27 @@ AD_TEST(airplay_advert_for_platform, "给平台的广播描述：行格式稳定
     AD_CHECK(found_pk);
 }
 
+// Android 侧用 setAttribute(String, String) 设置 TXT —— 那个 byte[] 重载在
+// 这份 SDK 的公开接口里看不到（编译器只认字符串那个）。这样做的前提是
+// 「TXT 的值全是 ASCII」：ASCII 范围内 ISO-8859-1 与 UTF-8 逐字节一致，
+// 转换不会改变任何字节。
+//
+// 这条不变式不是想当然的，所以在这里守住。哪天有人往 TXT 里塞二进制
+// （最容易想到的是把 pk 改成原始公钥而不是十六进制串），这条会先响 ——
+// 否则症状是「iPhone 里看不到设备」，而那个方向极难查。
+AD_TEST(airplay_txt_is_ascii, "广播的 TXT 值必须全是 ASCII（Android 侧依赖这一条）") {
+    airplay::Advert advert = make_advert("abcd");
+    std::vector<adisplay::discovery::TxtRecord> records = airplay::airplay_txt(advert);
+    const std::vector<adisplay::discovery::TxtRecord> raop = airplay::raop_txt(advert);
+    records.insert(records.end(), raop.begin(), raop.end());
+    AD_CHECK(!records.empty());
+    for (const adisplay::discovery::TxtRecord& record : records) {
+        for (const char c : record.value) {
+            AD_CHECK(static_cast<unsigned char>(c) <= 0x7F);
+        }
+    }
+}
+
 int main() {
     return adtest::run_all("AirPlay 广播内容测试");
 }
