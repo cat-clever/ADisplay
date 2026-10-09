@@ -175,6 +175,10 @@ class EngineModel(context: Context) {
          */
         private const val MAX_LOG_LINES = 500
 
+        // 与 adisplay.h 的 AdStreamKind 对应。这里只关心镜像这一条 ——
+        // 「媒体 URL」那条路走 onMediaUrl，不经过会话回调。
+        const val STREAM_KIND_MIRROR_VIDEO = 0
+
         private const val MULTICAST_LOCK_TAG = "adisplay-tv:multicast"
 
         private const val TAG = "EngineModel"
@@ -191,6 +195,23 @@ class EngineModel(context: Context) {
 
     /** 日志行，格式 "[HH:mm:ss] [LEVEL] 正文"，与另外两端一致。 */
     val logs = mutableStateListOf<String>()
+
+    /**
+     * 正在镜像的会话号。null 表示没在镜像 —— 界面据此切到投屏页。
+     *
+     * 与「设备已连接」是两件事：用户可能只是从控制中心点开看了一眼，
+     * 那时还没有任何一路流。
+     */
+    var mirrorSessionId by mutableStateOf<Int?>(null)
+        private set
+
+    /**
+     * 镜像视频帧的落点，由渲染面（MediaCodec）接上。
+     *
+     * 刻意**不**放进 Compose 状态：每秒几十帧，每帧触发一次重组会把界面压垮。
+     * 这和 macOS 那边把帧直接交给显示层、不进 @Published 是同一个道理。
+     */
+    var mirrorFrameSink: ((ByteArray, Int, Int, Int, Long) -> Unit)? = null
 
     /** 服务当前的真实状态，来自核心的状态回调。 */
     var serviceState by mutableStateOf(ServiceState.STOPPED)
@@ -480,6 +501,31 @@ class EngineModel(context: Context) {
             }
         }
 
+        override fun onSessionOpened(sessionId: Int, streamKind: Int) {
+            if (streamKind != STREAM_KIND_MIRROR_VIDEO) {
+                return
+            }
+            post {
+                mirrorSessionId = sessionId
+                appendLog(LogLevel.INFO, "iPhone 开始屏幕镜像")
+            }
+        }
+
+        override fun onMirrorFrame(
+            data: ByteArray,
+            isH265: Int,
+            width: Int,
+            height: Int,
+            ptsUs: Long
+        ) {
+            // 不切主线程：每秒几十帧，每帧跳一次会把界面压垮。渲染面自己处理
+            // （它把帧喂给 MediaCodec，那是独立线程上的事）。
+            val sink = mirrorFrameSink
+            if (sink != null) {
+                sink(data, isH265, width, height, ptsUs)
+            }
+        }
+
         override fun onSessionClosed(sessionId: Int, reason: Int) {
             post {
                 appendLog(LogLevel.INFO, "会话 " + sessionId + " 已关闭，原因 " + reason)
@@ -489,6 +535,10 @@ class EngineModel(context: Context) {
                 val current = playingMedia
                 if (current != null && current.sessionId == sessionId) {
                     playingMedia = null
+                }
+                // 镜像会话结束同样要退出投屏页，否则电视会停在最后一帧上。
+                if (mirrorSessionId == sessionId) {
+                    mirrorSessionId = null
                 }
             }
         }

@@ -31,6 +31,22 @@ object AdDisplayNative {
         fun onMediaUrl(sessionId: Int, url: String)
         fun onPlaybackCommand(sessionId: Int, command: Int, value: Long)
         fun onSessionClosed(sessionId: Int, reason: Int)
+
+        /**
+         * 会话建立。[streamKind] 见 C 的 AdStreamKind —— 0 是镜像视频。
+         *
+         * 界面层据此切到投屏页：在此之前「设备连上了」和「开始投屏了」是两件事，
+         * 用户可能只是从控制中心看了一眼。
+         */
+        fun onSessionOpened(sessionId: Int, streamKind: Int)
+
+        /**
+         * 一帧镜像视频（**压缩**，Annex B —— 每个 NALU 前是 00 00 01 起始码）。
+         *
+         * 解码交给 MediaCodec：Android 的解码器直接吃 Annex B，所以这边不像 macOS
+         * 那样还要转成 AVCC。data 只在本次调用期间有效，需要留存必须自己拷走。
+         */
+        fun onMirrorFrame(data: ByteArray, isH265: Int, width: Int, height: Int, ptsUs: Long)
     }
 
     /** 核心库是否可用。为 false 时下面所有 native* 都不能调。 */

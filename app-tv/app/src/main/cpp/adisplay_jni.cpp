@@ -35,6 +35,8 @@ jmethodID g_on_log = nullptr;
 jmethodID g_on_media_url = nullptr;
 jmethodID g_on_playback_command = nullptr;
 jmethodID g_on_session_closed = nullptr;
+jmethodID g_on_session_opened = nullptr;
+jmethodID g_on_mirror_frame = nullptr;
 
 // 取出 JNIEnv。需要附着时顺带告诉调用方，用完要解附着。
 JNIEnv* acquire_env(bool* did_attach) {
@@ -181,6 +183,67 @@ void call_session_closed(void* /*user_data*/, uint32_t session_id, int reason) {
     release_env(attached);
 }
 
+void call_session_opened(void* /*user_data*/, uint32_t session_id, const AdPeerInfo* /*peer*/,
+                         int stream_kind) {
+    jobject target = nullptr;
+    jmethodID method = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        target = g_callback;
+        method = g_on_session_opened;
+    }
+    if (target == nullptr || method == nullptr) {
+        return;
+    }
+    bool attached = false;
+    JNIEnv* env = acquire_env(&attached);
+    if (env != nullptr) {
+        env->CallVoidMethod(target, method, static_cast<jint>(session_id),
+                            static_cast<jint>(stream_kind));
+        swallow_exception(env);
+    }
+    release_env(attached);
+}
+
+void call_mirror_frame(void* /*user_data*/, const AdMirrorFrame* frame) {
+    if (frame == nullptr || frame->data == nullptr || frame->size <= 0) {
+        return;
+    }
+    jobject target = nullptr;
+    jmethodID method = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        target = g_callback;
+        method = g_on_mirror_frame;
+    }
+    if (target == nullptr || method == nullptr) {
+        return;
+    }
+
+    bool attached = false;
+    JNIEnv* env = acquire_env(&attached);
+    if (env == nullptr) {
+        release_env(attached);
+        return;
+    }
+
+    // 每次都要新建一个 byte[] 并拷一份：核心那个指针只在回调期间有效，而
+    // Kotlin 侧要留存到解码器真正用它的那一刻。每秒几十次，代价可接受。
+    jbyteArray data = env->NewByteArray(static_cast<jsize>(frame->size));
+    if (data != nullptr) {
+        env->SetByteArrayRegion(data, 0, static_cast<jsize>(frame->size),
+                                reinterpret_cast<const jbyte*>(frame->data));
+        env->CallVoidMethod(target, method, data,
+                            static_cast<jint>(frame->is_h265),
+                            static_cast<jint>(frame->width),
+                            static_cast<jint>(frame->height),
+                            static_cast<jlong>(frame->pts_us));
+        swallow_exception(env);
+        env->DeleteLocalRef(data);
+    }
+    release_env(attached);
+}
+
 std::string from_java(JNIEnv* env, jstring text) {
     if (text == nullptr) {
         return std::string();
@@ -267,6 +330,8 @@ Java_com_adisplay_tv_AdDisplayNative_nativeSetCallbacks(JNIEnv* env, jobject /*t
     jmethodID on_media_url = nullptr;
     jmethodID on_playback_command = nullptr;
     jmethodID on_session_closed = nullptr;
+    jmethodID on_session_opened = nullptr;
+    jmethodID on_mirror_frame = nullptr;
 
     if (callback != nullptr) {
         jclass cls = env->GetObjectClass(callback);
@@ -278,6 +343,8 @@ Java_com_adisplay_tv_AdDisplayNative_nativeSetCallbacks(JNIEnv* env, jobject /*t
         on_media_url = env->GetMethodID(cls, "onMediaUrl", "(ILjava/lang/String;)V");
         on_playback_command = env->GetMethodID(cls, "onPlaybackCommand", "(IIJ)V");
         on_session_closed = env->GetMethodID(cls, "onSessionClosed", "(II)V");
+        on_session_opened = env->GetMethodID(cls, "onSessionOpened", "(II)V");
+        on_mirror_frame = env->GetMethodID(cls, "onMirrorFrame", "([BIIIJ)V");
         env->DeleteLocalRef(cls);
         if (on_state_changed == nullptr || on_log == nullptr || on_media_url == nullptr ||
             on_playback_command == nullptr || on_session_closed == nullptr) {
@@ -305,6 +372,8 @@ Java_com_adisplay_tv_AdDisplayNative_nativeSetCallbacks(JNIEnv* env, jobject /*t
         g_on_media_url = on_media_url;
         g_on_playback_command = on_playback_command;
         g_on_session_closed = on_session_closed;
+        g_on_session_opened = on_session_opened;
+        g_on_mirror_frame = on_mirror_frame;
     }
 
     if (callback == nullptr) {
@@ -319,6 +388,8 @@ Java_com_adisplay_tv_AdDisplayNative_nativeSetCallbacks(JNIEnv* env, jobject /*t
     callbacks.on_media_url = &call_media_url;
     callbacks.on_playback_command = &call_playback_command;
     callbacks.on_session_closed = &call_session_closed;
+    callbacks.on_session_opened = &call_session_opened;
+    callbacks.on_mirror_frame = &call_mirror_frame;
 
     return ad_engine_set_callbacks(engine, &callbacks, nullptr);
 }
