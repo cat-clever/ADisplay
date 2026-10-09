@@ -15,7 +15,7 @@ cmake_minimum_required(VERSION 3.21)
 # 后两处最容易漏：它们不是版本号，换个 5.7 出来却长得像另一个版本号，
 # 逐文件搜旧版本号时不会被注意到 —— 这个清单就是为了不再靠记性。
 project(ADisplay
-    VERSION 0.5.49
+    VERSION 0.5.50
     DESCRIPTION "跨平台投屏接收端：AirPlay / DLNA 接收，支持 Windows、macOS、Android TV"
     HOMEPAGE_URL "https://github.com/cat-clever/ADisplay"
     LANGUAGES CXX)

@@ -1,9 +1,11 @@
 package com.adisplay.tv.ui
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -14,7 +16,10 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
@@ -27,41 +32,78 @@ import androidx.tv.material3.Text
 import com.adisplay.tv.EngineModel
 
 /**
- * 界面入口：按「有没有媒体在播」在待机页与播放页之间切。
+ * 界面入口：按「有没有媒体在播」在待机页与播放页之间切，并负责那两块抽屉。
  *
  * 不另开 Activity —— 文档 2.3 要求投屏开始时自动全屏并置于最上层、结束后回到
  * 待机页，同一个 Activity 里换内容比走 Intent 更直接，也少一层「切回来时
  * 还剩下多少状态」的麻烦。切换的唯一依据是 model.playingMedia：核心说会话
  * 开着就有媒体在播，说关了就没有，界面不自己猜。
+ *
+ * 抽屉放在这里而不是各自的页面里：日志在待机页与播放页都要能看（投屏中出问题
+ * 时正是最该看它的时候），改名的入口只在待机页。抽屉盖在最上层，两个页面共用
+ * 同一套开合状态，不用各自记一份。
  */
 @Composable
 fun StandbyScreen(model: EngineModel) {
-    // 镜像与「媒体地址」是两条不同的路：前者是持续的帧，后者是一条 URL。
-    // 镜像优先 —— 同一时刻只可能有一条在跑，但先判它更符合因果（镜像会话
-    // 建立时不会有 playingMedia）。
-    if (model.mirrorSessionId != null) {
-        MirrorScreen(
-            model = model,
-            onExit = { model.stopService() },
-        )
-        return
-    }
 
-    val media = model.playingMedia
-    if (media != null) {
-        PlaybackScreen(
-            model = model,
-            sessionId = media.sessionId,
-            url = media.url,
-            // 「停止接收投屏」停的是整个接收服务：JNI 面上没有「只关掉某一个
-            // 会话」的接口（见 AdDisplayNative），停服务会让核心把会话关掉、
-            // 状态回到待机页 —— 这条路走完界面和核心是一致的，不会留下一个
-            // 核心还当活着、界面已经不管了的会话。用户想再投一次，按一下
-            // 「开启接收服务」重新进入广播即可。
-            onExit = { model.stopService() },
-        )
-    } else {
-        StandbyContent(model)
+    // 日志抽屉开着没有。改名的开合不用另记：草稿在模型里（model.nameDraft），
+    // 核心那边要拿它校验名称，界面跟着它走就行。
+    var logOpen by remember { mutableStateOf(false) }
+
+    // 抽屉里的字号沿用待机页那套分档参数：两边各写一份，改了一处忘了另一处，
+    // 同一块日志在抽屉里和（曾经）页面上的会长得不一样。
+    val layout = resolveStandbyLayout(LocalConfiguration.current.screenWidthDp)
+
+    Box(modifier = Modifier.fillMaxSize()) {
+
+        val media = model.playingMedia
+        if (model.mirrorSessionId != null) {
+            MirrorScreen(
+                model = model,
+                onExit = { model.stopService() },
+                onShowLog = { logOpen = true },
+            )
+        } else if (media != null) {
+            PlaybackScreen(
+                model = model,
+                sessionId = media.sessionId,
+                url = media.url,
+                onExit = { model.stopService() },
+                onShowLog = { logOpen = true },
+            )
+        } else {
+            StandbyContent(
+                model = model,
+                onShowLog = { logOpen = true },
+            )
+        }
+
+        // 抽屉组合在页面之后，所以返回键的处理也排在页面之后 —— 抽屉开着时按
+        // 返回先关抽屉，而不是把投屏停掉（见 Drawer）。
+        if (logOpen) {
+            LogDrawer(
+                lines = model.logs,
+                textStyle = layout.logStyle,
+                buttonTextStyle = layout.actionStyle,
+                onClear = { model.clearLogs() },
+                onDismiss = { logOpen = false },
+            )
+        }
+
+        // 改名抽屉。竖屏按内容取高（就三行），横屏占满高度、宽度占一块 ——
+        // 横屏从侧边抽，高度不占满的话上面会空出来一大截。
+        if (model.nameDraft != null) {
+            Drawer(
+                onDismiss = { model.cancelRename() },
+                modifier = if (isLandscape()) {
+                    Modifier.fillMaxHeight().fillMaxWidth(0.42f)
+                } else {
+                    Modifier.fillMaxWidth()
+                },
+            ) {
+                NameEditor(model = model, layout = layout)
+            }
+        }
     }
 }
 
@@ -76,18 +118,18 @@ fun StandbyScreen(model: EngineModel) {
  * 电视端的屏幕跨度太大（手机横屏 640dp、1080p 电视 960dp、4K 电视 1920dp），
  * 一套固定字号必然在某一档上不合适。
  *
- * 下半屏是日志区（LogPanel）。它不是装饰：电视上没法看 logcat，核心库
- * 走到哪一步、SSDP 有没有收到搜索、端口有没有被占用，全凭它显示。
+ * 日志与改名都不在这一页里常驻，收进抽屉（见 StandbyScreen）：常驻会把上面的
+ * 按钮往上挤，而这一页的高度是算着放的。
  */
 @Composable
-private fun StandbyContent(model: EngineModel) {
+private fun StandbyContent(model: EngineModel, onShowLog: () -> Unit) {
 
     val configuration = LocalConfiguration.current
     val layout = resolveStandbyLayout(configuration.screenWidthDp)
     val inputMode = rememberInputMode()
 
     val buttonFocus = remember { FocusRequester() }
-    val clearLogFocus = remember { FocusRequester() }
+    val logFocus = remember { FocusRequester() }
     val renameFocus = remember { FocusRequester() }
 
     Surface(modifier = Modifier.fillMaxSize()) {
@@ -100,15 +142,11 @@ private fun StandbyContent(model: EngineModel) {
                 ),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            // 上半屏：设备信息与开关。
-            //
-            // 用 weight 吃掉日志区之外的全部高度，并且自己可以滚动 ——
-            // 矮屏上内容放不下时裁掉的是最下面那行提示，而按钮在块的顶部，
-            // 一定看得见。（日志区不能跟着被裁：没有焦点，用户滚不到它。）
+            // 内容整体居中，并且可以滚动 —— 矮屏上放不下时裁掉的是最下面那行
+            // 提示，而按钮在块的顶部，一定看得见。
             Column(
                 modifier = Modifier
-                    .weight(1f)
-                    .fillMaxWidth()
+                    .fillMaxSize()
                     .verticalScroll(rememberScrollState()),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.Center
@@ -130,8 +168,9 @@ private fun StandbyContent(model: EngineModel) {
                 // 按钮紧跟状态文字、排在说明之前 —— 矮屏上它必须在首屏可见区内。
                 Spacer(modifier = Modifier.height(layout.spacingMedium))
 
-                // 两个按钮并排而不是上下叠：叠起来会多占一行高度，而矮屏上
-                // 这个位置是算着放的（见上面的注释），日志区会被挤掉。
+                // 按钮并排而不是上下叠：叠起来会多占一行高度，而矮屏上这个位置
+                // 是算着放的。三个按钮用 weight 等分整行宽度 —— 之前用固定宽度，
+                // 三个加起来超过了屏宽，第三个（修改名称）被挤出可视区。
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.Center,
@@ -140,9 +179,6 @@ private fun StandbyContent(model: EngineModel) {
                     ActionButton(
                         text = if (model.serviceEnabled) "关闭接收服务" else "开启接收服务",
                         textStyle = layout.actionStyle,
-                        // minWidth 交给 weight：三个按钮等分整行宽度。之前用固定的
-                        // buttonMinWidth，三个加起来超过了屏宽，第三个（修改名称）
-                        // 被挤出可视区 —— 表现就是「改不了设备名」。
                         minWidth = 0.dp,
                         modifier = Modifier.weight(1f),
                         focusRequester = buttonFocus,
@@ -154,15 +190,15 @@ private fun StandbyContent(model: EngineModel) {
 
                     Spacer(modifier = Modifier.width(16.dp))
 
+                    // 日志收进抽屉（横屏从侧边抽、竖屏从下面抽），「清除日志」
+                    // 也跟着挪进抽屉里 —— 看不见的日志不需要一个常驻的清除按钮。
                     ActionButton(
-                        text = "清除日志",
+                        text = "查看日志",
                         textStyle = layout.actionStyle,
                         minWidth = 0.dp,
                         modifier = Modifier.weight(1f),
-                        focusRequester = clearLogFocus,
-                        // 没有日志时压暗：一眼看出这一项此刻没意义。
-                        enabled = model.logs.isNotEmpty(),
-                        onClick = { model.clearLogs() },
+                        focusRequester = logFocus,
+                        onClick = onShowLog,
                     )
 
                     Spacer(modifier = Modifier.width(16.dp))
@@ -218,25 +254,6 @@ private fun StandbyContent(model: EngineModel) {
                         modifier = Modifier.fillMaxWidth()
                     )
                 }
-            }
-
-            Spacer(modifier = Modifier.height(layout.spacingLoose))
-
-            // 底部这块地方：平时是日志，改名时借用它做输入区。
-            //
-            // 借用的理由：电视的布局是算着屏幕高度放的（见 StandbyLayout），
-            // 在页面里另加一块会把上面的按钮挤出可视区；而这块高度固定，
-            // 正好换得下。
-            if (model.nameDraft != null) {
-                NameEditor(model = model, layout = layout)
-            } else {
-                // 日志区钉在底部，高度固定。它不可聚焦，所以遥控器的焦点
-                // 始终留在上面的按钮上。
-                LogPanel(
-                    lines = model.logs,
-                    textStyle = layout.logStyle,
-                    panelHeight = layout.logHeight
-                )
             }
         }
     }

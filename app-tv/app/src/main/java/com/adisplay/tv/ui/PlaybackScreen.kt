@@ -46,6 +46,7 @@ fun PlaybackScreen(
     sessionId: Int,
     url: String,
     onExit: () -> Unit,
+    onShowLog: () -> Unit,
 ) {
     val context = LocalContext.current
     // 播放器只在进入本页时建一次。remember 把它钉在本次组合里，重组（日志展开、
@@ -97,6 +98,7 @@ fun PlaybackScreen(
     PlaybackFullScreen(
         title = model.deviceName + " · 正在播放",
         onExit = onExit,
+        onShowLog = onShowLog,
     ) {
         AndroidView(
             factory = { ctx ->

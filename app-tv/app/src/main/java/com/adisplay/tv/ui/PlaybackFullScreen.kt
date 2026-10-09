@@ -36,6 +36,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -70,12 +71,14 @@ private const val CONTROLS_TIMEOUT_MS = 4000L
  * 全屏播放画面，控件悬浮其上。
  *
  * @param title 顶部状态条左侧的文字，调用方给（一般是「设备名 · 正在做什么」）。
+ * @param onShowLog 打开日志抽屉。日志在投屏中才最该看，所以这里也留一个入口。
  * @param content 画面本身：镜像是一条 Surface，DLNA 是一个 PlayerView。
  */
 @Composable
 fun PlaybackFullScreen(
     title: String,
     onExit: () -> Unit,
+    onShowLog: () -> Unit,
     content: @Composable BoxScope.() -> Unit,
 ) {
     val view = LocalView.current
@@ -117,6 +120,7 @@ fun PlaybackFullScreen(
     }
 
     val catchFocus = remember { FocusRequester() }
+    val logFocus = remember { FocusRequester() }
     val stopFocus = remember { FocusRequester() }
 
     // 收起时把焦点交给「接键层」，遥控器按任意键都能把控件叫回来；
@@ -215,6 +219,16 @@ fun PlaybackFullScreen(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.Center,
             ) {
+                ActionButton(
+                    text = "日志",
+                    textStyle = layout.actionStyle,
+                    minWidth = layout.buttonMinWidth,
+                    focusRequester = logFocus,
+                    onClick = onShowLog,
+                )
+
+                Spacer(modifier = Modifier.width(16.dp))
+
                 ActionButton(
                     text = "停止接收投屏",
                     textStyle = layout.actionStyle,

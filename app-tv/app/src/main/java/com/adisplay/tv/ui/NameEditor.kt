@@ -1,13 +1,15 @@
-// ADisplay —— 改设备名称
+// ADisplay —— 改设备名称（抽屉里的内容）
 //
 // 电视上没有键盘，所以改名的入口必须显式给出来（待机页上的「修改名称」）。
-// 好消息是 Android TV 在聚焦输入框时会自己弹出系统输入法，遥控器就能操作 ——
-// 所以这里只需要一个普通的输入框，不必自己做软键盘。
+// Android TV 在聚焦输入框时会自己弹出系统输入法，遥控器就能操作 —— 所以这里
+// 只需要一个普通的输入框，不必自己做软键盘。
 //
-// 高度用 layout.editorHeight，**不跟日志区共用**。早先图省事复用了日志区的高度，
-// 结果标题、输入框、两个按钮加起来比那几行等宽小字高得多，放不下：按钮那一行
-// 被挤到屏幕外。遥控器还能靠焦点选中那个看不见的按钮再按确定，触屏就完全点不到
-// —— 表现是「名字改完没法保存」。输入区该多大就多大。
+// 它装在抽屉里（见 StandbyScreen）：竖屏从下面抽、横屏从侧边抽。以前它借的是
+// 待机页底部日志区的位置**和高度**，而输入区里要放标题、输入框、两个按钮，
+// 比那几行等宽小字高得多 —— 按钮那一行被挤到屏幕外，遥控器还能靠焦点选中那个
+// 看不见的按钮，触屏就完全点不到。抽屉按内容取尺寸，没有这个问题。
+//
+// 这一层只是内容：面板的底色、圆角、内边距都由 Drawer 给。
 
 package com.adisplay.tv.ui
 
@@ -38,12 +40,11 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
 import com.adisplay.tv.EngineModel
 
 @Composable
-fun NameEditor(model: EngineModel, layout: StandbyLayout) {
+fun NameEditor(model: EngineModel, layout: StandbyLayout, modifier: Modifier = Modifier) {
     val draft = model.nameDraft ?: return
     val problem = model.nameDraftProblem()
 
@@ -59,20 +60,11 @@ fun NameEditor(model: EngineModel, layout: StandbyLayout) {
     val canSave = draft.isNotEmpty() && problem.isEmpty()
 
     Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(layout.editorHeight)
-            .clip(RoundedCornerShape(8.dp))
-            .background(MaterialTheme.colorScheme.surfaceVariant)
-            .border(1.dp, Color.White.copy(alpha = 0.18f), RoundedCornerShape(8.dp))
-            .padding(horizontal = 18.dp, vertical = 12.dp),
+        modifier = modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.Center,
     ) {
-        // 标题与校验提示同一行，而且提示限一行。
-        //
-        // 这样这块的高度是**恒定**的：提示另起一行、或者折成两行的话，名称一不
-        // 合法整块就长高，把下面的按钮又挤出屏幕 —— 而名称不合法正是用户最需要
-        // 看到按钮的时候。
+        // 标题与校验提示同一行，而且提示限一行 —— 让这块高度恒定，提示不会把
+        // 下面的按钮顶走，而名称不合法正是用户最需要看到按钮的时候。
         Row(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier.fillMaxWidth(),
@@ -114,9 +106,11 @@ fun NameEditor(model: EngineModel, layout: StandbyLayout) {
             }),
             modifier = Modifier
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(4.dp))
-                .background(Color.White.copy(alpha = 0.08f))
-                .border(1.dp, Color.White.copy(alpha = 0.25f), RoundedCornerShape(4.dp))
+                // 输入框自己的底色与描边。抽屉给了面板的底，但输入框仍要一眼
+                // 看出「这里能打字」。
+                .clip(RoundedCornerShape(6.dp))
+                .background(Color.White.copy(alpha = 0.10f))
+                .border(1.dp, Color.White.copy(alpha = 0.25f), RoundedCornerShape(6.dp))
                 .padding(horizontal = 12.dp, vertical = 10.dp)
                 .focusRequester(fieldFocus),
         )
@@ -129,7 +123,7 @@ fun NameEditor(model: EngineModel, layout: StandbyLayout) {
             modifier = Modifier.fillMaxWidth(),
         ) {
             // 两个按钮用 weight 等分，不用固定宽度：固定宽度在手机竖屏上加起来
-            // 比这块地方还宽，「取消」会被切掉一半（同 StandbyScreen 那三个按钮）。
+            // 比这块地方还宽，「取消」会被切掉一半（同待机页那三个按钮）。
             ActionButton(
                 text = "保存",
                 textStyle = layout.actionStyle,

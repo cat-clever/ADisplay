@@ -18,10 +18,15 @@ import androidx.compose.ui.Modifier
 import com.adisplay.tv.EngineModel
 
 @Composable
-fun MirrorScreen(model: EngineModel, onExit: () -> Unit) {
+fun MirrorScreen(
+    model: EngineModel,
+    onExit: () -> Unit,
+    onShowLog: () -> Unit,
+) {
     PlaybackFullScreen(
         title = model.deviceName + " · 正在镜像屏幕",
         onExit = onExit,
+        onShowLog = onShowLog,
     ) {
         Box(
             modifier = Modifier.fillMaxSize(),

@@ -42,30 +42,6 @@ data class StandbyLayout(
     val spacingLoose: Dp,
     /** 按钮最小宽度。给个下限免得窄屏上文字被挤成两行。 */
     val buttonMinWidth: Dp,
-    /**
-     * 日志区的固定高度。
-     *
-     * 给死高度而不是让它按内容撑：日志区钉在待机页底部，内容再长也只占
-     * 这一块 —— 否则日志一多会把上面的设备名和按钮整个顶出屏幕，而那两样
-     * 是用户唯一要按的东西。
-     *
-     * 这个高度同时决定「能看到几行」：等宽小字一行约 20dp，给 128dp 就是
-     * 五六个小时刻。早先 compact 档只给了 84dp，日志只能看见两行，而电视上
-     * 没法看 logcat，排障全靠这一块。
-     */
-    val logHeight: Dp,
-
-    /**
-     * 改名输入区的高度。
-     *
-     * 比 logHeight 高，而且**故意不跟它共用一个值**：输入区里要放标题、
-     * 输入框和两个按钮，加起来比日志区那几行等宽小字高得多。早先两者共用
-     * 一个高度，结果按钮那一行被挤到屏幕外 —— 遥控器还能靠焦点选中那个看不见
-     * 的按钮再按确定，触屏就完全点不到，表现是「名字改完没法保存」。
-     *
-     * 输入区该多大就多大，不去迁就日志区。
-     */
-    val editorHeight: Dp,
     /** 日志文字。等宽字体，时间戳与级别能按列对齐，扫一眼就能找到 ERROR。 */
     val logStyle: TextStyle,
 )
@@ -98,8 +74,6 @@ fun resolveStandbyLayout(screenWidthDp: Int): StandbyLayout {
             spacingMedium = 14.dp,
             spacingLoose = 16.dp,
             buttonMinWidth = 160.dp,
-            logHeight = 128.dp,
-            editorHeight = 168.dp,
             logStyle = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
         )
 
@@ -114,8 +88,6 @@ fun resolveStandbyLayout(screenWidthDp: Int): StandbyLayout {
             spacingMedium = 20.dp,
             spacingLoose = 24.dp,
             buttonMinWidth = 220.dp,
-            logHeight = 156.dp,
-            editorHeight = 180.dp,
             logStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
         )
 
@@ -130,8 +102,6 @@ fun resolveStandbyLayout(screenWidthDp: Int): StandbyLayout {
             spacingMedium = 40.dp,
             spacingLoose = 48.dp,
             buttonMinWidth = 320.dp,
-            logHeight = 210.dp,
-            editorHeight = 232.dp,
             logStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
         )
     }
