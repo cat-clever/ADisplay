@@ -1198,42 +1198,61 @@ public sealed partial class MainWindow : Window
         }
     }
 
+    /// <summary>
+    /// 主窗关闭 —— 这就是「用户要退出应用」，不是「关掉一个窗口」。
+    ///
+    /// 日志窗是独立的 Window，**不会**随主窗消失；不主动收它，进程就会被它吊着
+    /// 不退（Windows 的窗口模型里，只要还有窗口就还在跑）。
+    ///
+    /// 每一步**各自兜异常**，而且顺序固定：任何一步抛出去，后面的清理就都不会跑，
+    /// 用户看到的就是「窗口关了、进程还在任务管理器里」—— 而那时界面已经没了，
+    /// 连日志窗口都看不到，是最难查的一种坏法。
+    /// </summary>
     private void OnWindowClosed(object sender, WindowEventArgs args)
     {
-        // 日志窗口是个独立的 Window，**不会**随主窗口一起消失。
-        //
-        // 不主动关它的话，主窗口没了、那个日志窗口还挂着，用户得自己再关一次；
-        // 而且进程会被它吊着不退出（Windows 的窗口模型里，只要还有窗口就还在跑）。
-        // 先关它再销毁引擎：它盯着日志集合，集合一旦停更，留着也是空窗。
-        if (_logWindow != null)
+        // 先收日志窗：它盯着日志集合，集合一旦停更，留着也是空窗。
+        try
         {
-            _logWindow.Close();
-            _logWindow = null;
+            if (_logWindow != null)
+            {
+                _logWindow.Close();
+                _logWindow = null;
+            }
+        }
+        catch (Exception)
+        {
         }
 
-        // 播放器要显式收掉：它还握着一条到本地流服务的连接与解码资源，
-        // 不收的话进程会被它多吊一会儿。
+        // 播放器握着一条到本地流服务的连接与解码资源，不收会多吊一会儿。
         try
         {
             _player.Dispose();
         }
         catch (Exception)
         {
-            // 关窗路上出什么错都不该挡住退出。
         }
 
         // 先摘事件再销毁引擎，避免销毁过程中的状态回调打到已经在拆的界面上。
-        _engine.StateChanged -= OnEngineStateChanged;
-        _engine.LogEmitted -= OnEngineLogEmitted;
-        _engine.MirrorStarted -= OnMirrorStarted;
-        _engine.MirrorFrameReceived -= OnMirrorFrameReceived;
-        _engine.Dispose();
+        try
+        {
+            _engine.StateChanged -= OnEngineStateChanged;
+            _engine.LogEmitted -= OnEngineLogEmitted;
+            _engine.MirrorStarted -= OnMirrorStarted;
+            _engine.MirrorFrameReceived -= OnMirrorFrameReceived;
+            _engine.Dispose();
+        }
+        catch (Exception)
+        {
+        }
 
-        // 明确退出，不去赌「最后一个窗口关掉后系统会自己收尾」。
-        //
-        // 主窗是应用的主窗口，它关掉就等于用户要退出 —— 而只要还有任何一个窗口
-        // 或消息泵活着，进程就会留在任务管理器里，用户看到的是「关了但没关掉」。
-        // 上面已经把日志窗收掉了，这里再显式退一次，行为就是确定的。
-        Application.Current.Exit();
+        // 最后显式退出，不去赌「最后一个窗口关掉后系统会自己收尾」。
+        // 上面已经把该收的都收了，这一句是确定性的兜底。
+        try
+        {
+            Application.Current.Exit();
+        }
+        catch (Exception)
+        {
+        }
     }
 }
