@@ -18,7 +18,7 @@
          和 Android 的 versionCode 是一回事：不变的话系统不认为有更新。
          规则同 Android：主*10000 + 次*100 + 修订。 -->
     <key>CFBundleVersion</key>
-    <string>570</string>
+    <string>571</string>
     <key>LSMinimumSystemVersion</key>
     <string>12.0</string>
     <key>NSHighResolutionCapable</key>
