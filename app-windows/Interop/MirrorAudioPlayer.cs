@@ -13,6 +13,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using Windows.Foundation;
@@ -38,10 +39,27 @@ public sealed class MirrorAudioPlayer
     private bool _startFailed;
     private bool _started;
 
-    // 只用于诊断：进来多少、图取走多少。两个数一起看就能分清「核心没送」
-    // 与「送了但图没在拉」—— 没有声音这两种原因长得一模一样。
+    // 只用于诊断。没有声音有好几种原因，长得一模一样，只能靠这几个数分开：
+    //   _enqueuedSamples / _consumedSamples —— 核心没送？还是送了图没在拉？
+    //   _droppedSamples                    —— 图拉得比送得慢，我们在丢音频
+    //   _peakRecent                        —— PCM 本身是不是静音
+    // 最后一个最关键：图在跑、样本在涨、但峰值恒为 0，那就是核心解出来的是
+    // 一片静音，再怎么调播放这一侧都没用。
     private long _enqueuedSamples;
     private long _consumedSamples;
+    private long _droppedSamples;
+    private float _peakRecent;
+
+    // 解出来的 PCM 原样落一份 WAV（头几秒），纯粹为排障。
+    //
+    // 「没有声音」有一半的可能出在核心解出来的东西本身就是静音上 —— 这件事
+    // 靠界面上加多少计数器都证明不了，只有把 PCM 拿出来看波形才能一句话说死。
+    // 用 32 位浮点（WAVE_FORMAT_IEEE_FLOAT），不做任何转换，落下来的就是
+    // 我们真正交给音频图的那串数。
+    private FileStream? _dump;
+    private long _dumpSamples;
+    private const long MaxDumpSamples = 44100L * 2 * 10;   // 约 10 秒立体声
+    private bool _dumpFinished;
 
     /// <summary>
     /// 转发一条提示。项目约定不用 ?. 空条件运算符，所以显式判一次。
@@ -78,17 +96,148 @@ public sealed class MirrorAudioPlayer
                 needStart = true;
             }
             _enqueuedSamples += samples.Length;
+            for (int i = 0; i < samples.Length; i++)
+            {
+                float value = samples[i] < 0 ? -samples[i] : samples[i];
+                if (value > _peakRecent)
+                {
+                    _peakRecent = value;
+                }
+            }
             if ((_pending.Count / channels) < MaxPendingFrames)
             {
                 _pending.AddRange(samples);
             }
+            else
+            {
+                _droppedSamples += samples.Length;
+            }
         }
+
+        WriteAudioDump(samples, sampleRate, channels);
 
         if (needStart)
         {
             // 起图是异步的，而这里在核心的工作线程上 —— 起不来只记一笔，不能抛。
             _ = StartAsync(sampleRate, channels);
         }
+    }
+
+    /// <summary>
+    /// 把最初的十几秒 PCM 落成 WAV。写不进去不影响播放。
+    ///
+    /// 记的是「核心送来的原样」，与 _pending 那条队列无关 —— 我们要看的是解码
+    /// 结果本身，不是播放端的处理。
+    /// </summary>
+    private void WriteAudioDump(float[] samples, int sampleRate, int channels)
+    {
+        if (_dumpFinished)
+        {
+            return;
+        }
+
+        try
+        {
+            if (_dump == null)
+            {
+                string path = Path.Combine(Path.GetTempPath(), "adisplay-mirror-audio.wav");
+                _dump = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.Read);
+                WriteWavHeader(_dump, sampleRate, channels, 0);
+                RaiseNotice("镜像伴音：同时落一份到 " + path + "（排障用，可忽略）");
+            }
+
+            byte[] bytes = new byte[samples.Length * sizeof(float)];
+            Buffer.BlockCopy(samples, 0, bytes, 0, bytes.Length);
+            _dump.Write(bytes, 0, bytes.Length);
+            _dumpSamples += samples.Length;
+
+            if (_dumpSamples >= MaxDumpSamples)
+            {
+                FinishAudioDump();
+            }
+        }
+        catch (Exception)
+        {
+            // 落不下来就算了，绝不能因为排障影响播放。
+            _dumpFinished = true;
+            if (_dump != null)
+            {
+                _dump.Dispose();
+                _dump = null;
+            }
+        }
+    }
+
+    private void FinishAudioDump()
+    {
+        _dumpFinished = true;
+        if (_dump == null)
+        {
+            return;
+        }
+        try
+        {
+            // 回头把两个长度字段补上：写头的时候还不知道会有多长。
+            long dataBytes = _dumpSamples * sizeof(float);
+            _dump.Seek(4, SeekOrigin.Begin);
+            WriteUInt32(_dump, (uint)(36 + dataBytes));
+            _dump.Seek(40, SeekOrigin.Begin);
+            WriteUInt32(_dump, (uint)dataBytes);
+            _dump.Dispose();
+        }
+        catch (Exception)
+        {
+        }
+        _dump = null;
+    }
+
+    private static void WriteWavHeader(Stream stream, int sampleRate, int channels, uint dataBytes)
+    {
+        // WAVE_FORMAT_IEEE_FLOAT = 3。32 位浮点，交错，与核心交下来的格式一致。
+        byte[] header = new byte[44];
+        WriteAscii(header, 0, "RIFF");
+        WriteUInt32At(header, 4, 36 + dataBytes);
+        WriteAscii(header, 8, "WAVE");
+        WriteAscii(header, 12, "fmt ");
+        WriteUInt32At(header, 16, 16);
+        WriteUInt16At(header, 20, 3);
+        WriteUInt16At(header, 22, (ushort)channels);
+        WriteUInt32At(header, 24, (uint)sampleRate);
+        WriteUInt32At(header, 28, (uint)(sampleRate * channels * sizeof(float)));
+        WriteUInt16At(header, 32, (ushort)(channels * sizeof(float)));
+        WriteUInt16At(header, 34, 32);
+        WriteAscii(header, 36, "data");
+        WriteUInt32At(header, 40, dataBytes);
+        stream.Write(header, 0, header.Length);
+    }
+
+    private static void WriteAscii(byte[] target, int offset, string text)
+    {
+        for (int i = 0; i < text.Length; i++)
+        {
+            target[offset + i] = (byte)text[i];
+        }
+    }
+
+    private static void WriteUInt32At(byte[] target, int offset, uint value)
+    {
+        target[offset] = (byte)value;
+        target[offset + 1] = (byte)(value >> 8);
+        target[offset + 2] = (byte)(value >> 16);
+        target[offset + 3] = (byte)(value >> 24);
+    }
+
+    private static void WriteUInt16At(byte[] target, int offset, ushort value)
+    {
+        target[offset] = (byte)value;
+        target[offset + 1] = (byte)(value >> 8);
+    }
+
+    private static void WriteUInt32(Stream stream, uint value)
+    {
+        byte[] bytes = new byte[4];
+        WriteUInt32At(bytes, 0, value);
+        stream.Write(bytes, 0, 4);
     }
 
     private async Task StartAsync(int sampleRate, int channels)
@@ -204,7 +353,11 @@ public sealed class MirrorAudioPlayer
             _channels = 0;
             _enqueuedSamples = 0;
             _consumedSamples = 0;
+            _droppedSamples = 0;
+            _peakRecent = 0;
         }
+
+        FinishAudioDump();
 
         if (input != null)
         {
@@ -236,6 +389,28 @@ public sealed class MirrorAudioPlayer
     public long ConsumedSamples
     {
         get { lock (_lock) { return _consumedSamples; } }
+    }
+
+    /// <summary>因为队列满而丢掉的样本数。它一直涨说明图拉得比送得慢。</summary>
+    public long DroppedSamples
+    {
+        get { lock (_lock) { return _droppedSamples; } }
+    }
+
+    /// <summary>
+    /// 取走「上次问过之后见过的最大样本幅值」，并归零重新计。
+    ///
+    /// 报「最近一段的最大值」而不是历史最大值：历史最大值一旦被一次响声顶上去
+    /// 就再也下不来，而我们要看的是「现在这一秒是不是静音」。
+    /// </summary>
+    public float TakePeak()
+    {
+        lock (_lock)
+        {
+            float peak = _peakRecent;
+            _peakRecent = 0;
+            return peak;
+        }
     }
 
     /// <summary>音频图的状态。只有「已运行」才说明这一路真的在播。</summary>

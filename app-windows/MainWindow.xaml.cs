@@ -433,7 +433,9 @@ public sealed partial class MainWindow : Window
             + (server.BytesSent / 1024) + " KB，客户端 " + server.ClientCount
             + " 个；伴音 " + _mirrorAudio.State + "，收 "
             + _mirrorAudio.EnqueuedSamples + " 个样本，播 "
-            + _mirrorAudio.ConsumedSamples + " 个样本。");
+            + _mirrorAudio.ConsumedSamples + " 个样本，丢 "
+            + _mirrorAudio.DroppedSamples + " 个，峰值 "
+            + _mirrorAudio.TakePeak().ToString("F4") + "。");
     }
 
     /// <summary>
