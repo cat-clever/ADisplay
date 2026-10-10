@@ -80,13 +80,6 @@ public sealed partial class MainWindow : Window
         _engine.AudioFrameReceived += OnAudioFrameReceived;
         _mirrorAudio.Notice += OnMirrorNotice;
 
-        // 播放器的打开 / 失败都要进日志（见 OnMediaFailed 的说明）。
-        if (PlayerElement.MediaPlayer != null)
-        {
-            PlayerElement.MediaPlayer.MediaOpened += OnMediaOpened;
-            PlayerElement.MediaPlayer.MediaFailed += OnMediaFailed;
-        }
-
         Closed += OnWindowClosed;
 
         // 创建核心引擎要加载 castcore.dll 及其原生依赖，是启动路上第二容易出事的地方。
@@ -343,6 +336,42 @@ public sealed partial class MainWindow : Window
     }
 
     /// <summary>
+    /// 订阅播放器的打开 / 失败 / 状态变化事件。
+    ///
+    /// **必须在设置过 Source 之后调用**：MediaPlayerElement.MediaPlayer 在
+    /// 还没有源的时候可能压根不存在，在构造函数里订阅会静默订不上 ——
+    /// 那样「没有失败日志」就成不了证据（上一版就是栽在这上面）。
+    /// </summary>
+    private void EnsurePlayerEvents()
+    {
+        MediaPlayer? player = PlayerElement.MediaPlayer;
+        if (player == null)
+        {
+            AppendLog(AdLogLevel.Warn, "播放器尚未就绪，事件没能订阅上（内部错误）。");
+            return;
+        }
+        player.MediaOpened -= OnMediaOpened;
+        player.MediaOpened += OnMediaOpened;
+        player.MediaFailed -= OnMediaFailed;
+        player.MediaFailed += OnMediaFailed;
+        player.PlaybackSession.PlaybackStateChanged -= OnPlaybackStateChanged;
+        player.PlaybackSession.PlaybackStateChanged += OnPlaybackStateChanged;
+    }
+
+    /// <summary>
+    /// 状态一变就说一句。卡在 Opening / Buffering 时这一行是唯一能看出
+    /// 「管线到底走到哪一步」的信号。
+    /// </summary>
+    private void OnPlaybackStateChanged(MediaPlaybackSession sender, object args)
+    {
+        _dispatcher.TryEnqueue(() =>
+        {
+            AppendLog(AdLogLevel.Info, "媒体播放状态：" + sender.PlaybackState
+                + "（缓冲进度 " + (sender.BufferingProgress * 100).ToString("F0") + "%）");
+        });
+    }
+
+    /// <summary>
     /// 媒体管线打开成功 / 失败都要说话。
     ///
     /// 镜像这条路上的失败是静默的：播放器不出画面，界面上就是一个转圈，
@@ -377,6 +406,7 @@ public sealed partial class MainWindow : Window
         _dispatcher.TryEnqueue(() =>
         {
             PlayerElement.Source = MediaSource.CreateFromMediaStreamSource(source);
+            EnsurePlayerEvents();
             PlayerElement.MediaPlayer.Volume = 1.0;
             PlayerElement.MediaPlayer.Play();
         });
@@ -422,6 +452,7 @@ public sealed partial class MainWindow : Window
         ShowCastingControls();
 
         PlayerElement.Source = MediaSource.CreateFromUri(uri);
+        EnsurePlayerEvents();
         PlayerElement.MediaPlayer.Volume = 1.0;
         PlayerElement.MediaPlayer.Play();
 

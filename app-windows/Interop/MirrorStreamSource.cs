@@ -66,6 +66,10 @@ public sealed class MirrorStreamSource
     private bool _noticedNoParameterSets;
     private bool _noticedFirstSample;
     private bool _noticedFirstRequest;
+    /// <summary>已经成功投递过样本没有。没投递过之前绝不裁剪队列。</summary>
+    private bool _deliveredAny;
+    /// <summary>头几帧打出来（时间戳 / 关键帧 / 字节数），只打几帧。</summary>
+    private int _loggedSamples;
 
     /// <summary>
     /// 收一帧（Annex B，核心交过来的原始形态）。由核心的工作线程调用。
@@ -150,7 +154,12 @@ public sealed class MirrorStreamSource
             _pending.Enqueue(avcc);
             _pendingKeyFrame.Enqueue(keyFrame);
             _pendingTimestamp.Enqueue(TimestampFrom(ptsUs));
-            while (_pending.Count > MaxQueuedFrames)
+            // 裁剪只在「已经投递过样本」之后做。
+            //
+            // 镜像的帧是一阵一阵来的，起播时手机往往一口气推好几帧，而管线还没来得及
+            // 开口要 —— 这时候按「最旧优先」裁掉，被裁掉的正是**队首那个关键帧**。
+            // 解码器没有关键帧就不会开始，而且不报错，表现就是一直缓冲。
+            while (_deliveredAny && _pending.Count > MaxQueuedFrames)
             {
                 _pending.Dequeue();
                 _pendingKeyFrame.Dequeue();
@@ -182,6 +191,19 @@ public sealed class MirrorStreamSource
             if (deferral != null)
             {
                 deferral.Complete();
+            }
+            _deliveredAny = true;
+
+            // 头几帧把关键信息打出来：时间戳是否在推进、首帧是不是关键帧。
+            // 这两点任何一条不成立，管线就不会开始渲染，而且不会报错。
+            if (_loggedSamples < 3)
+            {
+                _loggedSamples++;
+                RaiseNotice(
+                    "镜像渲染：送出第 " + _loggedSamples + " 帧，时间戳 "
+                    + handoffTimestamp.TotalMilliseconds.ToString("F0") + " ms，"
+                    + (handoffKeyFrame ? "关键帧" : "非关键帧") + "，"
+                    + handoff.Length + " 字节。");
             }
         }
     }
