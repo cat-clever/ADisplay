@@ -19,20 +19,10 @@ import AppKit
 
 /// 日志窗口的生命周期。同一个窗口复用：再点「查看日志」只是把它提到前面，
 /// 不会越点越多。
-@MainActor
-/// 日志窗的关闭处理：关掉它就等于关掉主窗。
 ///
-/// 用户对这两个窗口的预期是「一体」的 —— 只关掉日志窗、主窗还留着，会让人以为
-/// 程序还在跑。与 Windows 侧同一条语义。
-final class LogWindowCloser: NSObject, NSWindowDelegate {
-    func windowWillClose(_ notification: Notification) {
-        guard let closing = notification.object as? NSWindow else { return }
-        for candidate in NSApp.windows where candidate !== closing && candidate.isVisible {
-            candidate.close()
-        }
-    }
-}
-
+/// 关掉日志窗等于关掉主窗：用户对这两个窗口的预期是「一体」的，只关掉日志窗、
+/// 主窗还留着，会让人以为程序还在跑。做法见下面的 LogWindowCloser。
+@MainActor
 final class LogWindowController {
     static let shared = LogWindowController()
 
@@ -68,6 +58,20 @@ final class LogWindowController {
 
         window = created
         content = view
+    }
+}
+
+/// 关掉日志窗即关掉其余窗口（也就是退出应用）。与 Windows 侧同一条语义。
+///
+/// 必须 @MainActor：现在 SDK 里 NSWindowDelegate 就是主线程隔离的，这个类的
+/// 初始化器也跟着隔离，非隔离上下文里 new 不出来。
+@MainActor
+final class LogWindowCloser: NSObject, NSWindowDelegate {
+    func windowWillClose(_ notification: Notification) {
+        guard let closing = notification.object as? NSWindow else { return }
+        for candidate in NSApp.windows where candidate !== closing && candidate.isVisible {
+            candidate.close()
+        }
     }
 }
 
