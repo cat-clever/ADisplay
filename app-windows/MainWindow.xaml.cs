@@ -79,8 +79,18 @@ public sealed partial class MainWindow : Window
                                 true);
         // 播放器尽早挂上、尽早订阅：MediaPlayer 一拿到源就开始打开，
         // 订阅晚了会漏掉 None→Opening 那一次（也是唯一一次）状态变化。
-        PlayerElement.SetMediaPlayer(_player);
-        EnsurePlayerEvents();
+        //
+        // 包一层 try：挂不上最多是投屏不出画面，而这里在窗口构造函数里 ——
+        // 让异常冒出去，用户看到的是「程序打不开」，那比不出画面难查得多。
+        try
+        {
+            PlayerElement.SetMediaPlayer(_player);
+            EnsurePlayerEvents();
+        }
+        catch (Exception error)
+        {
+            StartupLog.Failed("把播放器挂到 MediaPlayerElement 上", error);
+        }
 
         // 日志集合由独立的日志窗口显示（见 LogWindow.xaml）。这里只持有它 ——
         // 谁显示、显示在哪，都是那个窗口自己的事。
