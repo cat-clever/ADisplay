@@ -516,10 +516,27 @@ jobs:
           # 文件夹快捷方式。
           ln -sfn /Applications dist/Applications
 
-          hdiutil create -volname "ADisplay" \
-            -srcfolder dist \
-            -ov -format UDZO \
-            adisplay-macos-universal.dmg
+          # hdiutil 会偶发 "Resource busy"：runner 上可能残留一个 diskimages-helper
+          # 进程占着镜像，而重跑往往落在同一台 runner 上，于是照样撞 —— 已经因此
+          # 卡掉过一次发布。这是环境问题，不该让整个发布失败：换个输出名重试几次
+          # 即可（残留进程盯的是原来那个文件名）。
+          dmg_ok=0
+          for i in 1 2 3; do
+            if hdiutil create -volname "ADisplay" \
+                 -srcfolder dist \
+                 -ov -format UDZO \
+                 "adisplay-macos-universal-${i}.dmg"; then
+              mv "adisplay-macos-universal-${i}.dmg" adisplay-macos-universal.dmg
+              dmg_ok=1
+              break
+            fi
+            echo "hdiutil 第 ${i} 次失败，等 5 秒重试" >&2
+            sleep 5
+          done
+          if [ "${dmg_ok}" != "1" ]; then
+            echo "打包 DMG 连续失败三次" >&2
+            exit 1
+          fi
 
           # 校验 dmg 里确实有这两样，避免又发出一个装不进去的包。
           MOUNT_POINT="$(hdiutil attach adisplay-macos-universal.dmg -nobrowse -readonly \
