@@ -39,6 +39,12 @@ public sealed partial class MainWindow : Window
     /// 播放器按 URL 拉（与 DLNA 同一条路）。
     /// </summary>
     private LiveTsServer? _liveTs;
+    // 播放器对象由我们自己创建、自己持有。
+    //
+    // 不靠 MediaPlayerElement 自动建：那样「什么时候能拿到对象、事件订上没有」
+    // 就变成了时序问题，而这正是上一轮查不出结果的原因 —— 日志上完全看不出
+    // 播放器到底动没动。
+    private readonly MediaPlayer _player = new();
     // 镜像伴音的播放端。核心里已经解成 PCM，这里只负责送进系统音频。
     private readonly MirrorAudioPlayer _mirrorAudio = new();
     // 独立的日志窗口。null 表示当前没开着。
@@ -71,6 +77,11 @@ public sealed partial class MainWindow : Window
         CastingPanel.AddHandler(UIElement.PointerMovedEvent,
                                 new PointerEventHandler(OnCastingPointerMoved),
                                 true);
+        // 播放器尽早挂上、尽早订阅：MediaPlayer 一拿到源就开始打开，
+        // 订阅晚了会漏掉 None→Opening 那一次（也是唯一一次）状态变化。
+        PlayerElement.SetMediaPlayer(_player);
+        EnsurePlayerEvents();
+
         // 日志集合由独立的日志窗口显示（见 LogWindow.xaml）。这里只持有它 ——
         // 谁显示、显示在哪，都是那个窗口自己的事。
 
@@ -312,61 +323,108 @@ public sealed partial class MainWindow : Window
     {
         _dispatcher.TryEnqueue(() =>
         {
-            if (_liveTs != null)
+            try
             {
-                return;
+                StartMirroring();
             }
-            // 会话号与 DLNA 共用一套编号，镜像这边只用来回报播放状态。
-            _castSessionId = 0;
-
-            // 先把本地流服务起来，再让播放器去拉它 —— 与 DLNA 完全同一条路：
-            // 播放器看到的是一个普通的 HTTP URL，不经过 MediaStreamSource
-            // 那层黑箱契约（那条路上的失败是静默的，我们查了很久）。
-            LiveTsServer server = new LiveTsServer();
-            server.Notice += OnMirrorNotice;
-            if (server.Start())
+            catch (Exception error)
             {
-                _liveTs = server;
-                PlayerElement.Source = MediaSource.CreateFromUri(new Uri(server.Url));
-                EnsurePlayerEvents();
-                PlayerElement.MediaPlayer.Volume = 1.0;
-                PlayerElement.MediaPlayer.Play();
+                // 不接住的话，这个异常会消失在消息泵里：界面上没提示、日志里没
+                // 记录，用户看到的只是「投屏了但不出画面」。上一轮就是卡在
+                // 这种「什么都看不到」的状态里，只能靠猜。
+                AppendLog(AdLogLevel.Error, "镜像启动失败：" + error.GetType().Name
+                    + "：" + error.Message);
             }
-
-            SettingsPanel.Visibility = Visibility.Collapsed;
-            CastingPanel.Visibility = Visibility.Visible;
-            CastingTitleText.Text = "正在镜像屏幕";
-            // 刚进投屏先把控件亮出来一次：让用户知道现在什么状态、退路在哪，
-            // 之后它自己会收起。
-            ShowCastingControls();
-            // 镜像这条没有 URL（帧是核心直接交下来的，不是渐进式下载），
-            // 所以取不到文件大小，界面上只显示「正在缓冲」。
-            StartBufferingWatch(null);
-            AppendLog(AdLogLevel.Info, "iPhone 开始屏幕镜像");
         });
     }
 
+    private void StartMirroring()
+    {
+        if (_liveTs != null)
+        {
+            return;
+        }
+        // 会话号与 DLNA 共用一套编号，镜像这边只用来回报播放状态。
+        _castSessionId = 0;
+
+        // 先把本地流服务起来，再让播放器去拉它 —— 与 DLNA 完全同一条路：
+        // 播放器看到的是一个普通的 HTTP URL，不经过 MediaStreamSource
+        // 那层黑箱契约（那条路上的失败是静默的，我们查了很久）。
+        LiveTsServer server = new LiveTsServer();
+        server.Notice += OnMirrorNotice;
+        if (!server.Start())
+        {
+            return;
+        }
+        _liveTs = server;
+
+        _player.Source = MediaSource.CreateFromUri(new Uri(server.Url));
+        _player.Volume = 1.0;
+        _player.Play();
+        AppendLog(AdLogLevel.Info, "镜像：本地流已交给播放器，当前状态 "
+            + _player.PlaybackSession.PlaybackState + "。");
+
+        SettingsPanel.Visibility = Visibility.Collapsed;
+        CastingPanel.Visibility = Visibility.Visible;
+        CastingTitleText.Text = "正在镜像屏幕";
+        // 刚进投屏先把控件亮出来一次：让用户知道现在什么状态、退路在哪，
+        // 之后它自己会收起。
+        ShowCastingControls();
+        // 镜像这条没有 URL（帧是核心直接交下来的，不是渐进式下载），
+        // 所以取不到文件大小，界面上只显示「正在缓冲」。
+        StartBufferingWatch(null);
+        // 起播后探两次。播放器卡在 Opening/Buffering 时不会再有状态变化，
+        // 也就不会再有日志 —— 这两行是唯一能看出「它卡住了」的信号。
+        ScheduleMirrorProbe(3);
+        ScheduleMirrorProbe(8);
+        AppendLog(AdLogLevel.Info, "iPhone 开始屏幕镜像");
+    }
+
+    /// <summary>若干秒后报一次镜像管线的状态。</summary>
+    private void ScheduleMirrorProbe(int seconds)
+    {
+        DispatcherTimer timer = new DispatcherTimer
+        {
+            Interval = TimeSpan.FromSeconds(seconds),
+        };
+        timer.Tick += (sender, e) =>
+        {
+            timer.Stop();
+            ReportMirrorState(seconds);
+        };
+        timer.Start();
+    }
+
+    private void ReportMirrorState(int seconds)
+    {
+        LiveTsServer? server = _liveTs;
+        if (server == null)
+        {
+            return;
+        }
+        MediaPlaybackSession session = _player.PlaybackSession;
+        AppendLog(AdLogLevel.Info, "镜像诊断（起播后 " + seconds + " 秒）：播放器 "
+            + session.PlaybackState + "，缓冲 "
+            + (session.BufferingProgress * 100).ToString("F0") + "%，已封 "
+            + server.FramesQueued + " 帧，送出 " + (server.BytesSent / 1024)
+            + " KB，客户端 " + server.ClientCount + " 个。");
+    }
+
     /// <summary>
-    /// 订阅播放器的打开 / 失败 / 状态变化事件。
+    /// 订阅播放器的打开 / 失败 / 状态变化事件（幂等）。
     ///
-    /// **必须在设置过 Source 之后调用**：MediaPlayerElement.MediaPlayer 在
-    /// 还没有源的时候可能压根不存在，在构造函数里订阅会静默订不上 ——
-    /// 那样「没有失败日志」就成不了证据（上一版就是栽在这上面）。
+    /// **要早于任何一次 Source 赋值**：MediaPlayer 一拿到源就开始打开，
+    /// None→Opening 那一次变化可能发生在订阅之前。而卡住的流不会再变第二次
+    /// 状态 —— 于是日志上看起来就像「播放器从没动过」，怎么查都查不出来。
     /// </summary>
     private void EnsurePlayerEvents()
     {
-        MediaPlayer? player = PlayerElement.MediaPlayer;
-        if (player == null)
-        {
-            AppendLog(AdLogLevel.Warn, "播放器尚未就绪，事件没能订阅上（内部错误）。");
-            return;
-        }
-        player.MediaOpened -= OnMediaOpened;
-        player.MediaOpened += OnMediaOpened;
-        player.MediaFailed -= OnMediaFailed;
-        player.MediaFailed += OnMediaFailed;
-        player.PlaybackSession.PlaybackStateChanged -= OnPlaybackStateChanged;
-        player.PlaybackSession.PlaybackStateChanged += OnPlaybackStateChanged;
+        _player.MediaOpened -= OnMediaOpened;
+        _player.MediaOpened += OnMediaOpened;
+        _player.MediaFailed -= OnMediaFailed;
+        _player.MediaFailed += OnMediaFailed;
+        _player.PlaybackSession.PlaybackStateChanged -= OnPlaybackStateChanged;
+        _player.PlaybackSession.PlaybackStateChanged += OnPlaybackStateChanged;
     }
 
     /// <summary>
@@ -459,10 +517,10 @@ public sealed partial class MainWindow : Window
         CastingTitleText.Text = "正在接收投屏";
         ShowCastingControls();
 
-        PlayerElement.Source = MediaSource.CreateFromUri(uri);
+        _player.Source = MediaSource.CreateFromUri(uri);
         EnsurePlayerEvents();
-        PlayerElement.MediaPlayer.Volume = 1.0;
-        PlayerElement.MediaPlayer.Play();
+        _player.Volume = 1.0;
+        _player.Play();
 
         _reportTimer ??= new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
         _reportTimer.Tick -= OnReportTick;
@@ -483,7 +541,7 @@ public sealed partial class MainWindow : Window
         }
         _castSessionId = 0;
 
-        PlayerElement.Source = null;
+        _player.Source = null;
         // 伴音也停掉：会话结束了不该继续出声。
         _mirrorAudio.Stop();
         // 本地流服务要显式收掉：它还握着监听端口与播放器那条连接。
@@ -620,7 +678,7 @@ public sealed partial class MainWindow : Window
 
     private void OnBufferingTick(object? sender, object e)
     {
-        MediaPlayer? player = PlayerElement.MediaPlayer;
+        MediaPlayer? player = _player;
         if (player == null)
         {
             BufferingBadge.Visibility = Visibility.Collapsed;
@@ -725,7 +783,7 @@ public sealed partial class MainWindow : Window
 
     private void ApplyPlaybackCommand(int command, long value)
     {
-        MediaPlayer? player = PlayerElement.MediaPlayer;
+        MediaPlayer? player = _player;
         if (player == null)
         {
             return;
@@ -762,7 +820,7 @@ public sealed partial class MainWindow : Window
 
     private void ReportPlayback()
     {
-        MediaPlayer? player = PlayerElement.MediaPlayer;
+        MediaPlayer? player = _player;
         if (_castSessionId == 0 || player == null)
         {
             return;
@@ -906,6 +964,17 @@ public sealed partial class MainWindow : Window
         {
             _logWindow.Close();
             _logWindow = null;
+        }
+
+        // 播放器要显式收掉：它还握着一条到本地流服务的连接与解码资源，
+        // 不收的话进程会被它多吊一会儿。
+        try
+        {
+            _player.Dispose();
+        }
+        catch (Exception)
+        {
+            // 关窗路上出什么错都不该挡住退出。
         }
 
         // 先摘事件再销毁引擎，避免销毁过程中的状态回调打到已经在拆的界面上。

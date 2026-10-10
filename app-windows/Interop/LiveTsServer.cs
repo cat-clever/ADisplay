@@ -6,8 +6,16 @@
 // 于是播放器走的是 DLNA 那条已经验证过的路（CreateFromUri），不再经过
 // MediaStreamSource 那层黑箱契约。
 //
-// 为什么不复用核心那个 MediaRelay：它是「给一个远端 URL、我去拉回来换封装」的
-// 拉模型，而镜像是推过来的帧，接不进去。
+// 封装上有四处是「看起来能跑、实际会被解复用器丢掉」的坑，都在这里踩过了，
+// 改之前先看清注释：
+//   1. PSI 段的 section_length 是「段体中段的长度」，不含前面 3 个字节 ——
+//      数组大小要按 3 + section_length 开，CRC32 必须占满末尾 4 个字节。
+//   2. 连续计数（continuity_counter）**按 PID 各自计数**，不是全局一个。
+//      混用一个计数器会在视频 PID 上制造出跳号，被当成丢包。
+//   3. 必须有 PCR。PMT 里声明了 PCR_PID 却没有一个包携带 PCR 时，播放器
+//      建不起播放时钟，表现就是永远「正在缓冲」。
+//   4. PTS 不能回退。发送端的时间戳来自 NTP 同步，中途的同步校正可能让它
+//      倒退，倒退的时间戳会让解复用器卡住。
 
 using System;
 using System.Collections.Generic;
@@ -20,7 +28,7 @@ using System.Threading;
 namespace ADisplay.Windows
 {
     /// <summary>
-    /// 单路 H.264 的 MPEG-TS 封装 + 把它当无尽 HTTP 流发出去。
+    /// 单路 H.264/H.265 的 MPEG-TS 封装 + 把它当无尽 HTTP 流发出去。
     ///
     /// 线程：WriteFrame 由核心的工作线程调用（只入队，不阻塞）；一个专门的发送
     /// 线程负责写 socket。慢客户端会被丢掉，而不是拖住所有人 —— 镜像宁可按最新
@@ -29,19 +37,37 @@ namespace ADisplay.Windows
     internal sealed class LiveTsServer : IDisposable
     {
         // TS 里的几个固定编号。单节目单流，写死即可。
+        private const ushort PatPid = 0x0000;
         private const ushort PmtPid = 0x1000;
         private const ushort VideoPid = 0x1001;
+
         // PMT 里的流类型：0x1B 是 H.264，0x24 是 H.265。发送端选哪个由它决定
         // （我们的 /info 里报了支持 H.265），所以不能写死。
         private const byte StreamTypeH264 = 0x1B;
         private const byte StreamTypeH265 = 0x24;
+
         private const int TsPacketSize = 188;
-        private const int TsPayloadSize = 184;
         private const ushort ProgramNumber = 1;
         private const byte TransportStreamId = 1;
 
+        /// <summary>PAT/PMT 段的长度（3 字节头 + 段体）。</summary>
+        private const int PatSectionLength = 13;
+        private const int PmtSectionLength = 18;
+
         /// <summary>PSI（PAT/PMT）重发的间隔帧数。播放器从中间接入时靠它找到节目。</summary>
-        private const int PsiIntervalFrames = 12;
+        private const int PsiIntervalFrames = 8;
+
+        /// <summary>
+        /// PTS / PCR 的起点：1 秒（90 kHz）。
+        /// 不从 0 起是因为有些解复用器把 0 当成「没有时间戳」。
+        /// </summary>
+        private const long PtsBase90k = 90000;
+
+        /// <summary>
+        /// PCR 比同一帧的 PTS 早多少：0.2 秒。
+        /// 规范要求 PCR 不晚于同一路数据的时间戳，留出提前量最保险。
+        /// </summary>
+        private const long PcrLead90k = 18000;
 
         /// <summary>待发队列上限（TS 字节块）。满了丢最旧的整块 —— 镜像不追旧帧。</summary>
         private const int MaxQueuedChunks = 32;
@@ -57,6 +83,7 @@ namespace ADisplay.Windows
         /// 纯为排障：万一播放器还是不出画面，把这份文件拿给 ffprobe 一跑，
         /// 就能分清是「我们封错了」还是「播放器没吃」。写不进去不影响播放。
         /// </summary>
+        private readonly object _dumpLock = new object();
         private FileStream? _dump;
         private long _dumpBytes;
         private const long MaxDumpBytes = 24L * 1024 * 1024;
@@ -66,12 +93,16 @@ namespace ADisplay.Windows
         private Thread? _sendThread;
         private volatile bool _running;
 
-        private byte _continuityCounter;
+        // 连续计数按 PID 各算各的。
+        private byte _ccPat;
+        private byte _ccPmt;
+        private byte _ccVideo;
+
         private byte _streamType = StreamTypeH264;
-        private string? _pendingNotice;
         private long _bytesSent;
         private int _frameIndex;
         private long _firstPtsUs = -1;
+        private long _lastPts90k = -1;
         private bool _noticedClient;
         private int _lastReportedFrames;
 
@@ -79,6 +110,23 @@ namespace ADisplay.Windows
         public event Action<string>? Notice;
 
         public int Port { get; private set; }
+
+        /// <summary>已封进 TS 的帧数。给界面上的诊断看。</summary>
+        public int FramesQueued
+        {
+            get { lock (_lock) { return _frameIndex; } }
+        }
+
+        /// <summary>真正写进 socket 的字节数。它不涨就说明播放器没在拉。</summary>
+        public long BytesSent
+        {
+            get { lock (_lock) { return _bytesSent; } }
+        }
+
+        public int ClientCount
+        {
+            get { lock (_lock) { return _clients.Count; } }
+        }
 
         public bool Start()
         {
@@ -139,6 +187,7 @@ namespace ADisplay.Windows
             }
 
             byte[] chunk;
+            string? notice = null;
             lock (_lock)
             {
                 if (_frameIndex == 0)
@@ -158,12 +207,14 @@ namespace ADisplay.Windows
                 {
                     relativeUs = 0;
                 }
-                long pts90k = relativeUs * 9 / 100;
-                if (pts90k <= 0)
+                long pts90k = PtsBase90k + relativeUs * 9 / 100;
+                // 时间戳只许前进：NTP 同步校正会让它倒退，倒退的 PTS 会让
+                // 解复用器以为流坏了，然后一直等一个永远不来的时间点。
+                if (_lastPts90k >= 0 && pts90k < _lastPts90k)
                 {
-                    // 第 0 帧的 PTS 不能是 0：有些解复用器把 0 当成「没有时间戳」。
-                    pts90k = 1;
+                    pts90k = _lastPts90k;
                 }
+                _lastPts90k = pts90k;
 
                 MemoryStream buffer = new MemoryStream();
                 // PSI 定期重发：播放器从中间接入也能找到节目。
@@ -175,39 +226,25 @@ namespace ADisplay.Windows
                 WritePes(buffer, annexB, pts90k);
                 chunk = buffer.ToArray();
 
-                // 每约 5 秒（≈150 帧）报一次送出去多少：能区分「播放器没来拉」
-                // 与「拉了但不显示」—— 后者在这里会看到字节数在涨。
-                if (_frameIndex - _lastReportedFrames >= 150)
-                {
-                    _lastReportedFrames = _frameIndex;
-                    int clients = _clients.Count;
-                    long sent = _bytesSent;
-                    _pendingNotice = "镜像中转：已封 " + _frameIndex + " 帧，"
-                        + (sent / 1024) + " KB，客户端 " + clients + " 个。";
-                }
-
                 _outgoing.Enqueue(chunk);
                 while (_outgoing.Count > MaxQueuedChunks)
                 {
                     _outgoing.Dequeue();
                 }
 
-                if (_dump != null && _dumpBytes < MaxDumpBytes)
+                // 每约 5 秒（≈150 帧）报一次送出去多少：能区分「播放器没来拉」
+                // 与「拉了但不显示」—— 后者在这里会看到字节数在涨。
+                if (_frameIndex - _lastReportedFrames >= 150)
                 {
-                    try
-                    {
-                        _dump.Write(chunk, 0, chunk.Length);
-                        _dump.Flush();
-                        _dumpBytes += chunk.Length;
-                    }
-                    catch (Exception)
-                    {
-                        _dump = null;
-                    }
+                    _lastReportedFrames = _frameIndex;
+                    notice = "镜像中转：已封 " + _frameIndex + " 帧，"
+                        + (_bytesSent / 1024) + " KB，客户端 " + _clients.Count + " 个。";
                 }
             }
-            string? notice = _pendingNotice;
-            _pendingNotice = null;
+
+            // 写转储文件、发通知都不在锁里做：文件 IO 万一卡住，
+            // 不能连累正在收帧的核心线程。
+            WriteDump(chunk);
             if (notice != null)
             {
                 RaiseNotice(notice);
@@ -218,16 +255,19 @@ namespace ADisplay.Windows
         public void Stop()
         {
             _running = false;
-            try
+            lock (_dumpLock)
             {
                 if (_dump != null)
                 {
-                    _dump.Dispose();
+                    try
+                    {
+                        _dump.Dispose();
+                    }
+                    catch (Exception)
+                    {
+                    }
                     _dump = null;
                 }
-            }
-            catch (Exception)
-            {
             }
             _hasData.Set();
 
@@ -262,7 +302,10 @@ namespace ADisplay.Windows
                 _lastReportedFrames = 0;
                 _bytesSent = 0;
                 _firstPtsUs = -1;
-                _continuityCounter = 0;
+                _lastPts90k = -1;
+                _ccPat = 0;
+                _ccPmt = 0;
+                _ccVideo = 0;
                 _noticedClient = false;
             }
         }
@@ -270,6 +313,27 @@ namespace ADisplay.Windows
         public void Dispose()
         {
             Stop();
+        }
+
+        private void WriteDump(byte[] chunk)
+        {
+            lock (_dumpLock)
+            {
+                if (_dump == null || _dumpBytes >= MaxDumpBytes)
+                {
+                    return;
+                }
+                try
+                {
+                    _dump.Write(chunk, 0, chunk.Length);
+                    _dump.Flush();
+                    _dumpBytes += chunk.Length;
+                }
+                catch (Exception)
+                {
+                    _dump = null;
+                }
+            }
         }
 
         private void AcceptLoop()
@@ -291,14 +355,19 @@ namespace ADisplay.Windows
                         stream.Dispose();
                         continue;
                     }
+                    bool first = false;
                     lock (_lock)
                     {
                         _clients.Add(stream);
                         if (!_noticedClient)
                         {
                             _noticedClient = true;
-                            RaiseNotice("镜像中转：播放器已连上，开始送流。");
+                            first = true;
                         }
+                    }
+                    if (first)
+                    {
+                        RaiseNotice("镜像中转：播放器已连上，开始送流。");
                     }
                 }
                 catch (Exception)
@@ -318,10 +387,16 @@ namespace ADisplay.Windows
             {
                 // 刻意**不给 Content-Length** —— 这是一条没有尽头的直播流，
                 // 给了长度播放器会在读满之后断开。
+                //
+                // Content-Type 用 Windows 自己给 .ts 注册的那个
+                // （vnd.dlna.mpeg-tts），而不是通用的 video/mp2t：
+                // Media Foundation 的 HTTP 字节流要靠 MIME 找到解复用器，
+                // 没登记过的类型它是不认的。
                 byte[] header = Encoding.ASCII.GetBytes(
                     "HTTP/1.1 200 OK\r\n"
-                    + "Content-Type: video/mp2t\r\n"
+                    + "Content-Type: video/vnd.dlna.mpeg-tts\r\n"
                     + "Cache-Control: no-store\r\n"
+                    + "Accept-Ranges: none\r\n"
                     + "Connection: close\r\n"
                     + "\r\n");
                 stream.Write(header, 0, header.Length);
@@ -342,38 +417,54 @@ namespace ADisplay.Windows
                 while (true)
                 {
                     byte[]? chunk = null;
+                    List<NetworkStream>? targets = null;
                     lock (_lock)
                     {
                         if (_outgoing.Count > 0)
                         {
                             chunk = _outgoing.Dequeue();
+                            if (_clients.Count > 0)
+                            {
+                                targets = new List<NetworkStream>(_clients);
+                            }
                         }
                     }
                     if (chunk == null)
                     {
                         break;
                     }
-
-                    List<NetworkStream>? dead = null;
-                    lock (_lock)
+                    if (targets == null)
                     {
-                        foreach (NetworkStream client in _clients)
+                        continue;
+                    }
+
+                    // 写 socket 放在锁外面：客户端一卡，写调用就会阻塞，
+                    // 而收帧线程正等着这把锁 —— 那不成了「播放器卡住、
+                    // 连画面都收不进来」吗。
+                    List<NetworkStream>? dead = null;
+                    foreach (NetworkStream client in targets)
+                    {
+                        try
                         {
-                            try
+                            client.Write(chunk, 0, chunk.Length);
+                            lock (_lock)
                             {
-                                client.Write(chunk, 0, chunk.Length);
                                 _bytesSent += chunk.Length;
                             }
-                            catch (Exception)
-                            {
-                                if (dead == null)
-                                {
-                                    dead = new List<NetworkStream>();
-                                }
-                                dead.Add(client);
-                            }
                         }
-                        if (dead != null)
+                        catch (Exception)
+                        {
+                            if (dead == null)
+                            {
+                                dead = new List<NetworkStream>();
+                            }
+                            dead.Add(client);
+                        }
+                    }
+
+                    if (dead != null)
+                    {
+                        lock (_lock)
                         {
                             foreach (NetworkStream client in dead)
                             {
@@ -408,31 +499,37 @@ namespace ADisplay.Windows
 
         private void WritePat(Stream output)
         {
-            byte[] section = new byte[13];
+            // 3 个头字节 + 13 个段体字节：段体 = tsid(2) + 版本(1) + 段号(1)
+            // + 末段号(1) + 节目(4) + CRC(4)。CRC 必须占满最后 4 个字节。
+            byte[] section = new byte[3 + PatSectionLength];
             section[0] = 0x00;                        // table_id：PAT
             section[1] = 0xB0;                        // 段语法标记 + 保留位
-            section[2] = 0x0D;                        // section_length = 13
+            section[2] = (byte)PatSectionLength;      // section_length = 13
             section[3] = (byte)(TransportStreamId >> 8);
             section[4] = (byte)(TransportStreamId & 0xFF);
             section[5] = 0xC1;                        // 版本 0、current_next 1
-            section[6] = 0x00;
-            section[7] = 0x00;
-            section[8] = (byte)(ProgramNumber >> 8);  // 一条节目：节目号 → PMT 的 PID
+            section[6] = 0x00;                        // section_number
+            section[7] = 0x00;                        // last_section_number
+            section[8] = (byte)(ProgramNumber >> 8);  // 节目号 → PMT 的 PID
             section[9] = (byte)(ProgramNumber & 0xFF);
             section[10] = (byte)(0xE0 | ((PmtPid >> 8) & 0x1F));
             section[11] = (byte)(PmtPid & 0xFF);
-            ushort crc = Crc32Mpeg(section, 0, 11);
-            section[12] = (byte)(crc >> 8);
-            section[13 - 1] = (byte)(crc & 0xFF);
-            WriteSection(output, 0x00, section);
+            uint crc = Crc32Mpeg(section, 0, section.Length - 4);
+            section[12] = (byte)(crc >> 24);
+            section[13] = (byte)(crc >> 16);
+            section[14] = (byte)(crc >> 8);
+            section[15] = (byte)crc;
+            WriteSection(output, PatPid, section, ref _ccPat);
         }
 
         private void WritePmt(Stream output)
         {
-            byte[] section = new byte[18];
+            // 3 个头字节 + 18 个段体字节：段体 = 节目号(2) + 版本(1) + 段号(1)
+            // + 末段号(1) + PCR_PID(2) + 节目信息长度(2) + 流(5) + CRC(4)。
+            byte[] section = new byte[3 + PmtSectionLength];
             section[0] = 0x02;                        // table_id：PMT
             section[1] = 0xB0;
-            section[2] = 0x12;                        // section_length = 18
+            section[2] = (byte)PmtSectionLength;      // section_length = 18
             section[3] = (byte)(ProgramNumber >> 8);
             section[4] = (byte)(ProgramNumber & 0xFF);
             section[5] = 0xC1;
@@ -447,21 +544,28 @@ namespace ADisplay.Windows
             section[14] = (byte)(VideoPid & 0xFF);
             section[15] = 0xF0;                       // ES_info_length = 0
             section[16] = 0x00;
-            ushort crc = Crc32Mpeg(section, 0, 16);
-            section[17] = (byte)(crc >> 8);
-            section[18 - 1] = (byte)(crc & 0xFF);
-            WriteSection(output, PmtPid, section);
+            uint crc = Crc32Mpeg(section, 0, section.Length - 4);
+            section[17] = (byte)(crc >> 24);
+            section[18] = (byte)(crc >> 16);
+            section[19] = (byte)(crc >> 8);
+            section[20] = (byte)crc;
+            WriteSection(output, PmtPid, section, ref _ccPmt);
         }
 
-        private void WriteSection(Stream output, ushort pid, byte[] section)
+        private static void WriteSection(Stream output, ushort pid, byte[] section, ref byte continuity)
         {
-            // 我们的表都小于 184 字节，一包装得下，不用分片。
-            byte[] packet = NewPacket(pid, 0x40);   // payload_unit_start = 1
-            packet[4] = 0x00;                        // pointer_field
+            // 我们的表都小于 180 字节，一包装得下，不用分片。
+            byte[] packet = new byte[TsPacketSize];
+            packet[0] = 0x47;
+            packet[1] = (byte)(0x40 | ((pid >> 8) & 0x1F));   // payload_unit_start = 1
+            packet[2] = (byte)(pid & 0xFF);
+            packet[3] = (byte)(0x10 | (continuity & 0x0F));
+            continuity = (byte)((continuity + 1) & 0x0F);
+            packet[4] = 0x00;                                  // pointer_field
             Array.Copy(section, 0, packet, 5, section.Length);
             for (int i = 5 + section.Length; i < TsPacketSize; i++)
             {
-                packet[i] = 0xFF;                    // TS 的空填充字节
+                packet[i] = 0xFF;                              // TS 的空填充字节
             }
             output.Write(packet, 0, packet.Length);
         }
@@ -511,14 +615,27 @@ namespace ADisplay.Windows
             assembled.Write(annexB, 0, annexB.Length);
             byte[] data = assembled.ToArray();
 
+            // 这一帧的 PCR 挂在它的第一个包上：PMT 声明了 PCR 放在视频 PID，
+            // 那就必须真有一个包带着它，否则播放器建不起时钟。
+            long pcr90k = pts90k - PcrLead90k;
+            if (pcr90k < 0)
+            {
+                pcr90k = 0;
+            }
+
             int offset = 0;
             bool first = true;
             while (offset < data.Length)
             {
-                int take = Math.Min(TsPayloadSize, data.Length - offset);
-                byte[] packet = NewPacket(VideoPid, first ? (byte)0x40 : (byte)0x00);
-                Array.Copy(data, offset, packet, 4, take);
-                for (int i = 4 + take; i < TsPacketSize; i++)
+                byte[] packet = new byte[TsPacketSize];
+                int payloadOffset = FillPacketHeader(packet, VideoPid, first, _ccVideo,
+                                                     first ? pcr90k : -1);
+                _ccVideo = (byte)((_ccVideo + 1) & 0x0F);
+
+                int capacity = TsPacketSize - payloadOffset;
+                int take = Math.Min(capacity, data.Length - offset);
+                Array.Copy(data, offset, packet, payloadOffset, take);
+                for (int i = payloadOffset + take; i < TsPacketSize; i++)
                 {
                     packet[i] = 0xFF;
                 }
@@ -528,21 +645,45 @@ namespace ADisplay.Windows
             }
         }
 
-        /// <summary>开一个 TS 包：同步字节 + PID/标志 + 连续计数。前 4 字节是包头。</summary>
-        private byte[] NewPacket(ushort pid, byte payloadUnitStart)
+        /// <summary>
+        /// 填 TS 包头，返回负载的起始偏移（带 PCR 时是 12，否则是 4）。
+        /// </summary>
+        private static int FillPacketHeader(byte[] packet, ushort pid, bool payloadStart,
+                                            byte continuity, long pcr90k)
         {
-            byte[] packet = new byte[TsPacketSize];
             packet[0] = 0x47;
-            packet[1] = (byte)(payloadUnitStart | ((pid >> 8) & 0x1F));
+            packet[1] = (byte)((payloadStart ? 0x40 : 0x00) | ((pid >> 8) & 0x1F));
             packet[2] = (byte)(pid & 0xFF);
-            // 有负载、无自适应字段；连续计数按 PID 递增（单路视频，一个计数器够）。
-            packet[3] = (byte)(0x10 | (_continuityCounter & 0x0F));
-            _continuityCounter = (byte)((_continuityCounter + 1) & 0x0F);
-            return packet;
+
+            if (pcr90k >= 0)
+            {
+                // 自适应字段与负载都有：字段长 7（1 个标志字节 + 6 个 PCR 字节）。
+                packet[3] = (byte)(0x30 | (continuity & 0x0F));
+                packet[4] = 7;
+                packet[5] = 0x10;                  // PCR_flag
+                WritePcr(packet, 6, pcr90k);
+                return 12;
+            }
+
+            packet[3] = (byte)(0x10 | (continuity & 0x0F));
+            return 4;
+        }
+
+        /// <summary>把 90 kHz 的时钟值写成 6 个字节的 PCR 字段。</summary>
+        private static void WritePcr(byte[] packet, int offset, long pcr90k)
+        {
+            long baseValue = pcr90k & 0x1FFFFFFFFL;      // 33 位
+            packet[offset] = (byte)((baseValue >> 25) & 0xFF);
+            packet[offset + 1] = (byte)((baseValue >> 17) & 0xFF);
+            packet[offset + 2] = (byte)((baseValue >> 9) & 0xFF);
+            packet[offset + 3] = (byte)((baseValue >> 1) & 0xFF);
+            // 第 5 个字节：base 的最低位 + 6 位保留位（全 1）+ 扩展的最高位。
+            packet[offset + 4] = (byte)(((baseValue & 0x01) << 7) | 0x7E);
+            packet[offset + 5] = 0x00;                   // 9 位扩展：0
         }
 
         /// <summary>MPEG-2 的 CRC32（多项式 0x04C11DB7，初值全 1，不做收尾异或）。</summary>
-        private static ushort Crc32Mpeg(byte[] data, int offset, int length)
+        private static uint Crc32Mpeg(byte[] data, int offset, int length)
         {
             uint crc = 0xFFFFFFFF;
             for (int i = offset; i < offset + length; i++)
@@ -560,7 +701,7 @@ namespace ADisplay.Windows
                     }
                 }
             }
-            return (ushort)(crc & 0xFFFF);
+            return crc;
         }
     }
 }

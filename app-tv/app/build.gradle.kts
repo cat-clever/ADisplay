@@ -18,7 +18,7 @@ android {
         // 它必须随版本递增 —— 不变的话 Android 会认为是同一个包，
         // 覆盖安装时不会更新。
         versionCode = 570
-        versionName = "0.5.70"
+        versionName = "0.5.71"
 
         // 只打 arm64-v8a。
         //
