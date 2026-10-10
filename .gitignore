@@ -13,3 +13,8 @@ adisplay-release.key.txt
 apk/
 tmp_apk/
 .DS_Store
+
+# 跑辅助脚本（换封装验证、色彩比对那些）时生成的字节码缓存。
+# 它们不是项目的一部分，曾经因为一句 git add -A 被扫进仓库一次。
+__pycache__/
+*.pyc
