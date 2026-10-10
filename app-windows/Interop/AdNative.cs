@@ -135,6 +135,15 @@ internal struct AdCallbacks
     public IntPtr OnPlaybackState;
     public IntPtr OnPlaybackCommand;
     public IntPtr OnLog;
+    // 镜像伴音的**压缩**帧。这一项必须存在，哪怕 Windows 这边不用它：
+    // 它是 C 结构体的**最后一个**字段，少了它尺寸就比核心认的 sizeof(AdCallbacks)
+    // 小 8 字节，ad_engine_set_callbacks 会直接返回 InvalidArg（核心的校验是
+    // struct_size < sizeof(AdCallbacks)）。这正是 0.5.61 上「注册回调失败
+    // （InvalidArg）」的原因 —— 手写布局镜像就是这么漂移的。
+    //
+    // 留 Zero 是有意的：注册它等于告诉核心「这一帧我自己解」，而 Windows 这条
+    // 走的是核心解码后的 PCM（见 OnAudioFrame），不需要压缩帧。
+    public IntPtr OnMirrorAudioFrame;
 }
 
 /// <summary>

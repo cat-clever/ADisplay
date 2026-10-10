@@ -155,9 +155,23 @@ internal sealed class AdEngine : IDisposable
         callbacks.OnSessionOpened = Marshal.GetFunctionPointerForDelegate(_sessionOpenedCallback);
         callbacks.OnMirrorFrame = Marshal.GetFunctionPointerForDelegate(_mirrorFrameCallback);
         callbacks.OnAudioFrame = Marshal.GetFunctionPointerForDelegate(_audioFrameCallback);
+        // 压缩镜像伴音这条路 Windows 不用（见 AdCallbacks 里这个字段的说明）。
+        // 显式写出来而不是靠 default 的零值 —— 将来谁改成「非零默认」时，
+        // 这里会提醒他这不是漏填。
+        callbacks.OnMirrorAudioFrame = IntPtr.Zero;
 
         AdResult result = AdNative.ad_engine_set_callbacks(_handle, ref callbacks, IntPtr.Zero);
-        ThrowIfFailed(result, "注册回调");
+        if (result != AdResult.Ok)
+        {
+            // 这一项失败最常见的成因不是参数写错，而是两边的结构体对不上：
+            // AdCallbacks 在 C# 这边是**手写的布局镜像**（见 AdNative.cs），
+            // C 头里加了字段而这里没跟，struct_size 就比核心认的 sizeof 小，
+            // 核心直接返回 InvalidArg。把尺寸打进异常，下次一眼能判断。
+            throw new InvalidOperationException(
+                $"注册回调失败（{result}）：AdCallbacks 结构体 {Marshal.SizeOf<AdCallbacks>()} 字节。"
+                + "若核心报 InvalidArg，多半是它比核心的 sizeof(AdCallbacks) 小 —— "
+                + "对照 include/adisplay/adisplay.h 数一遍字段，C 头改了这里必须跟着改。");
+        }
     }
 
     private void OnStateChangedFromCore(IntPtr userData, int state)
