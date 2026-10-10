@@ -112,6 +112,13 @@ final class EngineModel: ObservableObject {
     /// 界面要切到渲染面而不是播放器 —— 两者是同一页里的两条不同路径。
     @Published private(set) var mirrorSessionId: UInt32?
 
+    /// 用户点了「结束投屏」：本地画面收起来了，但发送端可能还在推。
+    ///
+    /// 它管两件事：结束之后不再往音频里送帧（不然声音会自己回来），以及待机页上
+    /// 那条「还能回去」的横幅要不要显示。注意它**不**清 mirrorSessionId ——
+    /// 清掉就再也说不出「还有一次投屏在推」了。
+    @Published private(set) var castingDismissed = false
+
     /// 一次投屏会话。sessionId 要原样带回报给核心，核心靠它把状态
     /// 对应回手机上那个会话。
     struct ActiveMedia: Equatable {
@@ -239,8 +246,13 @@ final class EngineModel: ObservableObject {
         // 转接处自己加锁取指针，剩下的在调用线程上做完（显示层是线程安全的）。
         // 镜像伴音。与视频同理不切主线程 —— 音频帧更经不起排队，一跳主线程就
         // 可能晚几十毫秒，听感上是断续。核心里已经解成 PCM，这里直接交给播放端。
-        audioFrameCallback = { _, frame in
+        audioFrameCallback = { [weak self] _, frame in
             guard let frame = frame, let data = frame.pointee.data else { return }
+            // 用户已经结束投屏：这一帧不该出声。原来这里没有任何门禁，而播放端的
+            // start() 在停止之后会重新把引擎拉起来 —— 表现就是「画面关了，声音还在」。
+            if self?.castingDismissed == true {
+                return
+            }
             let channels = Int(frame.pointee.channels)
             let frames = Int(frame.pointee.frame_count)
             if channels <= 0 || frames <= 0 {
@@ -314,11 +326,21 @@ final class EngineModel: ObservableObject {
     func stopCasting() {
         activeMedia = nil
         playbackHandler = nil
-        // 镜像那条路没有播放器可停，停的就是「还往渲染面送帧」这件事。
-        mirrorSessionId = nil
+        // 伴音要真的停：这一句原来漏了（真正会话结束时走的 endMedia 里有）。
+        MirrorAudioPlayer.shared.stop()
+        // 标记为「用户不想看了」，但**保留 mirrorSessionId** —— 待机页要靠它显示
+        // 「还有一次投屏在推」，恢复也要靠它重新挂上渲染面。
+        castingDismissed = true
+        // 镜像那条路停的是「还往渲染面送帧」这件事。
         MirrorFrameRouter.shared.attach(nil)
         // 上一个会话暂存的帧绝不能喂给下一个会话的解码器。
         MirrorFrameRouter.shared.resetPending()
+    }
+
+    /// 用户点「继续观看」：回到投屏页。镜像那条路的帧一直在来，重新挂上渲染面即可。
+    func resumeCasting() {
+        guard castingDismissed else { return }
+        castingDismissed = false
     }
 
     /// 把播放器的真实状态回报给核心。不回报的话手机看到的永远停在「起播中」。
@@ -348,11 +370,15 @@ final class EngineModel: ObservableObject {
     }
 
     private func beginMedia(sessionId: UInt32, url: String) {
+        // 新一次投屏：解除上一轮「结束投屏」留下的标记，否则这一轮会一直没声音。
+        castingDismissed = false
         activeMedia = ActiveMedia(sessionId: sessionId, url: url)
         appendLog(level: .info, text: "手机推送媒体：\(url)")
     }
 
     private func beginMirror(sessionId: UInt32) {
+        // 同上：新一次镜像要解除上一轮的结束标记。
+        castingDismissed = false
         mirrorSessionId = sessionId
         appendLog(level: .info, text: "iPhone 开始屏幕镜像")
     }

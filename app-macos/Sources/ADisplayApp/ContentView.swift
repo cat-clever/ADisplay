@@ -16,7 +16,9 @@ struct ContentView: View {
 
     var body: some View {
         Group {
-            if model.activeMedia != nil || model.mirrorSessionId != nil {
+            // castingDismissed 之后即使会话还在（手机仍在推流），也回设置页 ——
+            // 那时待机页上会出现「还能回去」的横幅。
+            if !model.castingDismissed && (model.activeMedia != nil || model.mirrorSessionId != nil) {
                 // 有投屏就把整个窗口让给画面：这是用户此刻唯一关心的事，
                 // 设置项等停止投屏后再回来。
                 //

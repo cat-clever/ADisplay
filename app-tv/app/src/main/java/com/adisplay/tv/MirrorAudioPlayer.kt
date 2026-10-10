@@ -47,6 +47,15 @@ class MirrorAudioPlayer(private val onNotice: (String) -> Unit) {
     private val pending = ArrayDeque<Frame>()
 
     private var running = false
+
+    /**
+     * 挂起：停止播放，并且**不再因为收到新帧而自动重启**。
+     *
+     * 用户点「结束投屏」之后手机还在推流，帧会一直进来。原来 push() 见 !running 就
+     * 新起一个播放线程 —— 表现就是「画面关了，声音还在」。这个标志就是那道门禁，
+     * 要重新出声必须显式 resume()。
+     */
+    private var suspended = false
     private var worker: Thread? = null
 
     // 只有 worker 线程碰。
@@ -56,7 +65,8 @@ class MirrorAudioPlayer(private val onNotice: (String) -> Unit) {
     /** 收一帧压缩的 AAC-ELD。由核心的工作线程调用。 */
     fun push(data: ByteArray, sampleRate: Int, channels: Int) {
         lock.withLock {
-            if (data.isEmpty()) {
+            // 挂起期间连帧都不收：既省掉解码，也彻底堵死「自动复活」这条路。
+            if (data.isEmpty() || suspended) {
                 return
             }
             if (!running) {
@@ -74,9 +84,16 @@ class MirrorAudioPlayer(private val onNotice: (String) -> Unit) {
         }
     }
 
+    /// 解除挂起：下一次收到帧时重新把解码与播放建起来。用于「继续观看」。
+    fun resume() {
+        lock.withLock { suspended = false }
+    }
+
     fun release() {
         lock.withLock {
             running = false
+            // release 的语义是「停止且不许自己重启」，要重新出声必须显式 resume。
+            suspended = true
             pending.clear()
             hasFrame.signalAll()
         }

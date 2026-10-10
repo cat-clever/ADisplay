@@ -355,8 +355,21 @@ class EngineModel(context: Context) {
         private set
 
     /** 手动结束当前这一次投屏：回主界面，但不停接收服务。 */
+    /// 用户点「继续观看」：回到投屏页。状态本来就在（dismiss 不清会话），
+    /// 复位 dismissedEpisode 并让伴音重新可以出声即可。
+    fun resumeCasting() {
+        if (!isCastingDismissed()) {
+            return
+        }
+        dismissedEpisode = -1
+        mirrorAudio.resume()
+    }
+
     fun dismissCasting() {
         dismissedEpisode = castEpisode
+        // 光挡住新帧不够：队列里已经排着的那段还会继续响完。要立刻静音就得连
+        // 播放线程与解码器一起收掉（release 同时置上挂起标志，之后不会自己重启）。
+        mirrorAudio.release()
     }
 
     /** 当前这一次是不是已经被用户手动结束了。 */
@@ -647,6 +660,9 @@ class EngineModel(context: Context) {
                 // 置上 playingMedia 就等于把界面切到播放页，地址先记出来 ——
                 // 否则用户看到的是「状态跳到投屏中却什么都没发生」。
                 castEpisode += 1
+                // 新一次投屏：解除上一轮「结束投屏」留下的伴音挂起，
+                // 不然这一轮会一直没声音。
+                mirrorAudio.resume()
                 playingMedia = PlayingMedia(sessionId, url)
                 appendLog(LogLevel.INFO, "收到媒体地址（会话 " + sessionId + "）：" + url)
             }
@@ -681,6 +697,9 @@ class EngineModel(context: Context) {
             }
             post {
                 castEpisode += 1
+                // 新一次投屏：解除上一轮「结束投屏」留下的伴音挂起，
+                // 不然这一轮会一直没声音。
+                mirrorAudio.resume()
                 mirrorSessionId = sessionId
                 appendLog(LogLevel.INFO, "iPhone 开始屏幕镜像")
             }
@@ -707,6 +726,11 @@ class EngineModel(context: Context) {
             channels: Int,
             ptsUs: Long
         ) {
+            // 用户已经结束投屏：这一帧不该出声。播放端自己也有一道挂起门禁，
+            // 这里是第二道 —— 两道都留着，因为「声音自己回来」是最难解释的一种坏法。
+            if (isCastingDismissed()) {
+                return
+            }
             // 不切主线程，理由同视频帧：每秒约 92 帧，跳一次会让声音断续。
             mirrorAudio.push(data, sampleRate, channels)
         }

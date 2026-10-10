@@ -72,6 +72,23 @@ public sealed partial class MainWindow : Window
     private WriteableBitmap? _mirrorBitmap;
     private bool _mirrorRenderLogged;
 
+    /// <summary>
+    /// 用户点了「结束投屏」：本地画面收起来了，但发送端可能还在推。
+    ///
+    /// 它管两件事：投屏页收起之后不再往音频里送帧（不然声音会自己回来），
+    /// 以及待机页上那条「还能回去」的横幅要不要显示。
+    /// </summary>
+    private bool _castingDismissedByUser;
+
+    /// <summary>
+    /// 最近一次投屏的地址。DLNA 这条路结束之后想「继续观看」就得靠它 ——
+    /// 播放器的 Source 已经被清掉了，没有这个字段就再也起不来。
+    /// </summary>
+    private string? _castingUrl;
+
+    /// <summary>关窗链是否已经在走。两个窗口会互相触发对方的关闭，用它防绕圈。</summary>
+    private bool _closing;
+
     // 自解码这条路的两个诊断数：画了多少帧、最近一帧「从核心交下来到画上屏」花了
     // 多久。后者是判断「慢在哪一段」的关键 —— 它小就说明瓶颈在我们上游。
     private long _renderedFrames;
@@ -402,6 +419,13 @@ public sealed partial class MainWindow : Window
         // 直播开关：告诉播放器这是实时流，别为了抗抖动先攒一段再开播。
         // 默认行为下画面会永远落在直播后面好几秒 —— 镜像这场景，落后比偶尔
         // 卡一下难受得多。
+        // 新一次镜像：把上一轮结束留下的状态清干净（含伴音的挂起）。
+        _castingDismissedByUser = false;
+        _mirrorRenderLogged = false;
+        _renderedFrames = 0;
+        _lastRenderDelayMs = 0;
+        _mirrorAudio.Resume();
+
         _player.RealTimePlayback = true;
         _player.Source = MediaSource.CreateFromUri(new Uri(server.Url));
         _player.Volume = 1.0;
@@ -650,6 +674,17 @@ public sealed partial class MainWindow : Window
 
     private void OnAudioFrameReceived(float[] samples, int sampleRate, int channels)
     {
+        // 用户已经结束投屏：这一帧不该出声。音频播放端自己也有一道挂起门禁，
+        // 这里是第二道 —— 两道都留着，因为「声音自己回来」是最难解释的一种坏法。
+        if (_castingDismissedByUser)
+        {
+            return;
+        }
+        EnqueueAudioFrame(samples, sampleRate, channels);
+    }
+
+    private void EnqueueAudioFrame(float[] samples, int sampleRate, int channels)
+    {
         // 不切回 UI 线程：伴音每秒约 92 帧，每帧跳一次会把主线程压满、声音断续。
         // 播放端只入队，音频图按自己的节奏来取。
         _mirrorAudio.Enqueue(samples, sampleRate, channels);
@@ -719,9 +754,9 @@ public sealed partial class MainWindow : Window
         // 但两个画面要换回来。
         MirrorImage.Visibility = Visibility.Collapsed;
         PlayerElement.Visibility = Visibility.Visible;
-        _mirrorRenderLogged = false;
-        _renderedFrames = 0;
-        _lastRenderDelayMs = 0;
+        // 这里**不复位** _mirrorRenderLogged：帧还在继续画（只是画在隐藏的位图上），
+        // 复位会让下一帧再走一次「首帧」分支，把可见性与播放器状态又翻一遍。
+        // 它只在真正开始新一次镜像时复位，见 StartMirroring。
         lock (_frameLock)
         {
             _framePending = false;
@@ -731,7 +766,8 @@ public sealed partial class MainWindow : Window
         // 那边是文件，先缓冲一段再播才是对的。
         _player.RealTimePlayback = false;
         _player.Source = null;
-        // 伴音也停掉：会话结束了不该继续出声。
+        // 伴音停掉**并且挂起**：手机还在推流，不挂起的话下一帧就把声音拉回来了。
+        _castingDismissedByUser = true;
         _mirrorAudio.Stop();
         // 本地流服务要显式收掉：它还握着监听端口与播放器那条连接。
         if (_liveTs != null)
@@ -1196,6 +1232,35 @@ public sealed partial class MainWindow : Window
             _logWindow.Closed -= OnLogWindowClosed;
             _logWindow = null;
         }
+
+        // 反过来也成立：关掉日志窗就等于关掉主窗（也就是退出应用）。
+        //
+        // 用户对这两个窗口的预期是「一体」的。只关掉日志窗、主窗还留着，会让人以为
+        // 程序还在跑，而它其实只剩一个空壳；更糟的是那个空壳的关闭按钮还可能被别的
+        // 窗口压着点不到。加上这一句之后，无论从哪一边关，收尾都走同一条链。
+        CloseMainWindowOnce();
+    }
+
+    /// <summary>
+    /// 关主窗，但保证整条关闭链只走一次。
+    ///
+    /// 两个窗口会互相触发对方的关闭（主窗关闭会去关日志窗，日志窗关闭又会回来关
+    /// 主窗），没有这道判断就会绕圈。
+    /// </summary>
+    private void CloseMainWindowOnce()
+    {
+        if (_closing)
+        {
+            return;
+        }
+        try
+        {
+            Close();
+        }
+        catch (Exception)
+        {
+            // 关不掉也不能让异常冒出去 —— 那会停在一个半关闭的状态上。
+        }
     }
 
     /// <summary>
@@ -1210,6 +1275,9 @@ public sealed partial class MainWindow : Window
     /// </summary>
     private void OnWindowClosed(object sender, WindowEventArgs args)
     {
+        // 从这里开始就进入收尾：两个窗口之间的互相触发到此为止。
+        _closing = true;
+
         // 先收日志窗：它盯着日志集合，集合一旦停更，留着也是空窗。
         try
         {

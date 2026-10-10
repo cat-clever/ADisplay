@@ -41,6 +41,15 @@ public sealed class MirrorAudioPlayer
     private bool _startFailed;
     private bool _started;
 
+    /// <summary>
+    /// 挂起：停止播放，并且**不再因为收到新帧而自动重启**。
+    ///
+    /// 用户点「结束投屏」之后手机还在推流，帧会一直进来。原来的写法里 Stop() 只是
+    /// 把音频图拆掉，下一帧的 Enqueue 见 _started == false 就重建一张新图开播 ——
+    /// 表现就是「画面关了，声音还在」。这个标志就是那道门禁。
+    /// </summary>
+    private bool _suspended;
+
     // 只用于诊断。没有声音有好几种原因，长得一模一样，只能靠这几个数分开：
     //   _enqueuedSamples / _consumedSamples —— 核心没送？还是送了图没在拉？
     //   _droppedSamples                    —— 图拉得比送得慢，我们在丢音频
@@ -93,7 +102,8 @@ public sealed class MirrorAudioPlayer
         bool needStart = false;
         lock (_lock)
         {
-            if (_startFailed)
+            // 挂起期间连帧都不收：既省掉解码，也彻底堵死「自动复活」这条路。
+            if (_suspended || _startFailed)
             {
                 return;
             }
@@ -392,6 +402,8 @@ public sealed class MirrorAudioPlayer
             _peakRecent = 0;
             _deliveredFrames = 0;
             _deliverFailedLogged = false;
+            // Stop 的语义是「停止且不许自己重启」，要重新出声必须显式 Resume。
+            _suspended = true;
         }
 
         FinishAudioDump();
@@ -473,6 +485,17 @@ public sealed class MirrorAudioPlayer
                 }
                 return "已运行";
             }
+        }
+    }
+
+    /// <summary>
+    /// 解除挂起：下一次收到帧时重新把音频图建起来。用于「继续观看」。
+    /// </summary>
+    public void Resume()
+    {
+        lock (_lock)
+        {
+            _suspended = false;
         }
     }
 
