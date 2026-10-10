@@ -246,13 +246,11 @@ final class EngineModel: ObservableObject {
         // 转接处自己加锁取指针，剩下的在调用线程上做完（显示层是线程安全的）。
         // 镜像伴音。与视频同理不切主线程 —— 音频帧更经不起排队，一跳主线程就
         // 可能晚几十毫秒，听感上是断续。核心里已经解成 PCM，这里直接交给播放端。
-        audioFrameCallback = { [weak self] _, frame in
+        // 注意：这是 **C 函数指针**，闭包不能捕获任何上下文（`[weak self]` 会直接
+        // 编译不过）。所以「已结束投屏就不再出声」那道门禁放在 MirrorAudioPlayer
+        // 里（见 MirrorAudio.swift 的 suspended），这个闭包一个字都不用改。
+        audioFrameCallback = { _, frame in
             guard let frame = frame, let data = frame.pointee.data else { return }
-            // 用户已经结束投屏：这一帧不该出声。原来这里没有任何门禁，而播放端的
-            // start() 在停止之后会重新把引擎拉起来 —— 表现就是「画面关了，声音还在」。
-            if self?.castingDismissed == true {
-                return
-            }
             let channels = Int(frame.pointee.channels)
             let frames = Int(frame.pointee.frame_count)
             if channels <= 0 || frames <= 0 {
@@ -340,6 +338,7 @@ final class EngineModel: ObservableObject {
     /// 用户点「继续观看」：回到投屏页。镜像那条路的帧一直在来，重新挂上渲染面即可。
     func resumeCasting() {
         guard castingDismissed else { return }
+        MirrorAudioPlayer.shared.resume()
         castingDismissed = false
     }
 
@@ -370,14 +369,16 @@ final class EngineModel: ObservableObject {
     }
 
     private func beginMedia(sessionId: UInt32, url: String) {
-        // 新一次投屏：解除上一轮「结束投屏」留下的标记，否则这一轮会一直没声音。
+        // 新一次投屏：解除上一轮「结束投屏」留下的挂起，否则这一轮会一直没声音。
+        MirrorAudioPlayer.shared.resume()
         castingDismissed = false
         activeMedia = ActiveMedia(sessionId: sessionId, url: url)
         appendLog(level: .info, text: "手机推送媒体：\(url)")
     }
 
     private func beginMirror(sessionId: UInt32) {
-        // 同上：新一次镜像要解除上一轮的结束标记。
+        // 同上：新一次镜像要解除上一轮的挂起。
+        MirrorAudioPlayer.shared.resume()
         castingDismissed = false
         mirrorSessionId = sessionId
         appendLog(level: .info, text: "iPhone 开始屏幕镜像")

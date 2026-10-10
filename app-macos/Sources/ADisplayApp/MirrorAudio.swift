@@ -39,6 +39,12 @@ final class MirrorAudioPlayer {
 
     private var format: AVAudioFormat?
     private var running = false
+    /// 挂起：停止播放，并且**不再因为收到新帧而自动重启**。
+    ///
+    /// 用户点「结束投屏」之后手机还在推流，帧会一直进来；而 start() 见
+    /// running == false 就会重新 attach/connect/play —— 表现就是「画面关了，
+    /// 声音还在」。这个标志就是那道门禁，要重新出声必须显式 resume()。
+    private var suspended = false
     private var queuedChunks = 0
 
     // 尚未凑满一块的交错样本（LRLRLR…）。
@@ -51,8 +57,9 @@ final class MirrorAudioPlayer {
     func start(sampleRate: Double, channels: Int) {
         lock.lock()
         let alreadyRunning = running
+        let isSuspended = suspended
         lock.unlock()
-        if alreadyRunning {
+        if alreadyRunning || isSuspended {
             return
         }
 
@@ -92,6 +99,9 @@ final class MirrorAudioPlayer {
         lock.lock()
         let wasRunning = running
         running = false
+        // stop 的语义是「停止且不许自己重启」，要重新出声必须显式 resume。
+        // 这一句就是「结束投屏之后声音还会回来」的解法。
+        suspended = true
         format = nil
         queuedChunks = 0
         pending.removeAll(keepingCapacity: true)
@@ -104,6 +114,13 @@ final class MirrorAudioPlayer {
         player.stop()
         engine.stop()
         engine.detach(player)
+    }
+
+    /// 解除挂起：下一次收到帧时重新把引擎建起来。用于「继续观看」与新一次投屏。
+    func resume() {
+        lock.lock()
+        suspended = false
+        lock.unlock()
     }
 
     /// 收一帧**交错** float32（LRLRLR…）。可以在任意线程调用。
