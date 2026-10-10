@@ -8,6 +8,7 @@ using System;
 using System.Collections.ObjectModel;
 using System.Globalization;
 using System.Net.Http;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Threading;
 using Microsoft.UI.Dispatching;
@@ -69,6 +70,12 @@ public sealed partial class MainWindow : Window
     private int _renderQueued;
     private WriteableBitmap? _mirrorBitmap;
     private bool _mirrorRenderLogged;
+
+    // 自解码这条路的两个诊断数：画了多少帧、最近一帧「从核心交下来到画上屏」花了
+    // 多久。后者是判断「慢在哪一段」的关键 —— 它小就说明瓶颈在我们上游。
+    private long _renderedFrames;
+    private double _lastRenderDelayMs;
+    private long _frameArrivedTicks;
     // 独立的日志窗口。null 表示当前没开着。
     private LogWindow? _logWindow;
     private readonly ObservableCollection<string> _logLines = new();
@@ -429,28 +436,30 @@ public sealed partial class MainWindow : Window
 
     private void ReportMirrorState()
     {
-        LiveTsServer? server = _liveTs;
-        if (server == null)
-        {
-            return;
-        }
-
-        MediaPlaybackSession session = _player.PlaybackSession;
-        // 「我们最新送出去的那一帧在流的第几秒」减「播放器正放到第几秒」，
-        // 就是画面落后直播多远。
-        double lag = server.ElapsedSeconds - session.Position.TotalSeconds;
+        // 这里**不能**因为 _liveTs 为空就返回：自解码那条路在第一帧画出来时就把
+        // 本地流服务收掉了，一返回就等于这行诊断永远不出现。
         int elapsed = (int)(DateTime.Now - _mirrorStartedAt).TotalSeconds;
 
-        AppendLog(AdLogLevel.Info, "镜像诊断（第 " + elapsed + " 秒）：播放器 "
-            + session.PlaybackState + "，缓冲 "
-            + (session.BufferingProgress * 100).ToString("F0") + "%，位置 "
-            + session.Position.TotalSeconds.ToString("F1") + " 秒，已送出到 "
-            + server.ElapsedSeconds.ToString("F1") + " 秒（落后 "
-            + lag.ToString("F1") + " 秒）；已封 " + server.FramesQueued + " 帧 / "
-            + (server.BytesSent / 1024) + " KB，客户端 " + server.ClientCount
-            + " 个；伴音 " + _mirrorAudio.State + "，收 "
-            + _mirrorAudio.EnqueuedSamples + " 个样本，播 "
-            + _mirrorAudio.ConsumedSamples + " 个样本，送出 "
+        // 两条路各报各自的数。以前固定报播放器的位置与「已送出到第几秒」，那是给
+        // 中转流量用的 —— 自解码这条路不用它，于是会报出「落后 0.5 秒」这种没有
+        // 意义的数字（中转早停了）。哪条在跑就报哪条。
+        string video;
+        if (_renderedFrames > 0)
+        {
+            video = "自解码 已画 " + _renderedFrames + " 帧（最近一帧从收到到上屏 "
+                + _lastRenderDelayMs.ToString("F1") + " 毫秒）";
+        }
+        else
+        {
+            MediaPlaybackSession session = _player.PlaybackSession;
+            video = "播放器 " + session.PlaybackState + "，位置 "
+                + session.Position.TotalSeconds.ToString("F1") + " 秒，缓冲 "
+                + (session.BufferingProgress * 100).ToString("F0") + "%";
+        }
+
+        AppendLog(AdLogLevel.Info, "镜像诊断（第 " + elapsed + " 秒）：" + video
+            + "；伴音 " + _mirrorAudio.State + "，收 "
+            + _mirrorAudio.EnqueuedSamples + " 个样本，送出 "
             + _mirrorAudio.DeliveredFrames + " 帧，丢 "
             + _mirrorAudio.DroppedSamples + " 个，峰值 "
             + _mirrorAudio.TakePeak().ToString("F4") + "。");
@@ -549,6 +558,7 @@ public sealed partial class MainWindow : Window
             _frameWidth = width;
             _frameHeight = height;
             _framePending = true;
+            _frameArrivedTicks = Stopwatch.GetTimestamp();
         }
 
         // 只挂一次：已经在等界面线程取的那一帧会被新数据盖掉，正好是我们想要的。
@@ -566,6 +576,7 @@ public sealed partial class MainWindow : Window
         byte[] pixels;
         int width;
         int height;
+        long arrivedTicks;
         lock (_frameLock)
         {
             if (!_framePending)
@@ -576,7 +587,10 @@ public sealed partial class MainWindow : Window
             pixels = _frameBuffer;
             width = _frameWidth;
             height = _frameHeight;
+            arrivedTicks = _frameArrivedTicks;
         }
+        _lastRenderDelayMs = (Stopwatch.GetTimestamp() - arrivedTicks) * 1000.0
+            / Stopwatch.Frequency;
 
         try
         {
@@ -598,6 +612,7 @@ public sealed partial class MainWindow : Window
                 Buffer.MemoryCopy(source, raw, bytes, bytes);
             }
             _mirrorBitmap.Invalidate();
+            _renderedFrames++;
 
             if (!_mirrorRenderLogged)
             {
@@ -607,8 +622,20 @@ public sealed partial class MainWindow : Window
                 MirrorImage.Visibility = Visibility.Visible;
                 PlayerElement.Visibility = Visibility.Collapsed;
                 StopBufferingWatch();
+
+                // 播放器与本地流服务一并收掉：留着只是空转（它拉的那条流已经没有
+                // 数据了），而且它的状态混进诊断行会让人误读成「落后 0.5 秒」。
+                // 自解码一旦画上第一帧就不会退回播放器那条 —— 解码器起不起得来在
+                // 第一帧就定了，那时还没走到这里。
+                _player.Pause();
+                if (_liveTs != null)
+                {
+                    _liveTs.Notice -= OnMirrorNotice;
+                    _liveTs.Dispose();
+                    _liveTs = null;
+                }
                 AppendLog(AdLogLevel.Info, "镜像：自解码渲染已开始（" + width + "×" + height
-                    + "），播放器那条路已让开。");
+                    + "），播放器与本地流已收掉。");
             }
         }
         catch (Exception error)
@@ -692,6 +719,8 @@ public sealed partial class MainWindow : Window
         MirrorImage.Visibility = Visibility.Collapsed;
         PlayerElement.Visibility = Visibility.Visible;
         _mirrorRenderLogged = false;
+        _renderedFrames = 0;
+        _lastRenderDelayMs = 0;
         lock (_frameLock)
         {
             _framePending = false;

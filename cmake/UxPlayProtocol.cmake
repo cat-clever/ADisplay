@@ -35,8 +35,12 @@ FetchContent_Declare(uxplay_protocol
     # 上游的 lib/compat.h 会给 snprintf 定义一个 _snprintf 别名，而现代 UCRT 的
     # <stdio.h> 只要发现 snprintf 是宏就 #error —— 没有别的办法绕开，
     # 只能把那段去掉。理由与幂等性说明见 cmake/PatchUxPlayCompat.cmake。
+    # 两处补丁都在这一个脚本里做：一处是 compat.h 的 snprintf 别名（跨平台编译
+    # 绕不开），一处是 raop.c 里把「手机自查询」当成「新设备要抢占连接」而拆掉
+    # 正在进行的镜像会话（表现为「投一会儿自己断开」）。见该脚本里的说明。
     PATCH_COMMAND  ${CMAKE_COMMAND}
                    -DCOMPAT_FILE=<SOURCE_DIR>/lib/compat.h
+                   -DRAOP_FILE=<SOURCE_DIR>/lib/raop.c
                    -P "${CMAKE_CURRENT_LIST_DIR}/PatchUxPlayCompat.cmake"
 )
 

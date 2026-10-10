@@ -118,9 +118,13 @@ bool MirrorVideoDecoder::decode(const uint8_t* data, std::size_t size, bool is_h
             if (impl_->context == nullptr) {
                 error = "分配解码器上下文失败";
             } else {
-                // 线程数交给 FFmpeg 自己定：它在解码器内部按帧并行，比我们在外面
-                // 切帧更快，也不引入额外的排队延迟。
-                impl_->context->thread_count = 0;
+                // 单线程解码，刻意为之。
+                //
+                // FFmpeg 默认的帧级多线程要先缓存 thread_count 帧才往外吐（它靠
+                // 这个做帧间并行），延迟就是「线程数 ÷ 帧率」—— 十几核的机器上
+                // 半秒上下。而镜像这边一帧只要 0.9 毫秒，离 33 毫秒的帧间隔差得远，
+                // 多线程什么也换不来，只换来延迟。
+                impl_->context->thread_count = 1;
                 if (avcodec_open2(impl_->context, codec, nullptr) < 0) {
                     error = "打开解码器失败";
                 } else {
