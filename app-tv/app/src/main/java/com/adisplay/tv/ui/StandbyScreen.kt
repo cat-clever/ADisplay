@@ -147,7 +147,6 @@ fun StandbyScreen(model: EngineModel) {
  * 日志与改名都不在这一页里常驻，收进抽屉（见 StandbyScreen）：常驻会把上面的
  * 按钮往上挤，而这一页的高度是算着放的。
  */
-@Composable
 /// 待机页底部那条「还能回去」的横幅。
 ///
 /// 只在「用户结束了本地播放、而且会话还在」时出现 —— 会话真的没了就该消失，
@@ -202,6 +201,7 @@ private fun ResumeBanner(
     }
 }
 
+@Composable
 private fun StandbyContent(model: EngineModel, onShowLog: () -> Unit) {
 
     val configuration = LocalConfiguration.current
