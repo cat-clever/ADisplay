@@ -45,6 +45,18 @@
                                 Stretch="Uniform" />
 
             <!--
+                自解码那条路的画面，与上面那个播放器叠在同一格里，按情况二选一。
+
+                AirPlay 镜像走这条：帧由核心解好交下来，这里只把最新一帧画出来。
+                交给 MediaPlayerElement 走流式播放时，它会先攒十几秒再开播，而且
+                每次重新缓冲还会把这段延迟再叠一次（实测能累积到 27 秒）。
+                见 core/pipeline/.../MirrorVideoDecoder.h。
+            -->
+            <Image x:Name="MirrorImage"
+                   Stretch="Uniform"
+                   Visibility="Collapsed" />
+
+            <!--
                 悬浮控件：盖在画面上，不占画面高度。
 
                 默认整块收起，鼠标在窗口里一动（以及刚进投屏时）才显示，几秒后

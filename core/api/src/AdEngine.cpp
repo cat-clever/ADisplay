@@ -19,6 +19,7 @@
 #include <adisplay/discovery/AirplayAdvert.h>
 #include <adisplay/pipeline/AacEldConfig.h>
 #include <adisplay/pipeline/AacEldDecoder.h>
+#include <adisplay/pipeline/MirrorVideoDecoder.h>
 #include <adisplay/pipeline/MediaRelay.h>
 #include <adisplay/common/DeviceIdentity.h>
 #include <adisplay/common/DeviceName.h>
@@ -327,6 +328,43 @@ struct AdEngine {
         frame.height = height;
         frame.pts_us = pts_us;
         snapshot.on_mirror_frame(user, &frame);
+    }
+
+    // 核心解好的镜像视频帧（BGRA，单平面）。与 notify_mirror_frame 是同一个
+    // 模式的另一支：界面层注册了 on_video_frame 就表示「这一帧核心解，我直接
+    // 画出来」——Windows 走这条，因为它那边交给系统播放器会有十几秒启动缓冲。
+    //
+    // data 只在回调期间有效，与压缩帧那条约定一致。
+    void notify_video_frame(uint32_t session_id, const uint8_t* data, int width, int height,
+                            int stride, int64_t pts_us) {
+        AdCallbacks snapshot{};
+        void* user = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            snapshot = callbacks;
+            user = user_data;
+        }
+        if (snapshot.on_video_frame == nullptr) {
+            return;
+        }
+        AdVideoFrame frame{};
+        frame.struct_size = static_cast<uint32_t>(sizeof(AdVideoFrame));
+        frame.session_id = session_id;
+        frame.pts_us = pts_us;
+        frame.width = static_cast<uint32_t>(width);
+        frame.height = static_cast<uint32_t>(height);
+        frame.format = AD_FORMAT_BGRA8;
+        frame.plane_count = 1;
+        frame.data[0] = data;
+        frame.linesize[0] = stride;
+        frame.rotation_degrees = 0;
+        snapshot.on_video_frame(user, &frame);
+    }
+
+    // 界面层是否要核心来解镜像视频（注册了解码后的回调就表示要）。
+    bool wants_decoded_mirror_video() {
+        std::lock_guard<std::mutex> lock(mutex);
+        return callbacks.on_video_frame != nullptr;
     }
 
     // 界面层是否要自己解镜像伴音（注册了压缩回调就表示要）。
@@ -762,8 +800,88 @@ public:
         if (session == 0) {
             return;
         }
+
+        // 界面层注册了解码后的视频回调，就说明这一路由核心来解（Windows 走这条：
+        // 交给系统播放器会有十几秒的启动缓冲，见 MirrorVideoDecoder.h）。
+        if (engine_->wants_decoded_mirror_video()) {
+            if (decode_mirror_video(session, data, size, is_h265, pts_us)) {
+                return;
+            }
+            // 解不出来就退回转发压缩帧 —— 界面层那条路（本地转封装 + 播放器）
+            // 仍然出得了画面，只是延迟大。宁可慢，也别黑屏。
+        }
         engine_->notify_mirror_frame(session, data, size, is_h265, width, height, pts_us);
     }
+
+    // 镜像视频解码。解码器按编码各建一次，H.264 与 H.265 之间切换时自己重建。
+    bool decode_mirror_video(uint32_t session, const unsigned char* data, int size,
+                             bool is_h265, int64_t pts_us) {
+        if (video_decoder_failed.load()) {
+            return false;
+        }
+        if (video_decoder_ == nullptr) {
+            video_decoder_ = std::make_unique<pipeline::MirrorVideoDecoder>();
+        }
+
+        std::vector<uint8_t> bgra;
+        int width = 0;
+        int height = 0;
+        std::string error;
+
+        const auto started = std::chrono::steady_clock::now();
+        const bool decoded = video_decoder_->decode(
+            data, static_cast<std::size_t>(size), is_h265, &bgra, &width, &height, &error);
+        const auto finished = std::chrono::steady_clock::now();
+        video_decode_nanos.fetch_add(static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(finished - started).count()));
+
+        if (!decoded) {
+            if (!error.empty()) {
+                // 解码器起不来：只报一次，之后不再试，改由界面层自己解。
+                AD_LOG_WARN("AirPlay 镜像视频：解码器起不来 —— {}（改回由界面层解码）", error);
+                video_decoder_failed.store(true);
+                video_decoder_.reset();
+            }
+            return false;
+        }
+
+        video_decoded_frames.fetch_add(1);
+        video_timed_frames.fetch_add(1);
+        log_video_timing_if_due();
+        engine_->notify_video_frame(session, bgra.data(), width, height, width * 4, pts_us);
+        return true;
+    }
+
+    // 每 5 秒一行：镜像视频解码每帧花多少毫秒。CPU 高了要能看出是不是它。
+    void log_video_timing_if_due() {
+        const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now().time_since_epoch())
+                                .count();
+        int64_t previous = video_timing_log_ms.load();
+        if (previous != 0 && now - previous < 5000) {
+            return;
+        }
+        if (!video_timing_log_ms.compare_exchange_strong(previous, now)) {
+            return;
+        }
+        const uint64_t counted = video_timed_frames.load();
+        if (counted == 0) {
+            return;
+        }
+        const double per_frame_ms =
+            static_cast<double>(video_decode_nanos.load()) / static_cast<double>(counted) / 1e6;
+        AD_LOG_INFO("AirPlay 镜像视频：已解 {} 帧，解码每帧 {:.3f} 毫秒（软解）",
+                    counted, per_frame_ms);
+    }
+
+    // 镜像视频解码器。界面层注册了 on_video_frame 才会建，建不起来就退回
+    // 「界面层自己解」那条路（见 decode_mirror_video）。
+    std::unique_ptr<pipeline::MirrorVideoDecoder> video_decoder_;
+    std::atomic<bool> video_decoder_failed{false};
+    std::atomic<uint64_t> video_decoded_frames{0};
+    std::atomic<uint64_t> video_decode_nanos{0};
+    std::atomic<uint64_t> video_timed_frames{0};
+    std::atomic<int64_t> video_timing_log_ms{0};
 
     // 镜像伴音（AAC-ELD）的解码器，以及几个只用于日志的标记。
     std::unique_ptr<pipeline::AacEldDecoder> audio_decoder_;

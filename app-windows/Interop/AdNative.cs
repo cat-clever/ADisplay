@@ -157,6 +157,37 @@ internal struct AdCallbacks
 /// 它只在回调期间有效 —— 托管侧要留存必须自己拷一份。
 /// </summary>
 [StructLayout(LayoutKind.Sequential)]
+/// <summary>
+/// 一帧解码后的视频（对应 C 的 AdVideoFrame）。走「核心解码、界面渲染」那条路
+/// 的镜像画面就是这个。
+///
+/// 各平面用固定长度的四个字段写出来，而不是 ByValArray：数组字段在
+/// PtrToStructure 下的行为容易踩坑，而这里布局必须和 C 那边逐字节对上 ——
+/// 错一个字段后面全部错位，且只在运行到回调时才炸。
+/// 目前只用 plane_count = 1、format = BGRA8、data0/linesize0。
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct AdVideoFrame
+{
+    public uint StructSize;
+    public uint SessionId;
+    public long PtsUs;
+    public uint Width;
+    public uint Height;
+    public int Format;
+    public int PlaneCount;
+    public IntPtr Data0;
+    public IntPtr Data1;
+    public IntPtr Data2;
+    public IntPtr Data3;
+    public int LineSize0;
+    public int LineSize1;
+    public int LineSize2;
+    public int LineSize3;
+    public int RotationDegrees;
+    public int Reserved;
+}
+
 internal struct AdMirrorFrame
 {
     public uint StructSize;

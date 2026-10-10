@@ -49,6 +49,11 @@ public sealed class MirrorAudioPlayer
     private long _consumedSamples;
     private long _droppedSamples;
     private float _peakRecent;
+    // 真正成功交给音频图的帧数。它与 _consumedSamples 的差别很关键：
+    // 后者在取数据时就加了，而送帧那一步抛异常的话异常会消失在音频图的事件
+    // 派发里 —— 看上去「图在拉」，实际一帧都没送出去，结果就是没有声音。
+    private long _deliveredFrames;
+    private bool _deliverFailedLogged;
 
     // 解出来的 PCM 原样落一份 WAV（头几秒），纯粹为排障。
     //
@@ -317,8 +322,30 @@ public sealed class MirrorAudioPlayer
             // 余下的保持 0：喂不满会让图停在原地等，补静音比卡住好。
         }
 
-        AudioFrame frame = CreateFrame(samples);
-        sender.AddFrame(frame);
+        // 这一段必须接住异常：它跑在音频图的事件派发里，抛出去没人接，
+        // 表现就是「图在拉、却没有声音」，日志里一行都看不到。
+        try
+        {
+            AudioFrame frame = CreateFrame(samples);
+            sender.AddFrame(frame);
+            lock (_lock)
+            {
+                _deliveredFrames++;
+            }
+        }
+        catch (Exception ex)
+        {
+            lock (_lock)
+            {
+                if (_deliverFailedLogged)
+                {
+                    return;
+                }
+                _deliverFailedLogged = true;
+            }
+            RaiseNotice("镜像伴音：把帧交给音频图失败 —— " + ex.GetType().Name + "："
+                + ex.Message + "（这一路不会出声）");
+        }
     }
 
     private static unsafe AudioFrame CreateFrame(float[] samples)
@@ -355,6 +382,8 @@ public sealed class MirrorAudioPlayer
             _consumedSamples = 0;
             _droppedSamples = 0;
             _peakRecent = 0;
+            _deliveredFrames = 0;
+            _deliverFailedLogged = false;
         }
 
         FinishAudioDump();
@@ -389,6 +418,12 @@ public sealed class MirrorAudioPlayer
     public long ConsumedSamples
     {
         get { lock (_lock) { return _consumedSamples; } }
+    }
+
+    /// <summary>真正交给音频图的帧数。它不涨就说明送帧那一步一直在失败。</summary>
+    public long DeliveredFrames
+    {
+        get { lock (_lock) { return _deliveredFrames; } }
     }
 
     /// <summary>因为队列满而丢掉的样本数。它一直涨说明图拉得比送得慢。</summary>

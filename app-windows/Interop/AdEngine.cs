@@ -37,6 +37,7 @@ internal sealed class AdEngine : IDisposable
     private delegate void SessionOpenedCallback(IntPtr userData, uint sessionId, IntPtr peer, int streamKind);
     private delegate void MirrorFrameCallback(IntPtr userData, IntPtr frame);
     private delegate void AudioFrameCallback(IntPtr userData, IntPtr frame);
+    private delegate void VideoFrameCallback(IntPtr userData, IntPtr frame);
 
     private IntPtr _handle = IntPtr.Zero;
     private bool _disposed;
@@ -54,6 +55,7 @@ internal sealed class AdEngine : IDisposable
     private SessionOpenedCallback? _sessionOpenedCallback;
     private MirrorFrameCallback? _mirrorFrameCallback;
     private AudioFrameCallback? _audioFrameCallback;
+    private VideoFrameCallback? _videoFrameCallback;
 
     public event Action<AdServiceState>? StateChanged;
     public event Action<AdLogLevel, string>? LogEmitted;
@@ -77,6 +79,18 @@ internal sealed class AdEngine : IDisposable
     /// 断续。播放端自己入队，音频图按它自己的节奏来取。
     /// </summary>
     public event Action<float[], int, int>? AudioFrameReceived;
+
+    /// <summary>
+    /// 收到一帧**核心已经解好**的镜像画面（BGRA，单平面，行距 = width * 4）。
+    ///
+    /// 注册它就等于告诉核心「这一帧你自己解」—— Windows 走这条：交给系统播放器
+    /// 会有十几秒的启动缓冲，而自解码只画最新一帧，延迟是一帧。核心那边解不出来
+    /// 时会自动退回「转发压缩帧」，也就是下面那条 MirrorFrameReceived。
+    ///
+    /// data 指向的缓冲**只在本次回调期间有效**：处理函数必须当场拷走，不能留引用。
+    /// 也刻意不在这里替调用方拷一份 —— 一帧两兆多，多拷一次就是白花的带宽。
+    /// </summary>
+    public event Action<IntPtr, int, int, long>? VideoFrameReceived;
 
     /// <summary>
     /// 收到一帧镜像视频。data 是 AVCC 格式的 H.264/H.265，已解密。
@@ -143,6 +157,7 @@ internal sealed class AdEngine : IDisposable
         _sessionOpenedCallback = OnSessionOpenedFromCore;
         _mirrorFrameCallback = OnMirrorFrameFromCore;
         _audioFrameCallback = OnAudioFrameFromCore;
+        _videoFrameCallback = OnVideoFrameFromCore;
 
         AdCallbacks callbacks = default;
         callbacks.StructSize = (uint)Marshal.SizeOf<AdCallbacks>();
@@ -155,6 +170,9 @@ internal sealed class AdEngine : IDisposable
         callbacks.OnSessionOpened = Marshal.GetFunctionPointerForDelegate(_sessionOpenedCallback);
         callbacks.OnMirrorFrame = Marshal.GetFunctionPointerForDelegate(_mirrorFrameCallback);
         callbacks.OnAudioFrame = Marshal.GetFunctionPointerForDelegate(_audioFrameCallback);
+        // 注册它就是在告诉核心「镜像视频由你来解」。核心解不出来时会自己退回
+        // 转发压缩帧，走下面那条 MirrorFrameReceived，不会因此黑屏。
+        callbacks.OnVideoFrame = Marshal.GetFunctionPointerForDelegate(_videoFrameCallback);
         // 压缩镜像伴音这条路 Windows 不用（见 AdCallbacks 里这个字段的说明）。
         // 显式写出来而不是靠 default 的零值 —— 将来谁改成「非零默认」时，
         // 这里会提醒他这不是漏填。
@@ -253,6 +271,29 @@ internal sealed class AdEngine : IDisposable
         float[] samples = new float[count];
         Marshal.Copy(data.Data, samples, 0, count);
         handler(samples, (int)data.SampleRate, (int)data.Channels);
+    }
+
+    private void OnVideoFrameFromCore(IntPtr userData, IntPtr frame)
+    {
+        if (frame == IntPtr.Zero)
+        {
+            return;
+        }
+
+        // 先看有没有人接，再解结构体：没人接的时候连解都不必解。
+        Action<IntPtr, int, int, long>? handler = VideoFrameReceived;
+        if (handler == null)
+        {
+            return;
+        }
+
+        AdVideoFrame value = Marshal.PtrToStructure<AdVideoFrame>(frame);
+        if (value.Data0 == IntPtr.Zero || value.Width == 0 || value.Height == 0)
+        {
+            return;
+        }
+
+        handler(value.Data0, (int)value.Width, (int)value.Height, value.PtsUs);
     }
 
     private void OnMirrorFrameFromCore(IntPtr userData, IntPtr frame)

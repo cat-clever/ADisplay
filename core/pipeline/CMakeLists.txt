@@ -4,8 +4,12 @@
 # URL，那些都交给各平台自带的播放器。这里只放「平台播放器吃不下某种封装」
 # 时需要的处理：把 TS 封装的 HLS 边下边换成 fMP4 再喂给播放器。
 #
-# 依赖同样收窄：只用 libavformat / libavcodec / libavutil（解复用 + 换封装），
-# 不要 avfilter / swscale / swresample，也不要任何编码器 —— 不做解码就不需要它们。
+# 依赖收窄到：libavformat / libavcodec / libavutil / libswscale（解复用、换封装、
+# 以及镜像那两路的解码与色彩转换），不要 avfilter / swresample，也不要任何编码器。
+#
+# swscale 是后来加的：镜像视频要在核心里解成 BGRA（原因见 MirrorVideoDecoder.h），
+# 而 YUV → RGB 的色度矩阵与量化范围必须按帧里带的 colorimetry 来选，自己手写等于
+# 把这件事交给运气。它在 vcpkg 里是 ffmpeg 的一个独立 feature。
 # 要不要编「本地换封装」这部分。
 #
 # Android 不编：电视端的 ExoPlayer + MediaCodec 本来就能直接放 HEVC-in-TS ——
@@ -30,6 +34,10 @@ if(ADISPLAY_PIPELINE_WITH_REMUX)
         # AAC-ELD 解码（AirPlay 镜像伴音）。用 FFmpeg 是因为 AAC-ELD 在
         # Media Foundation 与 MediaCodec 上都不保证支持，而这里一份实现三端通用。
         src/AacEldDecoder.cpp
+        # 镜像视频解码（H.264 / H.265 → BGRA）。交给系统播放器会有十几秒的
+        # 启动缓冲，而且每次重新缓冲还会再叠一次，所以这一路的解码挪到核心，
+        # 界面层只负责把最新一帧画出来（见 MirrorVideoDecoder.h）。
+        src/MirrorVideoDecoder.cpp
         # 一次中转会话：分片的按需生产与缓存，以及那套并发模型。
         src/RelaySession.cpp
         # 本地 HTTP 中转服务与对外接口。
@@ -42,6 +50,8 @@ else()
         # AAC-ELD 解码器同理：它要 FFmpeg，而这套构建没有。没有这个替身的话，
         # castcore 里对它的引用会在链接期报「undefined symbol」。
         src/AacEldDecoderUnsupported.cpp
+        # 镜像视频解码器同理（Android 走 MediaCodec，核心不解）。
+        src/MirrorVideoDecoderUnsupported.cpp
     )
 endif()
 
@@ -83,13 +93,15 @@ endif()
 set(ADISPLAY_FFMPEG_LIBS "")
 
 if(TARGET FFMPEG::avformat)
-    foreach(component avformat avcodec avutil)
+    # swscale 是给镜像视频解码用的（YUV → BGRA）。它在 vcpkg 里是 ffmpeg 的
+    # 一个独立 feature，vcpkg.json 里要一并声明。
+    foreach(component avformat avcodec avutil swscale)
         if(TARGET FFMPEG::${component})
             list(APPEND ADISPLAY_FFMPEG_LIBS FFMPEG::${component})
         endif()
     endforeach()
 elseif(TARGET ffmpeg::avformat)
-    foreach(component avformat avcodec avutil)
+    foreach(component avformat avcodec avutil swscale)
         if(TARGET ffmpeg::${component})
             list(APPEND ADISPLAY_FFMPEG_LIBS ffmpeg::${component})
         endif()
@@ -98,7 +110,7 @@ else()
     find_package(PkgConfig QUIET)
     if(PkgConfig_FOUND)
         pkg_check_modules(ADISPLAY_FFMPEG QUIET IMPORTED_TARGET
-                          libavformat libavcodec libavutil)
+                          libavformat libavcodec libavutil libswscale)
         if(TARGET PkgConfig::ADISPLAY_FFMPEG)
             list(APPEND ADISPLAY_FFMPEG_LIBS PkgConfig::ADISPLAY_FFMPEG)
         endif()
@@ -112,15 +124,18 @@ else()
         find_library(ADISPLAY_AVFORMAT_LIBRARY NAMES avformat)
         find_library(ADISPLAY_AVCODEC_LIBRARY NAMES avcodec)
         find_library(ADISPLAY_AVUTIL_LIBRARY NAMES avutil)
+        find_library(ADISPLAY_SWSCALE_LIBRARY NAMES swscale)
         if(ADISPLAY_AVFORMAT_INCLUDE_DIR AND ADISPLAY_AVFORMAT_LIBRARY
-           AND ADISPLAY_AVCODEC_LIBRARY AND ADISPLAY_AVUTIL_LIBRARY)
+           AND ADISPLAY_AVCODEC_LIBRARY AND ADISPLAY_AVUTIL_LIBRARY
+           AND ADISPLAY_SWSCALE_LIBRARY)
             add_library(adisplay_ffmpeg INTERFACE)
             target_include_directories(adisplay_ffmpeg INTERFACE
                 "${ADISPLAY_AVFORMAT_INCLUDE_DIR}")
             target_link_libraries(adisplay_ffmpeg INTERFACE
                 "${ADISPLAY_AVFORMAT_LIBRARY}"
                 "${ADISPLAY_AVCODEC_LIBRARY}"
-                "${ADISPLAY_AVUTIL_LIBRARY}")
+                "${ADISPLAY_AVUTIL_LIBRARY}"
+                "${ADISPLAY_SWSCALE_LIBRARY}")
             list(APPEND ADISPLAY_FFMPEG_LIBS adisplay_ffmpeg)
         endif()
     endif()
@@ -128,8 +143,9 @@ endif()
 
 if(NOT ADISPLAY_FFMPEG_LIBS)
     message(FATAL_ERROR
-        "找不到 FFmpeg 的 libavformat / libavcodec / libavutil。"
-        "媒体管线的换封装需要它们（vcpkg.json 里声明了 ffmpeg 的 avcodec + avformat）。")
+        "找不到 FFmpeg 的 libavformat / libavcodec / libavutil / libswscale。"
+        "媒体管线的换封装与镜像视频解码需要它们"
+        "（vcpkg.json 里声明了 ffmpeg 的 avcodec + avformat + swscale）。")
 endif()
 endif()   # ADISPLAY_PIPELINE_WITH_REMUX
 

@@ -9,7 +9,10 @@ using System.Collections.ObjectModel;
 using System.Globalization;
 using System.Net.Http;
 using System.Runtime.InteropServices;
+using System.Threading;
 using Microsoft.UI.Dispatching;
+using Microsoft.UI.Xaml.Media.Imaging;
+using Windows.Storage.Streams;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Input;
@@ -53,6 +56,19 @@ public sealed partial class MainWindow : Window
 
     private DispatcherTimer? _mirrorProbeTimer;
     private DateTime _mirrorStartedAt;
+
+    // 自解码那条路的画面交接。
+    //
+    // 核心线程写、界面线程读：核心交下来的指针只在回调期间有效，必须当场拷走，
+    // 而 WriteableBitmap 只能在界面线程碰。两边用这把锁隔开。
+    private readonly object _frameLock = new object();
+    private byte[] _frameBuffer = new byte[0];
+    private int _frameWidth;
+    private int _frameHeight;
+    private bool _framePending;
+    private int _renderQueued;
+    private WriteableBitmap? _mirrorBitmap;
+    private bool _mirrorRenderLogged;
     // 独立的日志窗口。null 表示当前没开着。
     private LogWindow? _logWindow;
     private readonly ObservableCollection<string> _logLines = new();
@@ -108,6 +124,7 @@ public sealed partial class MainWindow : Window
         _engine.CastingEnded += OnCastingEnded;
         _engine.MirrorStarted += OnMirrorStarted;
         _engine.MirrorFrameReceived += OnMirrorFrameReceived;
+        _engine.VideoFrameReceived += OnVideoFrameReceived;
         _engine.AudioFrameReceived += OnAudioFrameReceived;
         _mirrorAudio.Notice += OnMirrorNotice;
 
@@ -433,7 +450,8 @@ public sealed partial class MainWindow : Window
             + (server.BytesSent / 1024) + " KB，客户端 " + server.ClientCount
             + " 个；伴音 " + _mirrorAudio.State + "，收 "
             + _mirrorAudio.EnqueuedSamples + " 个样本，播 "
-            + _mirrorAudio.ConsumedSamples + " 个样本，丢 "
+            + _mirrorAudio.ConsumedSamples + " 个样本，送出 "
+            + _mirrorAudio.DeliveredFrames + " 帧，丢 "
             + _mirrorAudio.DroppedSamples + " 个，峰值 "
             + _mirrorAudio.TakePeak().ToString("F4") + "。");
     }
@@ -506,6 +524,100 @@ public sealed partial class MainWindow : Window
         });
     }
 
+    /// <summary>
+    /// 核心解好的一帧镜像画面。**在核心的工作线程上触发**，而指针只在本次调用
+    /// 期间有效 —— 所以当场拷进交接缓冲，再请界面线程来取。
+    ///
+    /// 刻意不每帧都排队：界面线程慢的时候我们要的是最新那一帧，把旧帧一帧帧补上
+    /// 只会让画面越来越落后 —— 这正是播放器那条路的老毛病。
+    /// </summary>
+    private void OnVideoFrameReceived(IntPtr data, int width, int height, long ptsUs)
+    {
+        if (data == IntPtr.Zero || width <= 0 || height <= 0)
+        {
+            return;
+        }
+
+        int bytes = width * 4 * height;
+        lock (_frameLock)
+        {
+            if (_frameBuffer.Length < bytes)
+            {
+                _frameBuffer = new byte[bytes];
+            }
+            Marshal.Copy(data, _frameBuffer, 0, bytes);
+            _frameWidth = width;
+            _frameHeight = height;
+            _framePending = true;
+        }
+
+        // 只挂一次：已经在等界面线程取的那一帧会被新数据盖掉，正好是我们想要的。
+        if (Interlocked.Exchange(ref _renderQueued, 1) == 0)
+        {
+            _dispatcher.TryEnqueue(RenderMirrorFrame);
+        }
+    }
+
+    /// <summary>把最新一帧画上屏。在界面线程上跑。</summary>
+    private unsafe void RenderMirrorFrame()
+    {
+        Interlocked.Exchange(ref _renderQueued, 0);
+
+        byte[] pixels;
+        int width;
+        int height;
+        lock (_frameLock)
+        {
+            if (!_framePending)
+            {
+                return;
+            }
+            _framePending = false;
+            pixels = _frameBuffer;
+            width = _frameWidth;
+            height = _frameHeight;
+        }
+
+        try
+        {
+            // 尺寸变了（横竖屏切换、编码参数变化）就重建位图。
+            if (_mirrorBitmap == null || _mirrorBitmap.PixelWidth != width
+                || _mirrorBitmap.PixelHeight != height)
+            {
+                _mirrorBitmap = new WriteableBitmap(width, height);
+                MirrorImage.Source = _mirrorBitmap;
+            }
+
+            int bytes = width * 4 * height;
+            byte* raw = null;
+            ((IBufferByteAccess)(object)_mirrorBitmap.PixelBuffer).Buffer(out raw);
+            fixed (byte* source = pixels)
+            {
+                Buffer.MemoryCopy(source, raw, bytes, bytes);
+            }
+            _mirrorBitmap.Invalidate();
+
+            if (!_mirrorRenderLogged)
+            {
+                _mirrorRenderLogged = true;
+                // 第一帧画出来了才让播放器那条路让开 —— 万一这边有问题，
+                // 那条还能兜着。
+                MirrorImage.Visibility = Visibility.Visible;
+                PlayerElement.Visibility = Visibility.Collapsed;
+                StopBufferingWatch();
+                AppendLog(AdLogLevel.Info, "镜像：自解码渲染已开始（" + width + "×" + height
+                    + "），播放器那条路已让开。");
+            }
+        }
+        catch (Exception error)
+        {
+            // 渲染失败不能沉默：界面线程上抛出去就是一个没人接的异常，
+            // 用户看到的只是「黑屏」，而日志里什么都没有。
+            AppendLog(AdLogLevel.Error, "镜像：画面渲染失败 —— " + error.GetType().Name
+                + "：" + error.Message);
+        }
+    }
+
     private void OnAudioFrameReceived(float[] samples, int sampleRate, int channels)
     {
         // 不切回 UI 线程：伴音每秒约 92 帧，每帧跳一次会把主线程压满、声音断续。
@@ -571,6 +683,16 @@ public sealed partial class MainWindow : Window
         if (_mirrorProbeTimer != null)
         {
             _mirrorProbeTimer.Stop();
+        }
+
+        // 自解码那条路的状态也要收掉：位图留着（下次分辨率变了会重建），
+        // 但两个画面要换回来。
+        MirrorImage.Visibility = Visibility.Collapsed;
+        PlayerElement.Visibility = Visibility.Visible;
+        _mirrorRenderLogged = false;
+        lock (_frameLock)
+        {
+            _framePending = false;
         }
 
         // 实时播放是给镜像这条直播流的。回到普通播放（DLNA）要还原 ——
