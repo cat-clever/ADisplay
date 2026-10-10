@@ -14,6 +14,7 @@ using System.Threading;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml.Media.Imaging;
 using Microsoft.UI.Windowing;
+using Windows.Graphics;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Controls;
@@ -1129,7 +1130,33 @@ public sealed partial class MainWindow : Window
         // 引用要在关闭时清掉：不清的话下次点「查看日志」会去 Activate 一个
         // 已经销毁的窗口，什么也不会发生。
         _logWindow.Closed += OnLogWindowClosed;
+        PlaceLogWindow();
         _logWindow.Activate();
+    }
+
+    /// <summary>
+    /// 把日志窗摆到主窗**标题栏下方**。
+    ///
+    /// 不指定位置时由系统随手摆，实测正好压在主窗上 —— 于是用户点主窗标题栏上的
+    /// X，第一次点击落在盖着它的日志窗上（先关掉日志窗），得再点一次才关主窗。
+    /// 往下让开一个标题栏的高度，无论主窗多宽，它的关闭按钮都不会被盖住。
+    /// </summary>
+    private void PlaceLogWindow()
+    {
+        LogWindow? window = _logWindow;
+        if (window == null)
+        {
+            return;
+        }
+        try
+        {
+            PointInt32 main = AppWindow.Position;
+            window.AppWindow.Move(new PointInt32(main.X + 72, main.Y + 96));
+        }
+        catch (Exception)
+        {
+            // 摆不成只是位置难看，不影响功能 —— 不该因此打断「查看日志」。
+        }
     }
 
     private void OnLogWindowClosed(object sender, WindowEventArgs args)
@@ -1171,5 +1198,12 @@ public sealed partial class MainWindow : Window
         _engine.MirrorStarted -= OnMirrorStarted;
         _engine.MirrorFrameReceived -= OnMirrorFrameReceived;
         _engine.Dispose();
+
+        // 明确退出，不去赌「最后一个窗口关掉后系统会自己收尾」。
+        //
+        // 主窗是应用的主窗口，它关掉就等于用户要退出 —— 而只要还有任何一个窗口
+        // 或消息泵活着，进程就会留在任务管理器里，用户看到的是「关了但没关掉」。
+        // 上面已经把日志窗收掉了，这里再显式退一次，行为就是确定的。
+        Application.Current.Exit();
     }
 }
