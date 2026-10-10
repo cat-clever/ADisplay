@@ -790,6 +790,23 @@ bool AirplayReceiver::start(const AirplayConfig& config, std::string* out_error)
 #endif
 }
 
+void AirplayReceiver::stop_mirror() {
+#if ADISPLAY_HAVE_AIRPLAY_RECEIVER
+    raop_t* raop = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(impl_->mutex);
+        if (!impl_->running) {
+            return;
+        }
+        raop = impl_->raop;
+    }
+    if (raop != nullptr) {
+        // 只拆连接：httpd 与 dnssd 都不动，服务还在，手机随后还能再投。
+        raop_remove_known_connections(raop);
+    }
+#endif
+}
+
 void AirplayReceiver::stop() {
 #if ADISPLAY_HAVE_AIRPLAY_RECEIVER
     raop_t* raop = nullptr;

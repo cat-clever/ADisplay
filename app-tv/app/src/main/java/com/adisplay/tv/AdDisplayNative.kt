@@ -146,6 +146,17 @@ object AdDisplayNative {
      */
     external fun nativeValidateDeviceName(name: String): String
 
+    /**
+     * 主动断开某一次投屏（界面上的「断开投屏」）。
+     *
+     * AirPlay 那条路会真的让手机停下来；DLNA 是尽力而为 —— 接收端在 DLNA 里是
+     * 被动方，命令不了手机，只能本地结束会话 + 推一条 STOPPED 事件。
+     *
+     * sessionId 由界面层从 onSessionOpened / onMediaUrl 的回调里记下来。
+     * 返回 0 表示成功，5（NOT_FOUND）表示这个会话其实已经不在了。
+     */
+    external fun nativeDisconnectSession(handle: Long, sessionId: Int): Int
+
     /** 把界面播放器的状态回报给核心，手机端的进度条与音量靠它更新。 */
     external fun nativeReportPlayback(
         handle: Long,

@@ -549,8 +549,14 @@ AD_API AdResult AD_CALL ad_engine_report_playback(AdEngine* engine, const AdPlay
 /* 取当前会话数。多设备排队策略见文档 4.2 SessionManager。 */
 AD_API AdResult AD_CALL ad_engine_get_session_count(AdEngine* engine, uint32_t* out_count);
 
-/* 取当前会话列表。peers 由调用方分配，容量为 capacity。
-   out_count 回填实际数量。 */
+/*
+ * 取当前会话列表。peers 由调用方分配，容量为 capacity；out_count 回填实际数量
+ * （容量不够时也回填真实总数，据此判断要不要扩容）。
+ *
+ * 注意**这里没有会话 id** —— AdPeerInfo 不含该字段。界面层要指定「断开哪一条」
+ * 时，请从 on_session_opened / on_media_url 的回调参数里自己记（它们都带
+ * session_id）。这个函数是给诊断用的。
+ */
 AD_API AdResult AD_CALL ad_engine_get_sessions(AdEngine* engine,
                                                AdPeerInfo* peers, uint32_t capacity,
                                                uint32_t* out_count);

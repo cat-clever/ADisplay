@@ -31,6 +31,7 @@
 #include <cstring>
 #include <exception>
 #include <filesystem>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <new>
@@ -151,6 +152,84 @@ DisplaySuggestion display_suggestion_for_preset(int preset) {
 class DlnaBridge;
 class AirplayBridge;
 
+// 一次投屏属于哪个协议。
+//
+// 刻意由调用方**显式**传进来，不要从 peer_kind 反推：AirPlay 的 HLS 视频推送
+// 与 DLNA 都是 AD_STREAM_MEDIA_URL，而且发送端都报 AD_PEER_ANDROID，反推必错。
+enum AdSessionProtocol {
+    AD_SESSION_AIRPLAY = 0,
+    AD_SESSION_DLNA    = 1,
+};
+
+// 活跃会话表。
+//
+// 自带一把锁，**不复用 AdEngine::mutex**：后者在 notify_session_opened 里正用于
+// 取回调快照，复用就变成「持锁调用户代码」—— 用户在回调里回头调
+// ad_engine_disconnect_session 会当场死锁。
+//
+// 写入口只有 AdEngine::notify_session_opened / notify_session_closed 两个，
+// 两个协议桥都走它们，所以这张表不会漏记。
+class SessionTable {
+public:
+    void add(uint32_t id, int protocol, int stream_kind, int peer_kind) {
+        Entry entry;
+        entry.protocol = protocol;
+        entry.stream_kind = stream_kind;
+        entry.peer_kind = peer_kind;
+        std::lock_guard<std::mutex> lock(mutex_);
+        entries_[id] = entry;
+    }
+
+    bool remove(uint32_t id) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return entries_.erase(id) > 0;
+    }
+
+    // 找到就把协议类型填进 out_protocol（可为空）并返回 true。
+    bool find(uint32_t id, int* out_protocol) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto found = entries_.find(id);
+        if (found == entries_.end()) {
+            return false;
+        }
+        if (out_protocol != nullptr) {
+            *out_protocol = found->second.protocol;
+        }
+        return true;
+    }
+
+    uint32_t size() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return static_cast<uint32_t>(entries_.size());
+    }
+
+    // 取出各条会话的发送端类型，供 get_sessions 在锁外慢慢填。
+    std::vector<int> peer_kinds() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        std::vector<int> out;
+        out.reserve(entries_.size());
+        for (const auto& item : entries_) {
+            out.push_back(item.second.peer_kind);
+        }
+        return out;
+    }
+
+    void clear() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        entries_.clear();
+    }
+
+private:
+    struct Entry {
+        int protocol = AD_SESSION_AIRPLAY;
+        int stream_kind = 0;
+        int peer_kind = 0;
+    };
+
+    mutable std::mutex mutex_;
+    std::map<uint32_t, Entry> entries_;
+};
+
 struct AdEngine {
     mutable std::mutex mutex;
 
@@ -181,6 +260,17 @@ struct AdEngine {
     bool require_confirmation = true;
 
     std::string last_error;
+
+    // 活跃会话表与全局会话号。
+    //
+    // 会话号提到这里，是因为两个协议桥原来各自从 1 开始编号、**会撞号** ——
+    // 而界面层要靠 id 指定「断开哪一条」，撞号就分不清。全局单调递增、永不复用。
+    SessionTable sessions;
+    std::atomic<uint32_t> next_session_id{1};
+
+    uint32_t allocate_session_id() {
+        return next_session_id.fetch_add(1);
+    }
 
     // 服务发现：mDNS 广播 + SSDP 应答（文档 4.2）。
     // 用 unique_ptr 是因为 DiscoveryService 不可拷贝且构造较重，
@@ -252,7 +342,12 @@ struct AdEngine {
 
     // peer_kind 由调用方给出：DLNA 只可能来自 Android，AirPlay 只可能来自
     // iOS。在这里写死成其中一种，界面层就会把 iPhone 显示成安卓设备。
-    void notify_session_opened(uint32_t session_id, int stream_kind, int peer_kind) {
+    void notify_session_opened(uint32_t session_id, int stream_kind, int peer_kind,
+                               int protocol) {
+        // 先写表再回调：用户完全可能在 on_session_opened 里立刻调
+        // ad_engine_disconnect_session，那时查表必须已经能命中。
+        sessions.add(session_id, protocol, stream_kind, peer_kind);
+
         AdCallbacks snapshot{};
         void* user = nullptr;
         {
@@ -277,6 +372,10 @@ struct AdEngine {
     }
 
     void notify_session_closed(uint32_t session_id, int reason) {
+        // 同理先删再回调：用户在 on_session_closed 里查表看到的应当是「已经没了」，
+        // 这也让重复关闭天然幂等。
+        sessions.remove(session_id);
+
         AdCallbacks snapshot{};
         void* user = nullptr;
         {
@@ -550,10 +649,11 @@ public:
         if (previous != 0) {
             engine_->notify_session_closed(previous, AD_CLOSE_REPLACED);
         }
-        const uint32_t session = next_session_id_.fetch_add(1);
+        const uint32_t session = engine_->allocate_session_id();
         session_id_.store(session);
 
-        engine_->notify_session_opened(session, AD_STREAM_MEDIA_URL, AD_PEER_ANDROID);
+        engine_->notify_session_opened(session, AD_STREAM_MEDIA_URL, AD_PEER_ANDROID,
+                                       AD_SESSION_DLNA);
 
         // 交给界面层之前先过一道本地中转。这一步只做字符串拼接、不发网络请求
         // —— 它在 SOAP 的 SetAVTransportURI 应答路径上，在这里拉远端内容会让
@@ -658,6 +758,35 @@ public:
     }
 
     // 停服时清干净，避免下次 start 之后残留上一次的会话与状态。
+    // 用户主动「断开投屏」。
+    //
+    // DLNA 里接收端是**被动方**：协议上没有办法命令手机停止，能做的只有本地结束
+    // 会话 + 推一条 TransportState=STOPPED 的事件。手机认不认取决于它自己的实现，
+    // 所以界面文案不要写成「已让手机停止」。
+    void force_close(uint32_t session_id) {
+        const uint32_t previous = session_id_.exchange(0);
+        if (previous == 0 || previous != session_id) {
+            if (previous != 0) {
+                // 不是这一条：放回去，别误伤别的会话。
+                session_id_.store(previous);
+            }
+            return;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            transport_ = AD_TRANSPORT_STOPPED;
+            url_.clear();
+            metadata_.clear();
+            position_ms_ = -1;
+            duration_ms_ = -1;
+        }
+
+        // 推送会真的发 HTTP 请求，绝不能在持 mutex_ 时做（同 report() 的注释）。
+        engine_->publish_playback_event(dlna::transport_state::kStopped, -1, -1, false, false);
+        engine_->notify_session_closed(previous, AD_CLOSE_USER_REQUEST);
+    }
+
     void reset() {
         session_id_.store(0);
         std::lock_guard<std::mutex> lock(mutex_);
@@ -722,8 +851,8 @@ private:
     bool muted_ = false;
 
     // 0 表示「还没有媒体会话」。命令与状态回报都按它过滤。
+    // 会话号由 AdEngine 统一分配（见 AdEngine::allocate_session_id）。
     std::atomic<uint32_t> session_id_{0};
-    std::atomic<uint32_t> next_session_id_{1};
 };
 
 // AirPlay 回调 -> C ABI 的桥（批次 4）。
@@ -1038,9 +1167,9 @@ private:
         if (existing != 0) {
             return existing;
         }
-        const uint32_t session = next_session_id_.fetch_add(1);
+        const uint32_t session = engine_->allocate_session_id();
         session_id_.store(session);
-        engine_->notify_session_opened(session, stream_kind, AD_PEER_IOS);
+        engine_->notify_session_opened(session, stream_kind, AD_PEER_IOS, AD_SESSION_AIRPLAY);
         return session;
     }
 
@@ -1051,6 +1180,23 @@ private:
         }
     }
 
+    // 用户主动「断开投屏」。
+    //
+    // 真正让 iPhone 停下来的是 AirplayReceiver::stop_mirror()（拆掉镜像连接），
+    // 而那次拆除发生在 httpd 线程上、是异步的。这里显式关一次会话，让界面**立刻**
+    // 收到 on_session_closed（横幅立刻消失）。因为 session_id_ 已经置 0，镜像线程
+    // 真退出时那次 close_session 拿到的是 0，不会重复回调 —— 天然幂等。
+    void force_close(uint32_t session_id) {
+        const uint32_t previous = session_id_.exchange(0);
+        if (previous == 0 || previous != session_id) {
+            if (previous != 0) {
+                session_id_.store(previous);
+            }
+            return;
+        }
+        engine_->notify_session_closed(previous, AD_CLOSE_USER_REQUEST);
+    }
+
     AdEngine* engine_ = nullptr;
 
     mutable std::mutex mutex_;
@@ -1058,9 +1204,8 @@ private:
     std::string model_;
     std::string name_;
 
-    // 0 表示当前没有 AirPlay 会话。
+    // 0 表示当前没有 AirPlay 会话。会话号同样由 AdEngine 统一分配。
     std::atomic<uint32_t> session_id_{0};
-    std::atomic<uint32_t> next_session_id_{1};
 };
 
 // ===========================================================================
@@ -1668,6 +1813,10 @@ void AD_CALL ad_engine_stop(AdEngine* engine) {
         engine->media_relay.reset();
     }
 
+    // 会话表显式清掉：dlna_bridge->reset() 只把 session_id 置 0、**不发**
+    // notify_session_closed，DLNA 的条目会残留到下一次 start。
+    engine->sessions.clear();
+
     engine->change_state(AD_STATE_STOPPED);
     AD_LOG_INFO("接收服务已停止");
 }
@@ -1907,9 +2056,11 @@ AdResult AD_CALL ad_engine_save_config(AdEngine* engine) {
 // ===========================================================================
 // 连接确认与会话
 //
-// 批次 0 尚未接入协议，没有真实的请求与会话。这些函数先返回 AD_ERR_NOT_FOUND，
-// 由批次 1 / 2 / 4 填入实现 —— 返回 AD_ERR_UNSUPPORTED 会让界面误以为
-// 平台不支持该功能。
+// 连接确认（ad_engine_respond_connect_request）还没有接入协议，先返回
+// AD_ERR_NOT_FOUND —— 返回 AD_ERR_UNSUPPORTED 会让界面误以为平台不支持该功能。
+//
+// 会话查询与断开已经接上：AdEngine::sessions 由两个协议桥的
+// notify_session_opened / notify_session_closed 维护。
 // ===========================================================================
 
 AdResult AD_CALL ad_engine_respond_connect_request(AdEngine* engine, uint32_t request_id,
@@ -1927,8 +2078,31 @@ AdResult AD_CALL ad_engine_disconnect_session(AdEngine* engine, uint32_t session
     if (engine == nullptr) {
         return AD_ERR_NOT_INITIALIZED;
     }
-    (void)session_id;
-    return AD_ERR_NOT_FOUND;
+    if (session_id == 0) {
+        return AD_ERR_INVALID_ARG;
+    }
+
+    // 查表只为拿到「这一条属于哪个协议」，随后**立刻放开表锁**再去调桥 ——
+    // 桥会同步回调 notify_session_*，那条路还要拿同一把锁，锁里套锁必死。
+    int protocol = AD_SESSION_AIRPLAY;
+    if (!engine->sessions.find(session_id, &protocol)) {
+        return AD_ERR_NOT_FOUND;
+    }
+
+    if (protocol == AD_SESSION_AIRPLAY) {
+        // 真正让 iPhone 停下来的那一步：把镜像连接拆掉，手机那边会看到镜像结束。
+        // 走 UxPlay 的公开接口 —— 它只把连接标记待删，不停 httpd、也不撤 mDNS
+        // 广播，所以接收服务还在，手机随后还能再投。
+        if (engine->airplay_receiver) {
+            engine->airplay_receiver->stop_mirror();
+        }
+        if (engine->airplay_bridge) {
+            engine->airplay_bridge->force_close(session_id);
+        }
+    } else if (engine->dlna_bridge) {
+        engine->dlna_bridge->force_close(session_id);
+    }
+    return AD_OK;
 }
 
 AdResult AD_CALL ad_engine_report_playback(AdEngine* engine, const AdPlaybackStatus* status) {
@@ -1946,21 +2120,47 @@ AdResult AD_CALL ad_engine_report_playback(AdEngine* engine, const AdPlaybackSta
 }
 
 AdResult AD_CALL ad_engine_get_session_count(AdEngine* engine, uint32_t* out_count) {
-    if (engine == nullptr || out_count == nullptr) {
+    if (engine == nullptr) {
+        return AD_ERR_NOT_INITIALIZED;
+    }
+    if (out_count == nullptr) {
         return AD_ERR_INVALID_ARG;
     }
-    *out_count = 0;
+    // 服务没启动时返回 0 而不是错误：界面层问「现在有几个会话」是合法问题，
+    // 它据此决定要不要显示「还能回去」的横幅。
+    *out_count = engine->sessions.size();
     return AD_OK;
 }
 
 AdResult AD_CALL ad_engine_get_sessions(AdEngine* engine, AdPeerInfo* peers,
                                         uint32_t capacity, uint32_t* out_count) {
-    if (engine == nullptr || out_count == nullptr) {
+    if (engine == nullptr) {
+        return AD_ERR_NOT_INITIALIZED;
+    }
+    if (out_count == nullptr) {
         return AD_ERR_INVALID_ARG;
     }
-    (void)peers;
-    (void)capacity;
-    *out_count = 0;
+
+    const std::vector<int> kinds = engine->sessions.peer_kinds();
+    // 无论容量够不够都回填真实总数，调用方据此判断要不要扩容。
+    *out_count = static_cast<uint32_t>(kinds.size());
+
+    if (peers == nullptr) {
+        return AD_OK;   // 只问个数
+    }
+
+    const uint32_t count =
+        capacity < kinds.size() ? capacity : static_cast<uint32_t>(kinds.size());
+    for (uint32_t i = 0; i < count; ++i) {
+        AdPeerInfo info{};
+        info.struct_size = static_cast<uint32_t>(sizeof(AdPeerInfo));
+        // 发送端信息目前没有一路采上来（桥里只留了设备 id 之类），先给空串 ——
+        // 给 NULL 会让界面层直接 std::string(peer->display_name) 的写法当场崩。
+        info.display_name = "";
+        info.address = "";
+        info.kind = kinds[i];
+        peers[i] = info;
+    }
     return AD_OK;
 }
 

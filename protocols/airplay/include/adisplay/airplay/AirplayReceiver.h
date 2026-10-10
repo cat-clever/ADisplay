@@ -103,6 +103,16 @@ public:
 
     void stop();
 
+    // 结束当前这次镜像，但**不停整个接收服务**。
+    //
+    // 界面层的「断开投屏」用它：手机那边会看到镜像结束，而控制通道与 mDNS
+    // 广播都还在，所以随后还能再投。
+    //
+    // 走 UxPlay 的公开接口（raop_remove_known_connections）—— 它只把连接标记为
+    // 待删，实际拆除发生在 httpd 线程上，因此**是异步的**：调用返回时镜像可能
+    // 还没完全停，真正的结束以 on_mirror_stopped 回调为准。
+    void stop_mirror();
+
     bool is_running() const;
 
     // 实际绑定的端口。要在 start() 成功之后取 —— 端口被占用时协议层

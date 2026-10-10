@@ -596,6 +596,20 @@ Java_com_adisplay_tv_AdDisplayNative_nativeValidateDeviceName(JNIEnv* env, jobje
 }
 
 // ===========================================================================
+// 主动断开会话
+// ===========================================================================
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_adisplay_tv_AdDisplayNative_nativeDisconnectSession(
+    JNIEnv* /*env*/, jobject /*thiz*/, jlong handle, jint session_id) {
+    AdEngine* engine = reinterpret_cast<AdEngine*>(handle);
+    if (engine == nullptr) {
+        return AD_ERR_NOT_INITIALIZED;
+    }
+    return ad_engine_disconnect_session(engine, static_cast<uint32_t>(session_id));
+}
+
+// ===========================================================================
 // 播放状态回报
 // ===========================================================================
 
