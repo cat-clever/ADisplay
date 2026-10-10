@@ -19,6 +19,16 @@ runs:
   steps:
     # 二进制缓存是这套方案能用的前提：vcpkg 要源码编译 FFmpeg / OpenSSL 这类重库，
     # 没有缓存的话每次 CI 都要多花几十分钟。缓存文件放在工作区，由 actions/cache 托管。
+    # 一个坑，写在这里免得下次再踩：
+    #
+    # GitHub 的缓存**按 ref 分域** —— tag 上创建的缓存，别的 ref（包括别的 tag
+    # 和 main）读不到；只有默认分支上创建的缓存对所有 ref 可见。而 release 是
+    # tag 触发的，于是每个 tag 轮次自己存下的包谁都读不到，真正能复用的只有
+    # main 上跑 ci.yml 时留下的那一份。
+    #
+    # 后果：**改了 vcpkg.json 的依赖之后，如果不先在 main 上跑一轮 ci.yml**，
+    # tag 轮次会一直拿旧缓存、发现所需 ABI 不在里面、于是每轮都从头编 FFmpeg
+    # （Windows 上 14 分钟）。2026-10-10 加 swscale 时就吃了这个亏。
     - name: 恢复 vcpkg 二进制缓存
       uses: actions/cache@v4
       with:
