@@ -1150,8 +1150,38 @@ public sealed partial class MainWindow : Window
         }
         try
         {
+            AppWindow log = window.AppWindow;
+            SizeInt32 size = log.Size;
             PointInt32 main = AppWindow.Position;
-            window.AppWindow.Move(new PointInt32(main.X + 72, main.Y + 96));
+            DisplayArea area = DisplayArea.GetFromWindowId(AppWindow.Id, DisplayAreaFallback.Primary);
+            RectInt32 work = area.WorkArea;
+
+            int x = main.X + 72;
+            int y = main.Y + 96;
+
+            // 夹进主窗所在显示器的工作区。主窗贴着屏幕右边时，光加个偏移会把日志窗
+            // 推出去一半 —— 那是这个改动自己引入的毛病，得自己堵上。
+            // 窗口比工作区还大时 max 会小于 min，所以两头的判断都不能省。
+            int maxX = work.X + Math.Max(0, work.Width - size.Width);
+            int maxY = work.Y + Math.Max(0, work.Height - size.Height);
+            if (x > maxX)
+            {
+                x = maxX;
+            }
+            if (y > maxY)
+            {
+                y = maxY;
+            }
+            if (x < work.X)
+            {
+                x = work.X;
+            }
+            if (y < work.Y)
+            {
+                y = work.Y;
+            }
+
+            log.Move(new PointInt32(x, y));
         }
         catch (Exception)
         {
