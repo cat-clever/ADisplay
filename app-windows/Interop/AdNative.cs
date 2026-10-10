@@ -147,24 +147,16 @@ internal struct AdCallbacks
 }
 
 /// <summary>
-/// 一帧压缩的镜像视频，对应 C 的 AdMirrorFrame。
-///
-/// 与 AdVideoFrame 分开：那个是「核心解码、界面渲染」那条路用的（交出来的是
-/// NV12/I420 平面），而镜像是把压缩帧直接交给平台的解码器
-/// （Windows 这边是 MediaStreamSource + MediaPlayerElement）。
-///
-/// Data 是 AVCC 格式（每个 NALU 前 4 字节长度前缀），已解密。
-/// 它只在回调期间有效 —— 托管侧要留存必须自己拷一份。
-/// </summary>
-[StructLayout(LayoutKind.Sequential)]
 /// <summary>
-/// 一帧解码后的视频（对应 C 的 AdVideoFrame）。走「核心解码、界面渲染」那条路
-/// 的镜像画面就是这个。
+/// 一帧**解码后**的视频，对应 C 的 AdVideoFrame。
 ///
-/// 各平面用固定长度的四个字段写出来，而不是 ByValArray：数组字段在
-/// PtrToStructure 下的行为容易踩坑，而这里布局必须和 C 那边逐字节对上 ——
-/// 错一个字段后面全部错位，且只在运行到回调时才炸。
-/// 目前只用 plane_count = 1、format = BGRA8、data0/linesize0。
+/// 走「核心解码、界面渲染」那条路的画面就是这个 —— Windows 的 AirPlay 镜像现在
+/// 走这条（渲染在 MainWindow 里）。目前只用 plane_count = 1、format = BGRA8、
+/// data0 / linesize0。
+///
+/// 各平面用四个固定字段写出来、而不是 ByValArray：数组字段在 PtrToStructure
+/// 下的行为容易踩坑，而这里布局必须与 C 那边逐字节对上 —— 错一个字段后面全部
+/// 错位，且只在运行到回调时才炸。
 /// </summary>
 [StructLayout(LayoutKind.Sequential)]
 internal struct AdVideoFrame
@@ -188,6 +180,18 @@ internal struct AdVideoFrame
     public int Reserved;
 }
 
+/// <summary>
+/// 一帧**压缩的**镜像视频，对应 C 的 AdMirrorFrame。
+///
+/// 与 AdVideoFrame 分开：那个是「核心解码、界面渲染」那条路，这个是「界面层自己
+/// 解码」那条。核心按「界面层注册了哪一个回调」决定这一帧走哪条 —— 注册了
+/// on_video_frame 就由核心解，否则只转发压缩帧。
+///
+/// Data 是 **Annex B**（每个 NALU 前是 00 00 01 / 00 00 00 01 起始码，不是长度
+/// 前缀），已解密；SPS/PPS 由核心补在每个关键帧上。它只在回调期间有效 ——
+/// 托管侧要留存必须自己拷一份。
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
 internal struct AdMirrorFrame
 {
     public uint StructSize;
@@ -201,7 +205,6 @@ internal struct AdMirrorFrame
     public int Reserved;
 }
 
-/// <summary>
 /// 一帧解码后的镜像伴音，对应 C 的 AdAudioFrame。
 ///
 /// Data 是**交错** float32（LRLRLR…），已经解码 —— AAC-ELD 在 Windows 的
