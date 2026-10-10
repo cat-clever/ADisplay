@@ -891,6 +891,17 @@ public sealed partial class MainWindow : Window
 
     private void OnWindowClosed(object sender, WindowEventArgs args)
     {
+        // 日志窗口是个独立的 Window，**不会**随主窗口一起消失。
+        //
+        // 不主动关它的话，主窗口没了、那个日志窗口还挂着，用户得自己再关一次；
+        // 而且进程会被它吊着不退出（Windows 的窗口模型里，只要还有窗口就还在跑）。
+        // 先关它再销毁引擎：它盯着日志集合，集合一旦停更，留着也是空窗。
+        if (_logWindow != null)
+        {
+            _logWindow.Close();
+            _logWindow = null;
+        }
+
         // 先摘事件再销毁引擎，避免销毁过程中的状态回调打到已经在拆的界面上。
         _engine.StateChanged -= OnEngineStateChanged;
         _engine.LogEmitted -= OnEngineLogEmitted;
