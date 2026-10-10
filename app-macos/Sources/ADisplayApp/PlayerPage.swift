@@ -426,11 +426,12 @@ struct PlayerPage: View {
             }
 
             if controlsVisible {
-                VStack(spacing: 0) {
-                    statusBar
-                    Spacer(minLength: 0)
-                    controlBar
-                }
+                // 顶部状态条横贯整宽；按钮贴右侧竖排（与 Android / Windows 一致）。
+                statusBar
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+
+                controlBar
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
             }
         }
         .frame(minWidth: 520, minHeight: 460)
@@ -484,24 +485,25 @@ struct PlayerPage: View {
 
     /// 底部操作条。同样悬浮。
     private var controlBar: some View {
-        HStack(spacing: 12) {
+        // 竖排放在右侧：不排底部是因为播放器自带的进度条与传输控件就在窗口
+        // 最下面（AVPlayerView 的浮层），两条挤在一起既看不清也点不准。
+        VStack(spacing: 10) {
+            Button("全屏") {
+                toggleFullScreen()
+            }
+            Button("查看日志") {
+                LogWindowController.shared.show()
+            }
             // 「结束投屏」而不是「停止接收」：它只结束本地播放、回设置页，
             // 接收服务照旧跑着（见 EngineModel.stopCasting）—— 服务一停广播就
             // 撤了，手机那边立刻找不到这台机器。
             Button("结束投屏") {
                 model.stopCasting()
             }
-            Button("查看日志") {
-                LogWindowController.shared.show()
-            }
-            Button("全屏") {
-                toggleFullScreen()
-            }
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
-        .frame(maxWidth: .infinity)
-        .background(.ultraThinMaterial)
+        .padding(12)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
+        .padding(.trailing, 24)
     }
 
     private func showControls() {

@@ -80,6 +80,13 @@ public sealed partial class MainWindow : Window
         _engine.AudioFrameReceived += OnAudioFrameReceived;
         _mirrorAudio.Notice += OnMirrorNotice;
 
+        // 播放器的打开 / 失败都要进日志（见 OnMediaFailed 的说明）。
+        if (PlayerElement.MediaPlayer != null)
+        {
+            PlayerElement.MediaPlayer.MediaOpened += OnMediaOpened;
+            PlayerElement.MediaPlayer.MediaFailed += OnMediaFailed;
+        }
+
         Closed += OnWindowClosed;
 
         // 创建核心引擎要加载 castcore.dll 及其原生依赖，是启动路上第二容易出事的地方。
@@ -333,6 +340,36 @@ public sealed partial class MainWindow : Window
             StartBufferingWatch(null);
             AppendLog(AdLogLevel.Info, "iPhone 开始屏幕镜像");
         });
+    }
+
+    /// <summary>
+    /// 媒体管线打开成功 / 失败都要说话。
+    ///
+    /// 镜像这条路上的失败是静默的：播放器不出画面，界面上就是一个转圈，
+    /// 而「格式被拒」「系统没有 HEVC 解码器」「数据没喂进去」三种原因看起来
+    /// 一模一样。MediaFailed 会带上具体错误码，是唯一能一句话分清它们的信号。
+    /// </summary>
+    private void OnMediaOpened(MediaPlayer sender, object args)
+    {
+        AppendLog(AdLogLevel.Info, "媒体管线已就绪，开始接收画面。");
+    }
+
+    private void OnMediaFailed(MediaPlayer sender, MediaPlayerFailedEventArgs args)
+    {
+        string detail = args.ErrorMessage;
+        if (detail == null || detail.Length == 0)
+        {
+            detail = args.Error.ToString();
+        }
+        // 项目约定不用 ?. 空条件运算符，写成显式判断。
+        string extended = "无扩展错误码";
+        if (args.ExtendedErrorCode != null)
+        {
+            extended = "0x" + args.ExtendedErrorCode.HResult.ToString("X8");
+        }
+        AppendLog(AdLogLevel.Error,
+            "媒体管线失败：" + detail + "（" + args.Error + "，" + extended + "）。"
+            + "若是解码器缺失，装一下系统的「HEVC 视频扩展」即可。");
     }
 
     private void OnMirrorReady(MediaStreamSource source)

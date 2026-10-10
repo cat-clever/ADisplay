@@ -75,22 +75,31 @@
                                Text="移动鼠标可再显示控件" />
                 </StackPanel>
 
-                <Grid Grid.Row="2" Padding="16,12" Background="#99000000">
-                    <StackPanel x:Name="ControlBar"
-                                Orientation="Horizontal"
-                                Spacing="12"
-                                HorizontalAlignment="Center">
-                        <Button x:Name="ShowLogButton"
-                                Content="查看日志"
-                                Click="OnShowLogClick" />
-                        <Button x:Name="FullScreenButton"
-                                Content="全屏"
-                                Click="OnToggleFullScreenClick" />
-                        <Button x:Name="StopCastingButton"
-                                Content="结束投屏"
-                                Click="OnStopCastingClick" />
-                    </StackPanel>
-                </Grid>
+                <!--
+                    操作按钮：贴在右侧竖排，与 Android 端一致。
+
+                    不排底部：播放器自己的进度条与传输控件就在屏幕最下面，
+                    两条挤在一起既看不清也点不准。跨三行是为了让它在整屏高度上
+                    垂直居中 —— 只占一行的话会顶在顶部那条状态条下面。
+                -->
+                <StackPanel x:Name="ControlBar"
+                            Grid.Row="0"
+                            Grid.RowSpan="3"
+                            Orientation="Vertical"
+                            Spacing="10"
+                            HorizontalAlignment="Right"
+                            VerticalAlignment="Center"
+                            Margin="0,0,24,0">
+                    <Button x:Name="ShowLogButton"
+                            Content="查看日志"
+                            Click="OnShowLogClick" />
+                    <Button x:Name="FullScreenButton"
+                            Content="全屏"
+                            Click="OnToggleFullScreenClick" />
+                    <Button x:Name="StopCastingButton"
+                            Content="结束投屏"
+                            Click="OnStopCastingClick" />
+                </StackPanel>
             </Grid>
 
             <!--

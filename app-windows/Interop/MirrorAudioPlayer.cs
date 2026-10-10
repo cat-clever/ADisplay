@@ -39,6 +39,18 @@ public sealed class MirrorAudioPlayer
     private bool _started;
 
     /// <summary>
+    /// 转发一条提示。项目约定不用 ?. 空条件运算符，所以显式判一次。
+    /// </summary>
+    private void RaiseNotice(string message)
+    {
+        Action<string>? handler = Notice;
+        if (handler != null)
+        {
+            handler(message);
+        }
+    }
+
+    /// <summary>
     /// 收一帧交错 float32（LRLRLR…）。由核心的工作线程调用 —— 只入队，不做别的。
     /// </summary>
     public void Enqueue(float[] samples, int sampleRate, int channels)
@@ -81,7 +93,7 @@ public sealed class MirrorAudioPlayer
             CreateAudioGraphResult created = await AudioGraph.CreateAsync(settings);
             if (created.Status != AudioGraphCreationStatus.Success)
             {
-                Notice?.Invoke("镜像伴音：音频图起不来（" + created.Status + "），这一路没有声音。");
+                RaiseNotice("镜像伴音：音频图起不来（" + created.Status + "），这一路没有声音。");
                 MarkFailed();
                 return;
             }
@@ -94,7 +106,7 @@ public sealed class MirrorAudioPlayer
             CreateAudioDeviceOutputNodeResult output = await graph.CreateDeviceOutputNodeAsync();
             if (output.Status != AudioDeviceNodeCreationStatus.Success)
             {
-                Notice?.Invoke("镜像伴音：输出设备打不开（" + output.Status + "），这一路没有声音。");
+                RaiseNotice("镜像伴音：输出设备打不开（" + output.Status + "），这一路没有声音。");
                 graph.Dispose();
                 MarkFailed();
                 return;
@@ -112,11 +124,11 @@ public sealed class MirrorAudioPlayer
             }
 
             graph.Start();
-            Notice?.Invoke("镜像伴音：已开始播放（" + sampleRate + " Hz / " + channels + " 声道）。");
+            RaiseNotice("镜像伴音：已开始播放（" + sampleRate + " Hz / " + channels + " 声道）。");
         }
         catch (Exception ex)
         {
-            Notice?.Invoke("镜像伴音：启动失败 —— " + ex.Message + "，这一路没有声音。");
+            RaiseNotice("镜像伴音：启动失败 —— " + ex.Message + "，这一路没有声音。");
             MarkFailed();
         }
     }

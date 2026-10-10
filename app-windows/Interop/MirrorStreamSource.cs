@@ -67,6 +67,7 @@ public sealed class MirrorStreamSource
     private bool _noticedNoNalu;
     private bool _noticedNoParameterSets;
     private bool _noticedFirstSample;
+    private bool _noticedFirstRequest;
 
     /// <summary>
     /// 收一帧（Annex B，核心交过来的原始形态）。由核心的工作线程调用。
@@ -258,6 +259,15 @@ public sealed class MirrorStreamSource
 
     private void OnSampleRequested(MediaStreamSource sender, MediaStreamSourceSampleRequestedEventArgs args)
     {
+        // 第一次来要样本就说明格式被管线接受了（否则它连要都不会来要）。
+        // 这一行与「已收到首个关键帧」配合起来能直接把故障分成两类：
+        // 只有前者 ⇒ 解码器解不出来（多半是系统缺 HEVC 解码器）；
+        // 连前者都没有 ⇒ 我们声明的编码格式就不对。
+        if (!_noticedFirstRequest)
+        {
+            _noticedFirstRequest = true;
+            RaiseNotice("镜像渲染：媒体管线开始索取样本（编码格式已被接受）。");
+        }
         byte[]? frame = null;
         bool keyFrame = false;
         TimeSpan timestamp = TimeSpan.Zero;
@@ -479,11 +489,17 @@ public sealed class MirrorStreamSource
 
         record[offset++] = 0x01;   // configurationVersion
 
-        // 这一段是照抄 SPS 头部。长度不足时退到 0 —— 宁可解不出来，
+        // 这一段是照抄 SPS 的头部（profile / 兼容位 / 约束位 / level）。
+        //
+        // 偏移是 **+2**，不是 +1：HEVC 的 NAL 头是 2 字节（forbidden(1) +
+        // type(6) + layerId(6) + temporalId(3)），H.264 才是 1 字节。少算这一格，
+        // 整段 profile/level 就整体错位 —— 而 SPS 里连着好几个 0x01，
+        // 抄错一格看着「差不多」，很难从肉眼发现，解码器却可能直接拒绝这条流
+        // （表现就是播放器一直缓冲）。长度不足时退到 0：宁可解不出来，
         // 也不要写出一段越界的记录。
         for (int i = 0; i < 12; i++)
         {
-            int source = i + 1;
+            int source = i + 2;
             record[offset++] = source < sps.Length ? sps[source] : (byte)0x00;
         }
 
