@@ -380,7 +380,12 @@ public sealed partial class MainWindow : Window
     /// </summary>
     private void OnMediaOpened(MediaPlayer sender, object args)
     {
-        AppendLog(AdLogLevel.Info, "媒体管线已就绪，开始接收画面。");
+        // 这两个事件在**工作线程**上触发，而日志集合只能在界面线程碰 ——
+        // 直接写会抛异常（上一版就因此看不到这行日志，害得我以为管线从没打开过）。
+        _dispatcher.TryEnqueue(() =>
+        {
+            AppendLog(AdLogLevel.Info, "媒体管线已就绪，开始接收画面。");
+        });
     }
 
     private void OnMediaFailed(MediaPlayer sender, MediaPlayerFailedEventArgs args)
@@ -396,9 +401,12 @@ public sealed partial class MainWindow : Window
         {
             extended = "0x" + args.ExtendedErrorCode.HResult.ToString("X8");
         }
-        AppendLog(AdLogLevel.Error,
-            "媒体管线失败：" + detail + "（" + args.Error + "，" + extended + "）。"
-            + "若是解码器缺失，装一下系统的「HEVC 视频扩展」即可。");
+        _dispatcher.TryEnqueue(() =>
+        {
+            AppendLog(AdLogLevel.Error,
+                "媒体管线失败：" + detail + "（" + args.Error + "，" + extended + "）。"
+                + "若是解码器缺失，装一下系统的「HEVC 视频扩展」即可。");
+        });
     }
 
     private void OnMirrorReady(MediaStreamSource source)

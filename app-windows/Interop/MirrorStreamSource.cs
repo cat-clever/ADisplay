@@ -47,9 +47,16 @@ public sealed class MirrorStreamSource
     private long _firstPtsUs = -1;
     private long _lastTimestampTicks = -1;
 
-    // 等着答复的那次拉取。队列空的时候挂在这里，下一帧到了再完成它。
-    private MediaStreamSourceSampleRequest? _waitingRequest;
-    private MediaStreamSourceSampleRequestDeferral? _waitingDeferral;
+    // 等着答复的拉取。队列空的时候挂在这里，下一帧到了再逐个完成。
+    //
+    // **必须是队列，不能是一个槽位**：媒体管线会同时挂起多个取样请求（视频管线
+    // 会预取好几帧）。只有一个槽位的话，第二次请求会把第一次的 deferral 覆盖掉，
+    // 那一个就永远不会被完成 —— 管线一直等它。表现是「短暂就绪（Paused 100%）
+    // 之后又变回缓冲，然后再也不动」，正是我们看到的那个样子。
+    private readonly Queue<MediaStreamSourceSampleRequest> _waitingRequests =
+        new Queue<MediaStreamSourceSampleRequest>();
+    private readonly Queue<MediaStreamSourceSampleRequestDeferral> _waitingDeferrals =
+        new Queue<MediaStreamSourceSampleRequestDeferral>();
 
     /// <summary>流建好了（编码参数到齐）。界面拿到它就可以设播放源了。</summary>
     public event Action<MediaStreamSource>? Ready;
@@ -143,11 +150,13 @@ public sealed class MirrorStreamSource
             RaiseNotice("镜像渲染：已收到首个关键帧，开始向媒体管线送帧。");
         }
 
-        MediaStreamSourceSampleRequest? request = null;
-        MediaStreamSourceSampleRequestDeferral? deferral = null;
-        byte[]? handoff = null;
-        bool handoffKeyFrame = false;
-        TimeSpan handoffTimestamp = TimeSpan.Zero;
+        // 攒下要答复的请求，出了锁再送 —— 送的时候会回调进管线，不该持着锁。
+        List<MediaStreamSourceSampleRequest>? requests = null;
+        List<MediaStreamSourceSampleRequestDeferral>? deferrals = null;
+        List<byte[]>? frames = null;
+        List<bool>? keyFrames = null;
+        List<TimeSpan>? timestamps = null;
+        List<string>? notes = null;
 
         lock (_lock)
         {
@@ -166,65 +175,87 @@ public sealed class MirrorStreamSource
                 _pendingTimestamp.Dequeue();
             }
 
-            // 有人在等就立刻给它，不用等下一次拉取。
+            // 有多少帧就答复多少个挂起的请求（可能不止一个）。
             //
             // 给的是**队首那一帧**（先进先出），并且连它自己的时间戳一起取出来：
             //   * 不能用挂起时记下的时间戳 —— 那一刻还没有帧，值是 0，于是每一帧
-            //     都带着 0 送出去，管线看到时间戳不推进就永远停在「打开中」，
-            //     表现出来正是「一直缓冲」；
+            //     都带着 0 送出去，管线看到时间戳不推进就永远停在「打开中」；
             //   * 也不能只把它交给请求却留在队列里 —— 那样这一帧会被送两遍。
-            if (_waitingRequest != null && _pending.Count > 0)
+            while (_waitingRequests.Count > 0 && _pending.Count > 0)
             {
-                handoff = _pending.Dequeue();
-                handoffKeyFrame = _pendingKeyFrame.Dequeue();
-                handoffTimestamp = _pendingTimestamp.Dequeue();
-                request = _waitingRequest;
-                deferral = _waitingDeferral;
-                _waitingRequest = null;
-                _waitingDeferral = null;
+                if (requests == null)
+                {
+                    requests = new List<MediaStreamSourceSampleRequest>();
+                    deferrals = new List<MediaStreamSourceSampleRequestDeferral>();
+                    frames = new List<byte[]>();
+                    keyFrames = new List<bool>();
+                    timestamps = new List<TimeSpan>();
+                    notes = new List<string>();
+                }
+
+                requests.Add(_waitingRequests.Dequeue());
+                deferrals.Add(_waitingDeferrals.Dequeue());
+                frames.Add(_pending.Dequeue());
+                keyFrames.Add(_pendingKeyFrame.Dequeue());
+                timestamps.Add(_pendingTimestamp.Dequeue());
+                notes.Add(string.Empty);
+            }
+
+            if (requests != null && frames != null && notes != null)
+            {
+                for (int i = 0; i < frames.Count && _loggedSamples < 3; i++)
+                {
+                    _loggedSamples++;
+                    notes[i] = "镜像渲染：送出第 " + _loggedSamples + " 帧，时间戳 "
+                        + timestamps![i].TotalMilliseconds.ToString("F0") + " ms，"
+                        + (keyFrames![i] ? "关键帧" : "非关键帧") + "，"
+                        + frames[i].Length + " 字节。";
+                }
             }
         }
 
-        if (request != null && handoff != null)
+        if (requests != null && deferrals != null && frames != null && keyFrames != null
+            && timestamps != null && notes != null)
         {
-            request.Sample = MakeSample(handoff, handoffKeyFrame, handoffTimestamp);
-            if (deferral != null)
+            for (int i = 0; i < requests.Count; i++)
             {
-                deferral.Complete();
+                requests[i].Sample = MakeSample(frames[i], keyFrames[i], timestamps[i]);
+                deferrals[i].Complete();
             }
             _deliveredAny = true;
-
-            // 头几帧把关键信息打出来：时间戳是否在推进、首帧是不是关键帧。
-            // 这两点任何一条不成立，管线就不会开始渲染，而且不会报错。
-            if (_loggedSamples < 3)
+            for (int i = 0; i < notes.Count; i++)
             {
-                _loggedSamples++;
-                RaiseNotice(
-                    "镜像渲染：送出第 " + _loggedSamples + " 帧，时间戳 "
-                    + handoffTimestamp.TotalMilliseconds.ToString("F0") + " ms，"
-                    + (handoffKeyFrame ? "关键帧" : "非关键帧") + "，"
-                    + handoff.Length + " 字节。");
+                if (notes[i].Length > 0)
+                {
+                    RaiseNotice(notes[i]);
+                }
             }
         }
     }
 
     public void Dispose()
     {
-        MediaStreamSourceSampleRequestDeferral? deferral;
+        List<MediaStreamSourceSampleRequestDeferral>? deferrals = null;
         lock (_lock)
         {
             _pending.Clear();
             _pendingKeyFrame.Clear();
             _pendingTimestamp.Clear();
-            deferral = _waitingDeferral;
-            _waitingDeferral = null;
-            _waitingRequest = null;
+            if (_waitingDeferrals.Count > 0)
+            {
+                deferrals = new List<MediaStreamSourceSampleRequestDeferral>(_waitingDeferrals);
+                _waitingDeferrals.Clear();
+                _waitingRequests.Clear();
+            }
             _source = null;
         }
         // 挂着的 deferral 必须完成，否则管线会一直等下去。
-        if (deferral != null)
+        if (deferrals != null)
         {
-            deferral.Complete();
+            foreach (MediaStreamSourceSampleRequestDeferral pending in deferrals)
+            {
+                pending.Complete();
+            }
         }
     }
 
@@ -323,9 +354,10 @@ public sealed class MirrorStreamSource
             {
                 // 队列空：把这次请求挂住。直接回 null 会被当成「流结束」，
                 // 画面会就此断掉 —— 而镜像的帧本来就是一阵一阵来的。
-                // 时间戳等真拿到帧时再说（那时才存在）。
-                _waitingRequest = args.Request;
-                _waitingDeferral = args.Request.GetDeferral();
+                // 时间戳等真拿到帧时再说（那时才存在）。挂起的是**队列**，
+                // 因为管线可能同时挂好几个（见上面那个字段的说明）。
+                _waitingRequests.Enqueue(args.Request);
+                _waitingDeferrals.Enqueue(args.Request.GetDeferral());
                 return;
             }
         }
