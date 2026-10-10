@@ -86,8 +86,6 @@ public sealed partial class MainWindow : Window
     /// </summary>
     private string? _castingUrl;
 
-    /// <summary>关窗链是否已经在走。两个窗口会互相触发对方的关闭，用它防绕圈。</summary>
-    private bool _closing;
 
     // 自解码这条路的两个诊断数：画了多少帧、最近一帧「从核心交下来到画上屏」花了
     // 多久。后者是判断「慢在哪一段」的关键 —— 它小就说明瓶颈在我们上游。
@@ -1233,34 +1231,9 @@ public sealed partial class MainWindow : Window
             _logWindow = null;
         }
 
-        // 反过来也成立：关掉日志窗就等于关掉主窗（也就是退出应用）。
-        //
-        // 用户对这两个窗口的预期是「一体」的。只关掉日志窗、主窗还留着，会让人以为
-        // 程序还在跑，而它其实只剩一个空壳；更糟的是那个空壳的关闭按钮还可能被别的
-        // 窗口压着点不到。加上这一句之后，无论从哪一边关，收尾都走同一条链。
-        CloseMainWindowOnce();
-    }
-
-    /// <summary>
-    /// 关主窗，但保证整条关闭链只走一次。
-    ///
-    /// 两个窗口会互相触发对方的关闭（主窗关闭会去关日志窗，日志窗关闭又会回来关
-    /// 主窗），没有这道判断就会绕圈。
-    /// </summary>
-    private void CloseMainWindowOnce()
-    {
-        if (_closing)
-        {
-            return;
-        }
-        try
-        {
-            Close();
-        }
-        catch (Exception)
-        {
-            // 关不掉也不能让异常冒出去 —— 那会停在一个半关闭的状态上。
-        }
+        // 刻意**不**在这里去关主窗：关日志窗就只关日志窗，主窗留着继续用。
+        // 反过来（关主窗 → 强制带上日志窗）走 OnWindowClosed，那一条才是必须的 ——
+        // 主窗没了而日志窗还挂着，进程会被吊住不退出。
     }
 
     /// <summary>
@@ -1275,9 +1248,6 @@ public sealed partial class MainWindow : Window
     /// </summary>
     private void OnWindowClosed(object sender, WindowEventArgs args)
     {
-        // 从这里开始就进入收尾：两个窗口之间的互相触发到此为止。
-        _closing = true;
-
         // 先收日志窗：它盯着日志集合，集合一旦停更，留着也是空窗。
         try
         {
