@@ -439,10 +439,44 @@ namespace ADisplay.Windows
             }
         }
 
+        /// <summary>
+        /// 回应播放器那一次请求。返回 true 表示「这条连接要一直送流」。
+        /// </summary>
         private static bool Respond(NetworkStream stream)
         {
             try
             {
+                // 请求要读一下，不能不理：播放器的 HTTP 栈往往会先发一个 HEAD
+                // 探一下类型和长度，而 HEAD 是「只问不取」—— 照样回它一整个流，
+                // 它的解析就乱了。读到请求头结束就停。
+                bool probeOnly = false;
+                try
+                {
+                    stream.ReadTimeout = 2000;
+                    byte[] request = new byte[4096];
+                    int total = 0;
+                    while (total < request.Length)
+                    {
+                        int read = stream.Read(request, total, request.Length - total);
+                        if (read <= 0)
+                        {
+                            break;
+                        }
+                        total += read;
+                        if (HeadersComplete(request, total))
+                        {
+                            break;
+                        }
+                    }
+                    probeOnly = IsHeadRequest(request, total);
+                }
+                catch (Exception)
+                {
+                    // 读请求超时或者对端还没发，不当作错误：当成 GET 照常送流。
+                    // 最坏的结果是比原来多等两秒，而不是少送一路流。
+                    probeOnly = false;
+                }
+
                 // 刻意**不给 Content-Length** —— 这是一条没有尽头的直播流，
                 // 给了长度播放器会在读满之后断开。
                 //
@@ -459,12 +493,36 @@ namespace ADisplay.Windows
                     + "\r\n");
                 stream.Write(header, 0, header.Length);
                 stream.Flush();
-                return true;
+
+                // HEAD：头给完就收工，这条连接不算客户端，也不送流。
+                return !probeOnly;
             }
             catch (Exception)
             {
                 return false;
             }
+        }
+
+        /// <summary>请求头是不是已经读完了（空行）？</summary>
+        private static bool HeadersComplete(byte[] buffer, int length)
+        {
+            for (int i = 3; i < length; i++)
+            {
+                if (buffer[i - 3] == 0x0D && buffer[i - 2] == 0x0A
+                    && buffer[i - 1] == 0x0D && buffer[i] == 0x0A)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        /// <summary>这一行是不是 HEAD 请求。</summary>
+        private static bool IsHeadRequest(byte[] buffer, int length)
+        {
+            return length >= 4
+                && buffer[0] == (byte)'H' && buffer[1] == (byte)'E'
+                && buffer[2] == (byte)'A' && buffer[3] == (byte)'D';
         }
 
         private void SendLoop()
