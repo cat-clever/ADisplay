@@ -233,10 +233,12 @@ namespace ADisplay.Windows
                 _lastPts90k = pts90k;
 
                 // 这一帧自己带了参数集吗？带了就顺手缓存；没带就用缓存的补上。
-                // 镜像流可能几分钟才出一个关键帧（画面不动时就是这样），播放器
-                // 要是接晚了、或者漏了那个包，就再也拿不到 SPS/PPS，画面永远
-                // 出不来 —— 而它表现出来的样子和「解复用器不认流」一模一样。
-                bool keyframe = ScanParameterSets(annexB);
+                //
+                // 解复用器要先看到 SPS/PPS 才能把媒体类型建起来，而它只看接进来
+                // 之后的那几个包。镜像是从中间接的（播放器起得比流晚），补发能
+                // 保证它一定拿得到 —— 注意这不能替代 I 帧：没有 I 帧照样出不了
+                // 画面，所以这只是把「缺参数集」这一个死法去掉。
+                bool keyframe = ScanParameterSets(annexB, isH265);
                 byte[] payload = annexB;
                 if (!keyframe && _parameterSets != null)
                 {
@@ -558,10 +560,20 @@ namespace ADisplay.Windows
         /// <summary>
         /// 扫这一帧的 NAL，遇到参数集就缓存。
         /// 返回「这一帧自己带了参数集吗」—— 发送端只在关键帧上带。
+        ///
+        /// 两种编码的 NAL 类型完全不同，不能只按 H.264 认：
+        ///   H.264：参数集是 SPS(7)/PPS(8)，切片是 1..5
+        ///   H.265：参数集是 VPS(32)/SPS(33)/PPS(34)，切片是 0..31
+        /// 只认 H.264 的话，走到 H.265 上一个参数集都找不到，于是既不会缓存，
+        /// 也不会把任何一帧标成关键帧 —— 播放器接晚时队列会被整个清掉。
         /// </summary>
-        private bool ScanParameterSets(byte[] annexB)
+        private bool ScanParameterSets(byte[] annexB, bool isH265)
         {
-            bool sawSps = false;
+            int firstSetType = isH265 ? 32 : 7;
+            int lastSetType = isH265 ? 34 : 8;
+            int sliceTypeMax = isH265 ? 31 : 5;
+
+            bool sawSets = false;
             int setsStart = -1;
             int setsEnd = -1;
             int index = 0;
@@ -578,8 +590,14 @@ namespace ADisplay.Windows
                 {
                     break;
                 }
-                int type = annexB[nalStart] & 0x1F;
-                if (type >= 1 && type <= 5)
+                // NAL 头的布局两种编码不一样，类型别按同一种位取：
+                //   H.264 是 1 个字节，类型在低 5 位
+                //   H.265 是 2 个字节，类型在第一个字节的 6 位上
+                // 拿 H.264 的位去读 H.265，VPS 的 32 会变成 0 —— 看着像个切片，
+                // 扫描当场就停了，参数集一个都认不出来。
+                int type = isH265 ? ((annexB[nalStart] >> 1) & 0x3F)
+                                  : (annexB[nalStart] & 0x1F);
+                if (type <= sliceTypeMax)
                 {
                     // 切片已经开始，后面不会再有参数集了。
                     break;
@@ -589,13 +607,13 @@ namespace ADisplay.Windows
                 {
                     nalEnd = annexB.Length;
                 }
-                if (type == 7)
+                if (type == firstSetType)
                 {
-                    sawSps = true;
+                    sawSets = true;
                     setsStart = index;
                     setsEnd = nalEnd;
                 }
-                else if (type == 8 && setsStart >= 0)
+                else if (sawSets && type <= lastSetType)
                 {
                     setsEnd = nalEnd;
                 }
