@@ -1,5 +1,6 @@
 package com.adisplay.tv.ui
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -13,6 +14,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -22,11 +24,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Surface
 import androidx.tv.material3.Text
 import com.adisplay.tv.EngineModel
@@ -53,6 +57,7 @@ fun StandbyScreen(model: EngineModel) {
     // 抽屉里的字号沿用待机页那套分档参数：两边各写一份，改了一处忘了另一处，
     // 同一块日志在抽屉里和（曾经）页面上的会长得不一样。
     val layout = resolveStandbyLayout(LocalConfiguration.current.screenWidthDp)
+    val inputMode = rememberInputMode()
 
     Box(modifier = Modifier.fillMaxSize()) {
 
@@ -80,6 +85,22 @@ fun StandbyScreen(model: EngineModel) {
             StandbyContent(
                 model = model,
                 onShowLog = { logOpen = true },
+            )
+        }
+
+        // 结束投屏之后，发送端往往还在推流 —— 给两个入口：回去看，或者真正断开。
+        //
+        // 盖在底部、而不是排进待机页的 Column：那一页的高度是算着放的，插一行
+        // 进去会把下面的内容挤出可视区。
+        val resumable = model.mirrorSessionId != null || model.playingMedia != null
+        if (dismissed && resumable) {
+            ResumeBanner(
+                model = model,
+                layout = layout,
+                inputMode = inputMode,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = layout.spacingLoose * 3),
             )
         }
 
@@ -127,6 +148,60 @@ fun StandbyScreen(model: EngineModel) {
  * 按钮往上挤，而这一页的高度是算着放的。
  */
 @Composable
+/// 待机页底部那条「还能回去」的横幅。
+///
+/// 只在「用户结束了本地播放、而且会话还在」时出现 —— 会话真的没了就该消失，
+/// 否则会变成一个点了没反应的按钮。
+@Composable
+private fun ResumeBanner(
+    model: EngineModel,
+    layout: StandbyLayout,
+    inputMode: InputMode,
+    modifier: Modifier = Modifier,
+) {
+    val resumeFocus = remember { FocusRequester() }
+    val disconnectFocus = remember { FocusRequester() }
+
+    // 用户刚按过「结束投屏」，下一步最可能按的就是「继续观看」—— 遥控器模式下把
+    // 初始焦点给它，省得还要按方向键去找。触屏不抢焦点（与待机页那三个按钮一致）。
+    LaunchedEffect(inputMode) {
+        if (inputMode == InputMode.Remote) {
+            resumeFocus.requestFocus()
+        }
+    }
+
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.Center,
+        modifier = modifier
+            .clip(RoundedCornerShape(12.dp))
+            // 与抽屉同一套观感：半透明面板，底下的待机页透出来一点。
+            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.94f))
+            .padding(horizontal = 20.dp, vertical = 12.dp),
+    ) {
+        Text(
+            text = "投屏已结束，但手机仍在推流。",
+            style = layout.bodyStyle,
+            modifier = Modifier.padding(end = 16.dp),
+        )
+        ActionButton(
+            text = "继续观看",
+            textStyle = layout.actionStyle,
+            minWidth = 0.dp,
+            focusRequester = resumeFocus,
+            onClick = { model.resumeCasting() },
+        )
+        Spacer(modifier = Modifier.width(12.dp))
+        ActionButton(
+            text = "断开投屏",
+            textStyle = layout.actionStyle,
+            minWidth = 0.dp,
+            focusRequester = disconnectFocus,
+            onClick = { model.disconnectCasting() },
+        )
+    }
+}
+
 private fun StandbyContent(model: EngineModel, onShowLog: () -> Unit) {
 
     val configuration = LocalConfiguration.current

@@ -32,11 +32,31 @@ struct ContentView: View {
         }
     }
 
+    /// 结束投屏之后，发送端往往还在推流 —— 给两个入口：回去看，或者真正断开。
+    private var resumeBanner: some View {
+        HStack(spacing: 12) {
+            Text("投屏已结束，但手机仍在推流。")
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 0)
+            Button("继续观看") {
+                model.resumeCasting()
+            }
+            Button("断开投屏") {
+                model.disconnectCasting()
+            }
+        }
+        .padding(12)
+        .background(Color.gray.opacity(0.15), in: RoundedRectangle(cornerRadius: 10))
+    }
+
     /// 没有投屏时的设置页。
     private var settingsPage: some View {
         // 每块都按内容取高，剩下的空间留白。窗口因此可以缩到很小 ——
         // 日志移到独立窗口之后，这里不再有「吃掉剩余空间」的那一块。
         VStack(alignment: .leading, spacing: 20) {
+            if model.castingDismissed {
+                resumeBanner
+            }
             deviceNameSection
             qualitySection
             serviceSection

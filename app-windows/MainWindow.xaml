@@ -138,11 +138,41 @@
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
             <RowDefinition Height="*" MinHeight="120" />
         </Grid.RowDefinitions>
 
+        <!--
+            结束投屏之后，发送端往往还在推流 —— 给两个入口：回去看，或者真正断开。
+            只在「用户已结束本地播放、但会话还在」时出现，见 UpdateResumeBanner。
+
+            配色用字面值而不是主题资源：资源名写错要到运行时才炸，而这里不值得为
+            一行底色冒「窗口加载不出来」的风险（BufferingBadge 也是这么做的）。
+        -->
+        <Border x:Name="ResumeBanner"
+                Grid.Row="0"
+                Visibility="Collapsed"
+                CornerRadius="8"
+                Padding="16,12"
+                Background="#1A0078D4">
+            <StackPanel Orientation="Horizontal" Spacing="12" VerticalAlignment="Center">
+                <TextBlock x:Name="ResumeBannerText"
+                           VerticalAlignment="Center"
+                           TextWrapping="Wrap"
+                           Style="{StaticResource BodyTextBlockStyle}"
+                           Text="投屏已结束，但手机仍在推流。" />
+                <Button x:Name="ResumeCastingButton"
+                        Content="继续观看"
+                        Style="{StaticResource AccentButtonStyle}"
+                        Click="OnResumeCastingClick" />
+                <Button x:Name="DisconnectCastingButton"
+                        Content="断开投屏"
+                        Click="OnDisconnectCastingClick" />
+            </StackPanel>
+        </Border>
+
         <!-- 设备名称（文档 2.4：可随时修改，手机投屏列表里显示的就是它） -->
-        <StackPanel Grid.Row="0" Spacing="8">
+        <StackPanel Grid.Row="1" Spacing="8">
             <TextBlock Text="设备名称" Style="{StaticResource BodyStrongTextBlockStyle}" />
             <Grid ColumnSpacing="8">
                 <Grid.ColumnDefinitions>
@@ -167,7 +197,7 @@
         </StackPanel>
 
         <!-- 服务开关与状态 -->
-        <StackPanel Grid.Row="1" Spacing="10">
+        <StackPanel Grid.Row="2" Spacing="10">
             <TextBlock Text="接收服务" Style="{StaticResource BodyStrongTextBlockStyle}" />
             <StackPanel Orientation="Horizontal" Spacing="12">
                 <ToggleSwitch x:Name="ServiceToggle"
@@ -182,7 +212,7 @@
 
         <!-- 画质档位（文档 2.3）。它改的是手机按多大的分辨率编码屏幕，只影响
              下次连接 —— 尺寸是在应答 /info 时给出去的。 -->
-        <StackPanel Grid.Row="2" Spacing="8">
+        <StackPanel Grid.Row="3" Spacing="8">
             <TextBlock Text="画质" Style="{StaticResource BodyStrongTextBlockStyle}" />
             <ComboBox x:Name="QualityBox"
                       MinWidth="220"
@@ -196,7 +226,7 @@
         </StackPanel>
 
         <!-- 本机信息：电视端待机页也要显示这些（文档 2.3） -->
-        <StackPanel Grid.Row="3" Spacing="6">
+        <StackPanel Grid.Row="4" Spacing="6">
             <TextBlock Text="本机信息" Style="{StaticResource BodyStrongTextBlockStyle}" />
             <TextBlock Style="{StaticResource CaptionTextBlockStyle}">
                 <Run Text="局域网地址：" />
@@ -213,7 +243,7 @@
         </StackPanel>
 
         <!-- 日志不画在页面里，改成一个独立的窗口（见 LogWindow.xaml）。 -->
-        <StackPanel Grid.Row="4" Orientation="Horizontal" Spacing="12">
+        <StackPanel Grid.Row="5" Orientation="Horizontal" Spacing="12">
             <Button x:Name="ShowLogButtonSettings"
                     Content="查看日志"
                     Click="OnShowLogClick" />

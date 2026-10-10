@@ -67,10 +67,13 @@ internal sealed class AdEngine : IDisposable
     public event Action<int, long>? PlaybackCommandReceived;
 
     /// <summary>这次投屏结束了（手机推来新地址把旧会话抢占，或接收服务停止）。</summary>
-    public event Action? CastingEnded;
+    /// <summary>这次投屏结束了。带的是会话号 —— 界面层要靠它把「自己刚结束的那一次」
+    /// 与「手机自己停的」分开，前者不必再走一遍收尾。</summary>
+    public event Action<uint>? CastingEnded;
 
     /// <summary>iPhone 开始屏幕镜像。界面据此把播放源换成镜像流。</summary>
-    public event Action? MirrorStarted;
+    /// <summary>iPhone 开始屏幕镜像。带会话号，界面层记下来用于「断开投屏」。</summary>
+    public event Action<uint>? MirrorStarted;
 
     /// <summary>
     /// 收到一帧镜像伴音。samples 是**交错** float32（LRLRLR…），已解码。
@@ -240,10 +243,10 @@ internal sealed class AdEngine : IDisposable
         {
             return;
         }
-        Action? handler = MirrorStarted;
+        Action<uint>? handler = MirrorStarted;
         if (handler != null)
         {
-            handler();
+            handler(sessionId);
         }
     }
 
@@ -323,11 +326,27 @@ internal sealed class AdEngine : IDisposable
 
     private void OnSessionClosedFromCore(IntPtr userData, uint sessionId, int reason)
     {
-        Action? handler = CastingEnded;
+        Action<uint>? handler = CastingEnded;
         if (handler != null)
         {
-            handler();
+            handler(sessionId);
         }
+    }
+
+    /// <summary>
+    /// 主动断开某一次投屏（界面上的「断开投屏」）。
+    ///
+    /// AirPlay 那条路会真的让 iPhone 停下来；DLNA 是尽力而为 —— 接收端在 DLNA 里
+    /// 是被动方，命令不了手机，只能本地结束会话 + 推一条 STOPPED 事件。核心返回
+    /// <see cref="AdResult.NotFound"/> 表示这个会话其实已经不在了。
+    /// </summary>
+    public AdResult DisconnectSession(uint sessionId)
+    {
+        if (_handle == IntPtr.Zero)
+        {
+            return AdResult.NotInitialized;
+        }
+        return AdNative.ad_engine_disconnect_session(_handle, sessionId);
     }
 
     /// <summary>

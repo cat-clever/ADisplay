@@ -28,6 +28,7 @@ enum ServiceState: Int32 {
 private enum ResultCode {
     static let ok: UInt32 = 0
     static let bufferTooSmall: UInt32 = 9
+    static let notFound: UInt32 = 10
 }
 
 /// 与 adisplay.h 的 AdQualityPreset 数值一一对应。
@@ -118,6 +119,13 @@ final class EngineModel: ObservableObject {
     /// 那条「还能回去」的横幅要不要显示。注意它**不**清 mirrorSessionId ——
     /// 清掉就再也说不出「还有一次投屏在推」了。
     @Published private(set) var castingDismissed = false
+
+    /// 用户结束掉的那一次投屏：会话号与（DLNA 那条的）媒体地址。
+    ///
+    /// 会话本身没有结束 —— 核心那边还在、手机也还在推流 —— 只是我们不看它了。
+    /// 待机页据此显示「继续观看 / 断开投屏」。
+    private var dismissedSessionId: UInt32?
+    private var dismissedMedia: ActiveMedia?
 
     /// 一次投屏会话。sessionId 要原样带回报给核心，核心靠它把状态
     /// 对应回手机上那个会话。
@@ -322,6 +330,11 @@ final class EngineModel: ObservableObject {
     /// 服务一停广播就撤了，手机那边立刻找不到这台机器。核心那边下次收到推送
     /// 会重新开会话。
     func stopCasting() {
+        // 先把「还能回去的那一次」记下来：下面马上要把这两处状态清掉。
+        // 镜像那条只有 mirrorSessionId，DLNA 那条只有 activeMedia。
+        dismissedSessionId = mirrorSessionId ?? activeMedia?.sessionId
+        dismissedMedia = activeMedia
+
         activeMedia = nil
         playbackHandler = nil
         // 伴音要真的停：这一句原来漏了（真正会话结束时走的 endMedia 里有）。
@@ -336,10 +349,48 @@ final class EngineModel: ObservableObject {
     }
 
     /// 用户点「继续观看」：回到投屏页。镜像那条路的帧一直在来，重新挂上渲染面即可。
+    /// 点「继续观看」：回到投屏页。会话一直在，不需要重开会话。
     func resumeCasting() {
         guard castingDismissed else { return }
         MirrorAudioPlayer.shared.resume()
         castingDismissed = false
+
+        if let media = dismissedMedia {
+            // DLNA 那条：把媒体地址放回去，播放页自己会重新起播。
+            dismissedMedia = nil
+            dismissedSessionId = nil
+            activeMedia = media
+        } else if let id = dismissedSessionId {
+            // 镜像那条：先清掉暂存再让渲染面挂上来。
+            //
+            // 暂存里缓的是「摘下时那一段」的头部若干帧，它们的发送端时间戳是旧的，
+            // 回放会把时间轴基准定在过去、画面反而落后。所以清掉，等实时关键帧。
+            dismissedSessionId = nil
+            MirrorFrameRouter.shared.resetPending()
+            mirrorSessionId = id
+        }
+    }
+
+    /// 点「断开投屏」：让核心真的结束这一次会话。
+    ///
+    /// AirPlay 那条会让 iPhone 停下来；DLNA 只能本地结束并推一条 STOPPED 事件
+    /// —— 接收端在 DLNA 里是被动方，协议上命令不了手机。
+    func disconnectCasting() {
+        guard let id = dismissedSessionId, let handle = engine else { return }
+
+        let result = ad_engine_disconnect_session(handle, id)
+        if result.rawValue == ResultCode.notFound {
+            // 会话其实已经不在了（手机自己停的，而回调刚到）：自我修复，收掉横幅。
+            dismissedSessionId = nil
+            dismissedMedia = nil
+            castingDismissed = false
+            return
+        }
+        if result.rawValue != ResultCode.ok {
+            appendLog(level: .warn, text: "断开投屏失败（\(result.rawValue)）")
+        }
+        // 成功时不自作主张清状态：等核心的 session_closed 回调走 endMedia 收尾 ——
+        // 那条路才是「会话真的没了」的权威。
     }
 
     /// 把播放器的真实状态回报给核心。不回报的话手机看到的永远停在「起播中」。

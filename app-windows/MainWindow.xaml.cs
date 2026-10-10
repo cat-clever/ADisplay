@@ -86,6 +86,24 @@ public sealed partial class MainWindow : Window
     /// </summary>
     private string? _castingUrl;
 
+    /// <summary>
+    /// 用户结束掉的那一次投屏的会话号。0 表示没有「还能回去」的会话。
+    ///
+    /// 它同时是横幅的开关：待机页只在它非 0 时显示「继续观看 / 断开投屏」。
+    /// </summary>
+    private uint _dismissedSessionId;
+
+    /// <summary>被结束的那一次是不是屏幕镜像。恢复那条路两端做法不同，得记住。</summary>
+    private bool _dismissedIsMirror;
+
+    /// <summary>
+    /// 当前这次是不是屏幕镜像。
+    ///
+    /// 不能靠 _liveTs 判断 —— 自解码那条路画上第一帧之后就会把它收掉（置 null），
+    /// 镜像进行中它反而是空的。
+    /// </summary>
+    private bool _isMirrorSession;
+
 
     // 自解码这条路的两个诊断数：画了多少帧、最近一帧「从核心交下来到画上屏」花了
     // 多久。后者是判断「慢在哪一段」的关键 —— 它小就说明瓶颈在我们上游。
@@ -362,9 +380,27 @@ public sealed partial class MainWindow : Window
         _dispatcher.TryEnqueue(() => ApplyPlaybackCommand(command, value));
     }
 
-    private void OnCastingEnded()
+    private void OnCastingEnded(uint sessionId)
     {
-        _dispatcher.TryEnqueue(EndCasting);
+        _dispatcher.TryEnqueue(() => HandleCastingEnded(sessionId));
+    }
+
+    /// <summary>
+    /// 会话结束了。要分清是谁结束的：
+    ///
+    ///   * 我们刚断开、或者手机自己停了那一条 —— 本地早就收拾过，只要把横幅收掉；
+    ///   * 被新会话抢占 —— 维持原来的行为，走一遍收尾。
+    /// </summary>
+    private void HandleCastingEnded(uint sessionId)
+    {
+        if (_dismissedSessionId != 0 && sessionId == _dismissedSessionId)
+        {
+            _dismissedSessionId = 0;
+            _castingDismissedByUser = false;
+            UpdateResumeBanner();
+            return;
+        }
+        EndCasting();
     }
 
     // ---------------------------------------------------------------------
@@ -375,13 +411,13 @@ public sealed partial class MainWindow : Window
     // 背后是 Media Foundation。
     // ---------------------------------------------------------------------
 
-    private void OnMirrorStarted()
+    private void OnMirrorStarted(uint sessionId)
     {
         _dispatcher.TryEnqueue(() =>
         {
             try
             {
-                StartMirroring();
+                StartMirroring(sessionId);
             }
             catch (Exception error)
             {
@@ -394,14 +430,20 @@ public sealed partial class MainWindow : Window
         });
     }
 
-    private void StartMirroring()
+    private void StartMirroring(uint sessionId)
     {
         if (_liveTs != null)
         {
             return;
         }
-        // 会话号与 DLNA 共用一套编号，镜像这边只用来回报播放状态。
-        _castSessionId = 0;
+        // 会话号来自核心。「断开投屏」要靠它指定断开哪一条，所以不能像原来那样
+        // 写 0 糊过去。
+        _castSessionId = sessionId;
+        _isMirrorSession = true;
+        _castingUrl = null;
+        _dismissedSessionId = 0;
+        _dismissedIsMirror = false;
+        UpdateResumeBanner();
 
         // 先把本地流服务起来，再让播放器去拉它 —— 与 DLNA 完全同一条路：
         // 播放器看到的是一个普通的 HTTP URL，不经过 MediaStreamSource
@@ -713,6 +755,16 @@ public sealed partial class MainWindow : Window
         }
 
         _castSessionId = sessionId;
+        _isMirrorSession = false;
+        // 结束之后想「继续观看」就得靠这条地址重新拉流 —— 播放器那时已经被
+        // 清空，没有它这场投屏就再也起不来了。
+        _castingUrl = url;
+        // 新一次投屏开始：上一轮结束留下的状态清干净（尤其是伴音的挂起，
+        // 不清的话这一轮会一直没声音）。
+        _castingDismissedByUser = false;
+        _dismissedSessionId = 0;
+        _dismissedIsMirror = false;
+        UpdateResumeBanner();
         AppendLog(AdLogLevel.Info, $"开始拉流：{url}");
 
         SettingsPanel.Visibility = Visibility.Collapsed;
@@ -737,6 +789,14 @@ public sealed partial class MainWindow : Window
 
     private void EndCasting()
     {
+        // 记下「还能回去的那一次」：会话本身没结束（核心那边还在），只是我们
+        // 不看了。待机页据此显示「继续观看 / 断开投屏」。
+        if (_castSessionId != 0)
+        {
+            _dismissedSessionId = _castSessionId;
+            _dismissedIsMirror = _isMirrorSession;
+        }
+
         // 项目约定不用 ?. 空条件运算符，写成显式判断。
         if (_reportTimer != null)
         {
@@ -779,6 +839,7 @@ public sealed partial class MainWindow : Window
         StopBufferingWatch();
         CastingPanel.Visibility = Visibility.Collapsed;
         SettingsPanel.Visibility = Visibility.Visible;
+        UpdateResumeBanner();
     }
 
     private void OnStopCastingClick(object sender, RoutedEventArgs e)
@@ -1149,6 +1210,102 @@ public sealed partial class MainWindow : Window
     // ---------------------------------------------------------------------
     // 日志窗口
     // ---------------------------------------------------------------------
+
+    /// <summary>
+    /// 刷新待机页上那条横幅：只在「用户结束过本地播放、而且会话还在」时出现。
+    /// </summary>
+    private void UpdateResumeBanner()
+    {
+        bool show = _dismissedSessionId != 0;
+        ResumeBanner.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
+        if (show)
+        {
+            ResumeBannerText.Text = _dismissedIsMirror
+                ? "屏幕镜像已结束，但手机仍在推流。"
+                : "投屏已结束，但手机仍在推流。";
+        }
+    }
+
+    /// <summary>点「继续观看」：回到投屏页。会话一直在，不需要重开会话。</summary>
+    private void OnResumeCastingClick(object sender, RoutedEventArgs e)
+    {
+        uint sessionId = _dismissedSessionId;
+        if (sessionId == 0)
+        {
+            return;
+        }
+
+        bool wasMirror = _dismissedIsMirror;
+        _dismissedSessionId = 0;
+        _dismissedIsMirror = false;
+        _castingDismissedByUser = false;
+        _mirrorAudio.Resume();
+        UpdateResumeBanner();
+
+        CastingPanel.Visibility = Visibility.Visible;
+        SettingsPanel.Visibility = Visibility.Collapsed;
+        CastingTitleText.Text = wasMirror ? "正在镜像屏幕" : "正在接收投屏";
+        _castSessionId = sessionId;
+        ShowCastingControls();
+
+        if (wasMirror)
+        {
+            // 镜像这条：自解码一直在往位图上画（只是画在隐藏的位图里），
+            // 位图里就是最新一帧，把画面换回来即可。
+            //
+            // 刻意**不走** StartMirroring：那会重建本地流服务、把播放器指过去，
+            // 而自解码那条路早就把那两样收掉了。
+            // 画面会立刻回来（冻结在最后一帧），等发送端下一个关键帧才动起来。
+            MirrorImage.Visibility = Visibility.Visible;
+            PlayerElement.Visibility = Visibility.Collapsed;
+            _mirrorStartedAt = DateTime.Now;
+            if (_mirrorProbeTimer != null)
+            {
+                _mirrorProbeTimer.Start();
+            }
+        }
+        else
+        {
+            // DLNA 那条：播放器被清空过了，得用缓存下来的地址重新拉。
+            string? url = _castingUrl;
+            if (url != null && url.Length > 0)
+            {
+                BeginCasting(sessionId, url);
+            }
+        }
+    }
+
+    /// <summary>
+    /// 点「断开投屏」：让核心真的结束这一次会话。
+    ///
+    /// AirPlay 那条会让 iPhone 停下来；DLNA 只能本地结束并推一条 STOPPED 事件
+    /// —— 接收端在 DLNA 里是被动方，协议上命令不了手机。
+    /// </summary>
+    private void OnDisconnectCastingClick(object sender, RoutedEventArgs e)
+    {
+        uint sessionId = _dismissedSessionId;
+        if (sessionId == 0)
+        {
+            return;
+        }
+
+        AdResult result = _engine.DisconnectSession(sessionId);
+        if (result == AdResult.NotFound)
+        {
+            // 会话其实已经不在了（手机自己停的，而回调刚到）：自我修复，收掉横幅。
+            _dismissedSessionId = 0;
+            _dismissedIsMirror = false;
+            _castingDismissedByUser = false;
+            UpdateResumeBanner();
+            return;
+        }
+        if (result != AdResult.Ok)
+        {
+            AppendLog(AdLogLevel.Warn, "断开投屏失败：" + result + "（会话 " + sessionId + "）");
+        }
+        // 成功时不自作主张清状态：等 on_session_closed 走 HandleCastingEnded 收尾，
+        // 那条路才是「会话真的没了」的权威。
+    }
 
     private void OnShowLogClick(object sender, RoutedEventArgs e)
     {

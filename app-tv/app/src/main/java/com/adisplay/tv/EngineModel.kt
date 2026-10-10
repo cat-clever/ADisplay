@@ -361,8 +361,43 @@ class EngineModel(context: Context) {
         if (!isCastingDismissed()) {
             return
         }
+        // 会话本来就没结束（dismissCasting 刻意不清 mirrorSessionId / playingMedia），
+        // 所以恢复只要把「不看了」这个标记复位，界面自己就切回播放页。
         dismissedEpisode = -1
         mirrorAudio.resume()
+    }
+
+    /**
+     * 点「断开投屏」：让核心真的结束这一次会话。
+     *
+     * AirPlay 那条会让手机停下来；DLNA 只能本地结束并推一条 STOPPED 事件 ——
+     * 接收端在 DLNA 里是被动方，协议上命令不了手机。
+     */
+    fun disconnectCasting() {
+        val sessionId = mirrorSessionId ?: playingMedia?.sessionId ?: return
+        val handle = engine
+        if (handle == 0L) {
+            return
+        }
+
+        val result = AdDisplayNative.nativeDisconnectSession(handle, sessionId)
+        if (result == AdResult.NOT_FOUND.code) {
+            // 会话其实已经不在了（手机自己停的，而回调刚到）：自我修复，收掉横幅。
+            if (mirrorSessionId == sessionId) {
+                mirrorSessionId = null
+                mirrorAudio.release()
+            }
+            if (playingMedia?.sessionId == sessionId) {
+                playingMedia = null
+            }
+            dismissedEpisode = -1
+            return
+        }
+        if (result != AdResult.OK.code) {
+            appendLog(LogLevel.WARN, "断开投屏失败：" + AdResult.describe(result))
+        }
+        // 成功时不自作主张清状态：等 onSessionClosed 收尾 —— 那条路才是
+        // 「会话真的没了」的权威。
     }
 
     fun dismissCasting() {
