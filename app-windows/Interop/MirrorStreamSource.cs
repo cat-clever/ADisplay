@@ -50,8 +50,6 @@ public sealed class MirrorStreamSource
     // 等着答复的那次拉取。队列空的时候挂在这里，下一帧到了再完成它。
     private MediaStreamSourceSampleRequest? _waitingRequest;
     private MediaStreamSourceSampleRequestDeferral? _waitingDeferral;
-    // 答复挂起的那次拉取时，顺手把这一帧的时间戳带出去。
-    private TimeSpan _waitingTimestamp = TimeSpan.Zero;
 
     /// <summary>流建好了（编码参数到齐）。界面拿到它就可以设播放源了。</summary>
     public event Action<MediaStreamSource>? Ready;
@@ -143,6 +141,10 @@ public sealed class MirrorStreamSource
 
         MediaStreamSourceSampleRequest? request = null;
         MediaStreamSourceSampleRequestDeferral? deferral = null;
+        byte[]? handoff = null;
+        bool handoffKeyFrame = false;
+        TimeSpan handoffTimestamp = TimeSpan.Zero;
+
         lock (_lock)
         {
             _pending.Enqueue(avcc);
@@ -156,8 +158,17 @@ public sealed class MirrorStreamSource
             }
 
             // 有人在等就立刻给它，不用等下一次拉取。
+            //
+            // 给的是**队首那一帧**（先进先出），并且连它自己的时间戳一起取出来：
+            //   * 不能用挂起时记下的时间戳 —— 那一刻还没有帧，值是 0，于是每一帧
+            //     都带着 0 送出去，管线看到时间戳不推进就永远停在「打开中」，
+            //     表现出来正是「一直缓冲」；
+            //   * 也不能只把它交给请求却留在队列里 —— 那样这一帧会被送两遍。
             if (_waitingRequest != null && _pending.Count > 0)
             {
+                handoff = _pending.Dequeue();
+                handoffKeyFrame = _pendingKeyFrame.Dequeue();
+                handoffTimestamp = _pendingTimestamp.Dequeue();
                 request = _waitingRequest;
                 deferral = _waitingDeferral;
                 _waitingRequest = null;
@@ -165,9 +176,9 @@ public sealed class MirrorStreamSource
             }
         }
 
-        if (request != null)
+        if (request != null && handoff != null)
         {
-            request.Sample = MakeSample(avcc, keyFrame, _waitingTimestamp);
+            request.Sample = MakeSample(handoff, handoffKeyFrame, handoffTimestamp);
             if (deferral != null)
             {
                 deferral.Complete();
@@ -283,9 +294,9 @@ public sealed class MirrorStreamSource
             {
                 // 队列空：把这次请求挂住。直接回 null 会被当成「流结束」，
                 // 画面会就此断掉 —— 而镜像的帧本来就是一阵一阵来的。
+                // 时间戳等真拿到帧时再说（那时才存在）。
                 _waitingRequest = args.Request;
                 _waitingDeferral = args.Request.GetDeferral();
-                _waitingTimestamp = timestamp;
                 return;
             }
         }
