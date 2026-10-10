@@ -1180,6 +1180,7 @@ private:
         }
     }
 
+public:
     // 用户主动「断开投屏」。
     //
     // 真正让 iPhone 停下来的是 AirplayReceiver::stop_mirror()（拆掉镜像连接），
