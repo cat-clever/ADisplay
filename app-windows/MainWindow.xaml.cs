@@ -47,6 +47,12 @@ public sealed partial class MainWindow : Window
     private readonly MediaPlayer _player = new();
     // 镜像伴音的播放端。核心里已经解成 PCM，这里只负责送进系统音频。
     private readonly MirrorAudioPlayer _mirrorAudio = new();
+
+    /// <summary>镜像诊断的间隔。延迟会随时间变化，只看起播那一刻看不出趋势。</summary>
+    private static readonly TimeSpan MirrorProbeInterval = TimeSpan.FromSeconds(5);
+
+    private DispatcherTimer? _mirrorProbeTimer;
+    private DateTime _mirrorStartedAt;
     // 独立的日志窗口。null 表示当前没开着。
     private LogWindow? _logWindow;
     private readonly ObservableCollection<string> _logLines = new();
@@ -368,6 +374,10 @@ public sealed partial class MainWindow : Window
         }
         _liveTs = server;
 
+        // 直播开关：告诉播放器这是实时流，别为了抗抖动先攒一段再开播。
+        // 默认行为下画面会永远落在直播后面好几秒 —— 镜像这场景，落后比偶尔
+        // 卡一下难受得多。
+        _player.RealTimePlayback = true;
         _player.Source = MediaSource.CreateFromUri(new Uri(server.Url));
         _player.Volume = 1.0;
         _player.Play();
@@ -383,41 +393,47 @@ public sealed partial class MainWindow : Window
         // 镜像这条没有 URL（帧是核心直接交下来的，不是渐进式下载），
         // 所以取不到文件大小，界面上只显示「正在缓冲」。
         StartBufferingWatch(null);
-        // 起播后探两次。播放器卡在 Opening/Buffering 时不会再有状态变化，
-        // 也就不会再有日志 —— 这两行是唯一能看出「它卡住了」的信号。
-        ScheduleMirrorProbe(3);
-        ScheduleMirrorProbe(8);
+        // 每 5 秒报一次管线状态。播放器卡在 Opening/Buffering 时不会再有
+        // 状态变化、也就不会再有日志，这几行是唯一能看出「卡在哪一步」的信号；
+        // 而延迟更要看趋势，只报一次说明不了问题。
+        _mirrorStartedAt = DateTime.Now;
+        _mirrorProbeTimer ??= new DispatcherTimer { Interval = MirrorProbeInterval };
+        _mirrorProbeTimer.Tick -= OnMirrorProbeTick;
+        _mirrorProbeTimer.Tick += OnMirrorProbeTick;
+        _mirrorProbeTimer.Stop();
+        _mirrorProbeTimer.Start();
         AppendLog(AdLogLevel.Info, "iPhone 开始屏幕镜像");
     }
 
-    /// <summary>若干秒后报一次镜像管线的状态。</summary>
-    private void ScheduleMirrorProbe(int seconds)
+    private void OnMirrorProbeTick(object? sender, object e)
     {
-        DispatcherTimer timer = new DispatcherTimer
-        {
-            Interval = TimeSpan.FromSeconds(seconds),
-        };
-        timer.Tick += (sender, e) =>
-        {
-            timer.Stop();
-            ReportMirrorState(seconds);
-        };
-        timer.Start();
+        ReportMirrorState();
     }
 
-    private void ReportMirrorState(int seconds)
+    private void ReportMirrorState()
     {
         LiveTsServer? server = _liveTs;
         if (server == null)
         {
             return;
         }
+
         MediaPlaybackSession session = _player.PlaybackSession;
-        AppendLog(AdLogLevel.Info, "镜像诊断（起播后 " + seconds + " 秒）：播放器 "
+        // 「我们最新送出去的那一帧在流的第几秒」减「播放器正放到第几秒」，
+        // 就是画面落后直播多远。
+        double lag = server.ElapsedSeconds - session.Position.TotalSeconds;
+        int elapsed = (int)(DateTime.Now - _mirrorStartedAt).TotalSeconds;
+
+        AppendLog(AdLogLevel.Info, "镜像诊断（第 " + elapsed + " 秒）：播放器 "
             + session.PlaybackState + "，缓冲 "
-            + (session.BufferingProgress * 100).ToString("F0") + "%，已封 "
-            + server.FramesQueued + " 帧，送出 " + (server.BytesSent / 1024)
-            + " KB，客户端 " + server.ClientCount + " 个。");
+            + (session.BufferingProgress * 100).ToString("F0") + "%，位置 "
+            + session.Position.TotalSeconds.ToString("F1") + " 秒，已送出到 "
+            + server.ElapsedSeconds.ToString("F1") + " 秒（落后 "
+            + lag.ToString("F1") + " 秒）；已封 " + server.FramesQueued + " 帧 / "
+            + (server.BytesSent / 1024) + " KB，客户端 " + server.ClientCount
+            + " 个；伴音 " + _mirrorAudio.State + "，收 "
+            + _mirrorAudio.EnqueuedSamples + " 个样本，播 "
+            + _mirrorAudio.ConsumedSamples + " 个样本。");
     }
 
     /// <summary>
@@ -550,7 +566,14 @@ public sealed partial class MainWindow : Window
             _reportTimer.Stop();
         }
         _castSessionId = 0;
+        if (_mirrorProbeTimer != null)
+        {
+            _mirrorProbeTimer.Stop();
+        }
 
+        // 实时播放是给镜像这条直播流的。回到普通播放（DLNA）要还原 ——
+        // 那边是文件，先缓冲一段再播才是对的。
+        _player.RealTimePlayback = false;
         _player.Source = null;
         // 伴音也停掉：会话结束了不该继续出声。
         _mirrorAudio.Stop();

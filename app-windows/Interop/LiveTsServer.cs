@@ -133,6 +133,27 @@ namespace ADisplay.Windows
             get { lock (_lock) { return _frameIndex; } }
         }
 
+        /// <summary>
+        /// 最新送出那一帧在流里的时间（秒，从第一帧算起）。
+        ///
+        /// 拿它减播放器自己的位置，就是画面落后直播多远 —— 延迟这个量只能这么量，
+        /// 靠眼睛估「有点延迟」判断不出该改哪一处。
+        /// </summary>
+        public double ElapsedSeconds
+        {
+            get
+            {
+                lock (_lock)
+                {
+                    if (_lastPts90k < 0)
+                    {
+                        return 0;
+                    }
+                    return (_lastPts90k - PtsBase90k) / 90000.0;
+                }
+            }
+        }
+
         /// <summary>真正写进 socket 的字节数。它不涨就说明播放器没在拉。</summary>
         public long BytesSent
         {

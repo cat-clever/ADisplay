@@ -38,6 +38,11 @@ public sealed class MirrorAudioPlayer
     private bool _startFailed;
     private bool _started;
 
+    // 只用于诊断：进来多少、图取走多少。两个数一起看就能分清「核心没送」
+    // 与「送了但图没在拉」—— 没有声音这两种原因长得一模一样。
+    private long _enqueuedSamples;
+    private long _consumedSamples;
+
     /// <summary>
     /// 转发一条提示。项目约定不用 ?. 空条件运算符，所以显式判一次。
     /// </summary>
@@ -72,6 +77,7 @@ public sealed class MirrorAudioPlayer
                 _started = true;
                 needStart = true;
             }
+            _enqueuedSamples += samples.Length;
             if ((_pending.Count / channels) < MaxPendingFrames)
             {
                 _pending.AddRange(samples);
@@ -136,11 +142,17 @@ public sealed class MirrorAudioPlayer
     /// <summary>音频图按量子来要数据。要多少给多少，不够就补零（补零是静音）。</summary>
     private void OnQuantumStarted(AudioFrameInputNode sender, FrameInputNodeQuantumStartedEventArgs args)
     {
-        int needed = args.RequiredSamples;
-        if (needed <= 0)
+        // RequiredSamples 是**帧**数，不是 float 个数 —— 一个声道一个样本算一帧。
+        // 官方文档写得很明确：多声道要乘声道数；他们的示例之所以不乘，是因为
+        // 那个节点被显式建成了单声道。我们建的是立体声节点，AudioFrame 的字节数
+        // 必须是 帧数 × 声道数 × 4，少算一半图拿到的是残帧，结果就是没有声音。
+        int frames = args.RequiredSamples;
+        int channels = _channels;
+        if (frames <= 0 || channels <= 0)
         {
             return;
         }
+        int needed = frames * channels;
 
         float[] samples = new float[needed];
         lock (_lock)
@@ -152,6 +164,7 @@ public sealed class MirrorAudioPlayer
                 _pending.CopyTo(0, samples, 0, take);
                 _pending.RemoveRange(0, take);
             }
+            _consumedSamples += take;
             // 余下的保持 0：喂不满会让图停在原地等，补静音比卡住好。
         }
 
@@ -189,6 +202,8 @@ public sealed class MirrorAudioPlayer
             _pending.Clear();
             _started = false;
             _channels = 0;
+            _enqueuedSamples = 0;
+            _consumedSamples = 0;
         }
 
         if (input != null)
@@ -208,6 +223,38 @@ public sealed class MirrorAudioPlayer
         {
             _startFailed = true;
             _pending.Clear();
+        }
+    }
+
+    /// <summary>从核心收到的样本数（交错 float 个数）。只用于诊断。</summary>
+    public long EnqueuedSamples
+    {
+        get { lock (_lock) { return _enqueuedSamples; } }
+    }
+
+    /// <summary>音频图已经取走的样本数。它不涨就说明图根本没在拉。</summary>
+    public long ConsumedSamples
+    {
+        get { lock (_lock) { return _consumedSamples; } }
+    }
+
+    /// <summary>音频图的状态。只有「已运行」才说明这一路真的在播。</summary>
+    public string State
+    {
+        get
+        {
+            lock (_lock)
+            {
+                if (_startFailed)
+                {
+                    return "起不来";
+                }
+                if (_graph == null)
+                {
+                    return "未启动";
+                }
+                return "已运行";
+            }
         }
     }
 
