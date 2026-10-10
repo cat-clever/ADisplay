@@ -274,11 +274,25 @@ public sealed class MirrorStreamSource
         // 编码器私有数据：H.264 放 avcC，H.265 放 hvcC。两者完全不兼容 ——
         // 喂错了解码器一个 NALU 都认不出来，表现同样是「界面正常、没有画面」。
         // 走 H.265 时 vps 一定在（上面 ParameterSets 只在一套齐了时才返回 true）。
-        properties.Properties[MpegSequenceHeader] = _isH265
-            ? BuildHvcC(vps!, sps, pps)
-            : BuildAvcC(sps, pps);
+        byte[] codecPrivate = _isH265 ? BuildHvcC(vps!, sps, pps) : BuildAvcC(sps, pps);
+        properties.Properties[MpegSequenceHeader] = codecPrivate;
+        // 帧率也给上：MediaStreamSource 的媒体类型越完整，建拓扑越不容易卡。
+        properties.FrameRate = new MediaRatio(30, 1);
 
         VideoStreamDescriptor descriptor = new VideoStreamDescriptor(properties);
+
+        // 编码器私有数据还必须在 **MediaHeader** 里再给一份。
+        //
+        // 这是 MediaStreamSource 把私有数据交给媒体管线的正式通道：MF 建拓扑时
+        // 靠它去建解码器。只塞进 VideoEncodingProperties.Properties（原来那样）
+        // 对 MediaStreamSource 这条路可能根本不看 —— 缺了它解码器建不起来，
+        // 管线就停在「打开中」，**而且不报任何错**。这一条解释了「H.264 与 H.265
+        // 都卡、且没有 MediaFailed」的全部现象。
+        descriptor.MediaHeader = new Dictionary<MediaStreamAttributeKeys, byte[]>
+        {
+            { MediaStreamAttributeKeys.CodecPrivateData, codecPrivate },
+        };
+        RaiseNotice("镜像渲染：已把编码器私有数据（" + codecPrivate.Length + " 字节）交给媒体管线。");
         MediaStreamSource source = new MediaStreamSource(descriptor);
         source.Starting += OnStarting;
         source.SampleRequested += OnSampleRequested;
