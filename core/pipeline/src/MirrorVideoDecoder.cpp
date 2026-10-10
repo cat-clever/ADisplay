@@ -6,7 +6,8 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavutil/error.h>
 #include <libavutil/frame.h>
-#include <libavutil/pixdesc.h>
+#include <libavutil/imgutils.h>
+#include <libswscale/swscale.h>
 }
 
 namespace adisplay {
@@ -18,101 +19,18 @@ namespace {
 // 保证我们留下的是最新的那一张，而不是延迟一拍的旧图。
 constexpr int kMaxFramesPerPacket = 8;
 
-// ---------------------------------------------------------------------------
-// YUV → RGB 的定点系数
-//
-// 为什么不用 libswscale：它在 vcpkg 里是 ffmpeg 的一个独立 feature，加上它就让
-// FFmpeg 的 ABI 变了 —— 而 release 是 tag 触发的，tag 上创建的缓存对其他 ref
-// 不可见（只有默认分支的缓存共享），于是那份新二进制永远进不了后续轮次能读到的
-// 缓存，每轮都要重编 FFmpeg（14 分钟）。为 0.9 毫秒一帧的画面付这个代价不值。
-//
-// 系数是四组：BT.601 / BT.709 × 有限范围（video）/ 全范围（JPEG），16 位定点。
-// 选择规则刻意与 swscale 一致 —— 帧里标了 colorspace 就用标的，没标就 SD 用
-// 601、HD 用 709；范围没标按有限范围。这样画面与换掉 swscale 之前完全一样。
-// ---------------------------------------------------------------------------
-struct YuvMatrix {
-    int y_gain;
-    int r_cr;
-    int g_cb;
-    int g_cr;
-    int b_cb;
-};
-
-YuvMatrix pick_matrix(int colorspace, int range, int width) {
-    const bool full_range = (range == AVCOL_RANGE_JPEG);
-    bool bt709;
-    switch (colorspace) {
-        case AVCOL_SPC_BT709:
-        case AVCOL_SPC_BT2020_NCL:
-        case AVCOL_SPC_BT2020_CL:
-            bt709 = true;
-            break;
-        case AVCOL_SPC_BT470BG:
-        case AVCOL_SPC_SMPTE170M:
-            bt709 = false;
-            break;
-        default:
-            // 未标注：高清按 709、标清按 601 —— H.264/H.265 的通行约定。
-            bt709 = width > 720;
-            break;
-    }
-
-    if (full_range) {
-        // 全范围不需要 Y 的偏移与缩放。
-        const YuvMatrix table709 = {65536, 103206, -12275, -30678, 121609};
-        const YuvMatrix table601 = {65536, 91881, -22554, -46802, 116130};
-        return bt709 ? table709 : table601;
-    }
-    // 有限范围：Y 要减 16 并按 255/219 展开，色度要减 128 并按 255/224 展开。
-    const YuvMatrix table709 = {76283, 117489, -13975, -34925, 138438};
-    const YuvMatrix table601 = {76283, 104595, -25675, -53279, 132203};
-    return bt709 ? table709 : table601;
-}
-
-inline uint8_t clamp_to_byte(int value) {
-    if (value < 0) {
-        return 0;
-    }
-    if (value > 255) {
-        return 255;
-    }
-    return static_cast<uint8_t>(value);
-}
-
-// 输出一行 BGRA。y_row 是亮度行，u_row / v_row 是色度行；NV12 时 v_row = u_row+1
-// 且 chroma_step = 2（色度是交错的），平面格式则 chroma_step = 1。
-void convert_row(const YuvMatrix& matrix, bool limited, const uint8_t* y_row,
-                 const uint8_t* u_row, const uint8_t* v_row, int chroma_step,
-                 uint8_t* out, int width) {
-    for (int x = 0; x < width; ++x) {
-        int luma = static_cast<int>(y_row[x]);
-        if (limited) {
-            // 刻意**不**把 (Y-16) 截到 0：低于有限范围黑电平的样点（压缩振铃会让
-            // 它出现）保留负值，只在最后裁 RGB —— ffmpeg 的 swscale 就是这么做的。
-            // 本机拿 swscale 当参照逐像素比对过：截断会让这类像素的绿/蓝差出 20。
-            luma -= 16;
-        }
-        const int u = static_cast<int>(u_row[(x >> 1) * chroma_step]) - 128;
-        const int v = static_cast<int>(v_row[(x >> 1) * chroma_step]) - 128;
-
-        const int base = matrix.y_gain * luma;
-        const int r = (base + matrix.r_cr * v + 32768) >> 16;
-        const int g = (base + matrix.g_cb * u + matrix.g_cr * v + 32768) >> 16;
-        const int b = (base + matrix.b_cb * u + 32768) >> 16;
-
-        out[x * 4 + 0] = clamp_to_byte(b);
-        out[x * 4 + 1] = clamp_to_byte(g);
-        out[x * 4 + 2] = clamp_to_byte(r);
-        out[x * 4 + 3] = 255;
-    }
-}
-
 }  // namespace
 
 struct MirrorVideoDecoder::Impl {
     AVCodecContext* context = nullptr;
-    AVFrame* decoded = nullptr;
+    AVFrame* decoded = nullptr;    // 解码器输出
+    AVFrame* bgra = nullptr;       // 转换目标
     AVPacket* packet = nullptr;
+    SwsContext* sws = nullptr;
+
+    int sws_width = 0;
+    int sws_height = 0;
+    int sws_src_format = -1;
 
     // 当前解码器对应的编码。0 表示还没建。
     bool is_h265 = false;
@@ -121,8 +39,14 @@ struct MirrorVideoDecoder::Impl {
     std::string failure;
 
     ~Impl() {
+        if (sws != nullptr) {
+            sws_freeContext(sws);
+        }
         if (packet != nullptr) {
             av_packet_free(&packet);
+        }
+        if (bgra != nullptr) {
+            av_frame_free(&bgra);
         }
         if (decoded != nullptr) {
             av_frame_free(&decoded);
@@ -133,6 +57,13 @@ struct MirrorVideoDecoder::Impl {
     }
 
     void release_codec() {
+        if (sws != nullptr) {
+            sws_freeContext(sws);
+            sws = nullptr;
+        }
+        sws_width = 0;
+        sws_height = 0;
+        sws_src_format = -1;
         if (context != nullptr) {
             avcodec_free_context(&context);
         }
@@ -152,6 +83,9 @@ void MirrorVideoDecoder::reset() {
     impl_->failure.clear();
     if (impl_->decoded != nullptr) {
         av_frame_unref(impl_->decoded);
+    }
+    if (impl_->bgra != nullptr) {
+        av_frame_unref(impl_->bgra);
     }
 }
 
@@ -249,54 +183,54 @@ bool MirrorVideoDecoder::decode(const uint8_t* data, std::size_t size, bool is_h
             break;
         }
 
-        const AVFrame* source = impl_->decoded;
+        AVFrame* source = impl_->decoded;
         const int width = source->width;
         const int height = source->height;
         if (width > 0 && height > 0) {
-            const bool planar420 = source->format == AV_PIX_FMT_YUV420P
-                                   || source->format == AV_PIX_FMT_YUVJ420P;
-            const bool semi_planar = source->format == AV_PIX_FMT_NV12;
-            if (!planar420 && !semi_planar) {
-                // 没见过的像素格式。当作「这一路解不了」上报，让核心退回界面层
-                // 自己解那条路 —— 那条走系统播放器，通常认得出更多格式。
-                const char* name = av_get_pix_fmt_name(static_cast<AVPixelFormat>(source->format));
-                impl_->failure = std::string("解出来的像素格式不支持：")
-                                 + (name != nullptr ? name : "未知");
-                if (out_error != nullptr) {
-                    *out_error = impl_->failure;
-                }
-                av_frame_unref(impl_->decoded);
-                return false;
+            if (impl_->bgra == nullptr) {
+                impl_->bgra = av_frame_alloc();
             }
+            if (impl_->bgra != nullptr) {
+                if (impl_->sws == nullptr || impl_->sws_width != width
+                    || impl_->sws_height != height
+                    || impl_->sws_src_format != static_cast<int>(source->format)) {
+                    if (impl_->sws != nullptr) {
+                        sws_freeContext(impl_->sws);
+                    }
+                    // 同尺寸、只做格式与色彩空间转换，所以用最省的点采样。
+                    // 色度矩阵与量化范围由 sws_scale_frame 从帧自带的
+                    // colorspace / color_range 里取，不用我们猜。
+                    impl_->sws = sws_getContext(width, height,
+                                                static_cast<AVPixelFormat>(source->format),
+                                                width, height, AV_PIX_FMT_BGRA,
+                                                SWS_POINT, nullptr, nullptr, nullptr);
+                    impl_->sws_width = width;
+                    impl_->sws_height = height;
+                    impl_->sws_src_format = static_cast<int>(source->format);
+                }
 
-            const YuvMatrix matrix =
-                pick_matrix(source->colorspace, source->color_range, width);
-            const bool limited = source->color_range != AVCOL_RANGE_JPEG;
-            // 目标按**紧密排列**给出（行距 = width*4）：界面层要整块拷进位图缓冲，
-            // 中间不留对齐空洞。
-            out_bgra->resize(static_cast<std::size_t>(width) * 4 * height);
-            uint8_t* destination = out_bgra->data();
-
-            for (int row = 0; row < height; ++row) {
-                const uint8_t* luma = source->data[0] + static_cast<std::ptrdiff_t>(row) * source->linesize[0];
-                uint8_t* output = destination + static_cast<std::size_t>(row) * width * 4;
-                if (planar420) {
-                    const uint8_t* u_plane = source->data[1]
-                        + static_cast<std::ptrdiff_t>(row >> 1) * source->linesize[1];
-                    const uint8_t* v_plane = source->data[2]
-                        + static_cast<std::ptrdiff_t>(row >> 1) * source->linesize[2];
-                    convert_row(matrix, limited, luma, u_plane, v_plane, 1, output, width);
-                } else {
-                    // NV12：色度交错在一个平面里，U 在前、V 在后一格。
-                    const uint8_t* uv_plane = source->data[1]
-                        + static_cast<std::ptrdiff_t>(row >> 1) * source->linesize[1];
-                    convert_row(matrix, limited, luma, uv_plane, uv_plane + 1, 2, output, width);
+                if (impl_->sws != nullptr) {
+                    av_frame_unref(impl_->bgra);
+                    impl_->bgra->format = AV_PIX_FMT_BGRA;
+                    impl_->bgra->width = width;
+                    impl_->bgra->height = height;
+                    if (av_frame_get_buffer(impl_->bgra, 0) >= 0
+                        && sws_scale_frame(impl_->sws, impl_->bgra, source) >= 0) {
+                        // 目标按**紧密排列**给出（行距 = width*4）：界面层要整块
+                        // 拷进位图缓冲，中间不留对齐空洞。
+                        const int stride = impl_->bgra->linesize[0];
+                        out_bgra->resize(static_cast<std::size_t>(width) * 4 * height);
+                        for (int row = 0; row < height; ++row) {
+                            std::memcpy(out_bgra->data() + static_cast<std::size_t>(row) * width * 4,
+                                        impl_->bgra->data[0] + static_cast<std::ptrdiff_t>(row) * stride,
+                                        static_cast<std::size_t>(width) * 4);
+                        }
+                        *out_width = width;
+                        *out_height = height;
+                        got_frame = true;
+                    }
                 }
             }
-
-            *out_width = width;
-            *out_height = height;
-            got_frame = true;
         }
 
         av_frame_unref(impl_->decoded);
