@@ -34,7 +34,11 @@ public sealed partial class MainWindow : Window
     // 位置必须持续更新，否则手机上的进度条一直停在起点。
     private DispatcherTimer? _reportTimer;
     // 镜像会话的帧源。null 表示当前不是镜像会话。
-    private MirrorStreamSource? _mirrorSource;
+    /// <summary>
+    /// 镜像这条路的本地流服务：把帧封成 MPEG-TS，从本地 HTTP 发出去，
+    /// 播放器按 URL 拉（与 DLNA 同一条路）。
+    /// </summary>
+    private LiveTsServer? _liveTs;
     // 镜像伴音的播放端。核心里已经解成 PCM，这里只负责送进系统音频。
     private readonly MirrorAudioPlayer _mirrorAudio = new();
     // 独立的日志窗口。null 表示当前没开着。
@@ -308,19 +312,26 @@ public sealed partial class MainWindow : Window
     {
         _dispatcher.TryEnqueue(() =>
         {
-            if (_mirrorSource != null)
+            if (_liveTs != null)
             {
                 return;
             }
             // 会话号与 DLNA 共用一套编号，镜像这边只用来回报播放状态。
             _castSessionId = 0;
 
-            _mirrorSource = new MirrorStreamSource();
-            // 编码参数到齐之后才知道怎么解，那时才设播放源。
-            _mirrorSource.Ready += OnMirrorReady;
-            // 镜像渲染这条路上的失败都是静默的，表现统一是「界面正常、没有画面」。
-            // 它自己说不出来的话，就只能靠猜。
-            _mirrorSource.Notice += OnMirrorNotice;
+            // 先把本地流服务起来，再让播放器去拉它 —— 与 DLNA 完全同一条路：
+            // 播放器看到的是一个普通的 HTTP URL，不经过 MediaStreamSource
+            // 那层黑箱契约（那条路上的失败是静默的，我们查了很久）。
+            LiveTsServer server = new LiveTsServer();
+            server.Notice += OnMirrorNotice;
+            if (server.Start())
+            {
+                _liveTs = server;
+                PlayerElement.Source = MediaSource.CreateFromUri(new Uri(server.Url));
+                EnsurePlayerEvents();
+                PlayerElement.MediaPlayer.Volume = 1.0;
+                PlayerElement.MediaPlayer.Play();
+            }
 
             SettingsPanel.Visibility = Visibility.Collapsed;
             CastingPanel.Visibility = Visibility.Visible;
@@ -409,17 +420,6 @@ public sealed partial class MainWindow : Window
         });
     }
 
-    private void OnMirrorReady(MediaStreamSource source)
-    {
-        _dispatcher.TryEnqueue(() =>
-        {
-            PlayerElement.Source = MediaSource.CreateFromMediaStreamSource(source);
-            EnsurePlayerEvents();
-            PlayerElement.MediaPlayer.Volume = 1.0;
-            PlayerElement.MediaPlayer.Play();
-        });
-    }
-
     private void OnAudioFrameReceived(float[] samples, int sampleRate, int channels)
     {
         // 不切回 UI 线程：伴音每秒约 92 帧，每帧跳一次会把主线程压满、声音断续。
@@ -435,11 +435,11 @@ public sealed partial class MainWindow : Window
 
     private void OnMirrorFrameReceived(byte[] data, bool isH265, uint width, uint height, long ptsUs)
     {
-        // 不切回 UI 线程：MediaStreamSource 是拉取式的，这里只需要把字节塞进队列。
-        MirrorStreamSource? source = _mirrorSource;
-        if (source != null)
+        // 不切回 UI 线程：封 TS 与入队都不阻塞，每秒几十帧不该跳回主线程。
+        LiveTsServer? server = _liveTs;
+        if (server != null)
         {
-            source.Push(data, isH265, width, height, ptsUs);
+            server.WriteFrame(data, isH265, ptsUs);
         }
     }
 
@@ -486,14 +486,12 @@ public sealed partial class MainWindow : Window
         PlayerElement.Source = null;
         // 伴音也停掉：会话结束了不该继续出声。
         _mirrorAudio.Stop();
-        // 镜像的帧源要显式收掉：它挂着一次可能还没答复的拉取请求，
-        // 放着不管会让管线一直等下去。
-        if (_mirrorSource != null)
+        // 本地流服务要显式收掉：它还握着监听端口与播放器那条连接。
+        if (_liveTs != null)
         {
-            _mirrorSource.Ready -= OnMirrorReady;
-            _mirrorSource.Notice -= OnMirrorNotice;
-            _mirrorSource.Dispose();
-            _mirrorSource = null;
+            _liveTs.Notice -= OnMirrorNotice;
+            _liveTs.Dispose();
+            _liveTs = null;
         }
         ExitFullScreenOnCastingEnd();
         HideCastingControls();
