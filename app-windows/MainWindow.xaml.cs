@@ -18,6 +18,7 @@ using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Controls;
 using Windows.Media.Core;
 using Windows.Media.Playback;
+using WinRT;
 using ADisplay.Windows.Interop;
 
 namespace ADisplay.Windows;
@@ -589,7 +590,9 @@ public sealed partial class MainWindow : Window
 
             int bytes = width * 4 * height;
             byte* raw = null;
-            ((IBufferByteAccess)(object)_mirrorBitmap.PixelBuffer).Buffer(out raw);
+            // 同 MirrorAudioPlayer 里那处：CsWinRT 下投影对象必须用 .As<>() 来取
+            // 非投影的 COM 接口，C 风格强转会抛 InvalidCastException。
+            _mirrorBitmap.PixelBuffer.As<IBufferByteAccess>().Buffer(out raw);
             fixed (byte* source = pixels)
             {
                 Buffer.MemoryCopy(source, raw, bytes, bytes);

@@ -16,6 +16,8 @@ using System.Collections.Generic;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
+// CsWinRT 的 .As<>() 扩展（见下面 CreateFrame 里的用法）。
+using WinRT;
 using Windows.Foundation;
 using Windows.Media;
 using Windows.Media.Audio;
@@ -355,7 +357,13 @@ public sealed class MirrorAudioPlayer
         using (AudioBuffer buffer = frame.LockBuffer(AudioBufferAccessMode.Write))
         using (IMemoryBufferReference reference = buffer.CreateReference())
         {
-            ((IMemoryBufferByteAccess)reference).GetBuffer(out byte* target, out uint capacity);
+            // 这里**不能**写成 (IMemoryBufferByteAccess)reference 那种 C 风格的强转：
+            // CsWinRT 下投影对象不是普通 COM 对象，强转会抛
+            // InvalidCastException（Invalid cast from 'WinRT.IInspectable'）。
+            // CsWinRT 要求用它的 .As<>()。这一处就是「镜像有画面却没有声音」的原因 ——
+            // 异常抛在音频图的事件派发里，没人接，日志里一个字都看不到。
+            reference.As<IMemoryBufferByteAccess>()
+                .GetBuffer(out byte* target, out uint capacity);
             int copy = bytes <= (int)capacity ? bytes : (int)capacity;
             fixed (float* source = samples)
             {
