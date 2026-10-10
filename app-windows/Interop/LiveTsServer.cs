@@ -69,12 +69,21 @@ namespace ADisplay.Windows
         /// </summary>
         private const long PcrLead90k = 18000;
 
-        /// <summary>待发队列上限（TS 字节块）。满了丢最旧的整块 —— 镜像不追旧帧。</summary>
-        private const int MaxQueuedChunks = 32;
+        /// <summary>
+        /// 待发队列上限（TS 字节块），约 10 秒的量。
+        ///
+        /// 留这么长不是给慢客户端兜底 —— 那是反的，慢客户端本来该丢。留长是为了
+        /// 播放器接得晚的时候，队列里还存着上一个关键帧（入队时按它裁剪，
+        /// 见 AcceptLoop）。
+        /// </summary>
+        private const int MaxQueuedChunks = 300;
 
         private readonly object _lock = new object();
         private readonly List<NetworkStream> _clients = new List<NetworkStream>();
-        private readonly Queue<byte[]> _outgoing = new Queue<byte[]>();
+        private readonly Queue<WaitingChunk> _outgoing = new Queue<WaitingChunk>();
+
+        /// <summary>缓存下来的 SPS/PPS（含起始码），用来给没带参数集的帧补发。</summary>
+        private byte[]? _parameterSets;
         private readonly AutoResetEvent _hasData = new AutoResetEvent(false);
 
         /// <summary>
@@ -105,6 +114,13 @@ namespace ADisplay.Windows
         private long _lastPts90k = -1;
         private bool _noticedClient;
         private int _lastReportedFrames;
+
+        /// <summary>队列里的一个待发块。是不是从关键帧起的要记着 —— 见 AcceptLoop。</summary>
+        private sealed class WaitingChunk
+        {
+            public byte[] Data = new byte[0];
+            public bool Keyframe;
+        }
 
         /// <summary>收帧时出问题就说一句；界面上要能看到。</summary>
         public event Action<string>? Notice;
@@ -216,6 +232,19 @@ namespace ADisplay.Windows
                 }
                 _lastPts90k = pts90k;
 
+                // 这一帧自己带了参数集吗？带了就顺手缓存；没带就用缓存的补上。
+                // 镜像流可能几分钟才出一个关键帧（画面不动时就是这样），播放器
+                // 要是接晚了、或者漏了那个包，就再也拿不到 SPS/PPS，画面永远
+                // 出不来 —— 而它表现出来的样子和「解复用器不认流」一模一样。
+                bool keyframe = ScanParameterSets(annexB);
+                byte[] payload = annexB;
+                if (!keyframe && _parameterSets != null)
+                {
+                    payload = new byte[_parameterSets.Length + annexB.Length];
+                    Array.Copy(_parameterSets, 0, payload, 0, _parameterSets.Length);
+                    Array.Copy(annexB, 0, payload, _parameterSets.Length, annexB.Length);
+                }
+
                 MemoryStream buffer = new MemoryStream();
                 // PSI 定期重发：播放器从中间接入也能找到节目。
                 if (_frameIndex == 1 || _frameIndex % PsiIntervalFrames == 0)
@@ -223,10 +252,10 @@ namespace ADisplay.Windows
                     WritePat(buffer);
                     WritePmt(buffer);
                 }
-                WritePes(buffer, annexB, pts90k);
+                WritePes(buffer, payload, pts90k);
                 chunk = buffer.ToArray();
 
-                _outgoing.Enqueue(chunk);
+                _outgoing.Enqueue(new WaitingChunk { Data = chunk, Keyframe = keyframe });
                 while (_outgoing.Count > MaxQueuedChunks)
                 {
                     _outgoing.Dequeue();
@@ -298,6 +327,7 @@ namespace ADisplay.Windows
                 }
                 _clients.Clear();
                 _outgoing.Clear();
+                _parameterSets = null;
                 _frameIndex = 0;
                 _lastReportedFrames = 0;
                 _bytesSent = 0;
@@ -359,6 +389,32 @@ namespace ADisplay.Windows
                     lock (_lock)
                     {
                         _clients.Add(stream);
+                        // 播放器接晚了的话，队列里可能攒着一堆旧帧。从**最新的
+                        // 关键帧**开始送：更早的帧缺了参考帧，送过去也解不出来，
+                        // 而这个新客户端要是从头追，画面会永远落后好几秒。
+                        int lastKeyframe = -1;
+                        int position = 0;
+                        foreach (WaitingChunk queued in _outgoing)
+                        {
+                            if (queued.Keyframe)
+                            {
+                                lastKeyframe = position;
+                            }
+                            position++;
+                        }
+                        if (lastKeyframe < 0)
+                        {
+                            // 一个关键帧都没有，留着也没用。
+                            _outgoing.Clear();
+                        }
+                        else
+                        {
+                            for (int i = 0; i < lastKeyframe; i++)
+                            {
+                                _outgoing.Dequeue();
+                            }
+                        }
+
                         if (!_noticedClient)
                         {
                             _noticedClient = true;
@@ -422,7 +478,7 @@ namespace ADisplay.Windows
                     {
                         if (_outgoing.Count > 0)
                         {
-                            chunk = _outgoing.Dequeue();
+                            chunk = _outgoing.Dequeue().Data;
                             if (_clients.Count > 0)
                             {
                                 targets = new List<NetworkStream>(_clients);
@@ -490,6 +546,102 @@ namespace ADisplay.Windows
             {
                 handler(message);
             }
+        }
+
+        // ------------------------------------------------------------------
+        // 参数集（SPS/PPS）的缓存与补发
+        //
+        // Annex B 就是一串「起始码 + NAL」，这里只做一件小事：挑出参数集那两个
+        // NAL 缓存下来，好在后续帧上补发。
+        // ------------------------------------------------------------------
+
+        /// <summary>
+        /// 扫这一帧的 NAL，遇到参数集就缓存。
+        /// 返回「这一帧自己带了参数集吗」—— 发送端只在关键帧上带。
+        /// </summary>
+        private bool ScanParameterSets(byte[] annexB)
+        {
+            bool sawSps = false;
+            int setsStart = -1;
+            int setsEnd = -1;
+            int index = 0;
+            while (index + 3 < annexB.Length)
+            {
+                int startCodeLength = StartCodeLengthAt(annexB, index);
+                if (startCodeLength == 0)
+                {
+                    index++;
+                    continue;
+                }
+                int nalStart = index + startCodeLength;
+                if (nalStart >= annexB.Length)
+                {
+                    break;
+                }
+                int type = annexB[nalStart] & 0x1F;
+                if (type >= 1 && type <= 5)
+                {
+                    // 切片已经开始，后面不会再有参数集了。
+                    break;
+                }
+                int nalEnd = NextStartCodeIndex(annexB, nalStart);
+                if (nalEnd < 0)
+                {
+                    nalEnd = annexB.Length;
+                }
+                if (type == 7)
+                {
+                    sawSps = true;
+                    setsStart = index;
+                    setsEnd = nalEnd;
+                }
+                else if (type == 8 && setsStart >= 0)
+                {
+                    setsEnd = nalEnd;
+                }
+                index = nalEnd > index ? nalEnd : index + 1;
+            }
+
+            if (setsStart >= 0 && setsEnd > setsStart)
+            {
+                byte[] sets = new byte[setsEnd - setsStart];
+                Array.Copy(annexB, setsStart, sets, 0, sets.Length);
+                _parameterSets = sets;
+                return true;
+            }
+            return false;
+        }
+
+        /// <summary>这一位是起始码吗？是就返回它的长度（3 或 4），不是返回 0。</summary>
+        private static int StartCodeLengthAt(byte[] data, int index)
+        {
+            if (data[index] != 0 || data[index + 1] != 0)
+            {
+                return 0;
+            }
+            if (data[index + 2] == 1)
+            {
+                return 3;
+            }
+            if (data[index + 2] == 0 && index + 3 < data.Length && data[index + 3] == 1)
+            {
+                return 4;
+            }
+            return 0;
+        }
+
+        /// <summary>从 from 开始找下一个起始码，找不到返回 -1。</summary>
+        private static int NextStartCodeIndex(byte[] data, int from)
+        {
+            for (int i = from; i + 3 < data.Length; i++)
+            {
+                if (data[i] == 0 && data[i + 1] == 0
+                    && (data[i + 2] == 1 || (data[i + 2] == 0 && data[i + 3] == 1)))
+                {
+                    return i;
+                }
+            }
+            return -1;
         }
 
         // ------------------------------------------------------------------
@@ -574,11 +726,18 @@ namespace ADisplay.Windows
         {
             // PES 头：起始码 00 00 01 E0（视频），带 PTS。
             // 只打 PTS（flags = 10）：镜像没有 B 帧重排，DTS 与 PTS 相同。
-            const int headerLength = 14;
-            int packetLength = headerLength - 6 + annexB.Length;
+            //
+            // 长度字段算的是「长度字段之后的全部字节」：标记位与 PTS 那 8 个字节，
+            // 加上负载。负载里那个 AUD 也算 —— 漏掉它会让解复用器报
+            // "PES packet size mismatch"，然后把这些包当成坏包丢掉（0.5.70 里
+            // 就是这么写的，短了 6 个字节）。
+            const int pesHeaderLength = 14;
+            byte[] aud = new byte[] { 0x00, 0x00, 0x00, 0x01, 0x09, 0xF0 };
+            int esLength = aud.Length + annexB.Length;
+            int packetLength = (pesHeaderLength - 6) + esLength;
             bool unbounded = packetLength > 0xFFFF;
 
-            byte[] pes = new byte[headerLength];
+            byte[] pes = new byte[pesHeaderLength];
             pes[0] = 0x00;
             pes[1] = 0x00;
             pes[2] = 0x01;
@@ -607,8 +766,6 @@ namespace ADisplay.Windows
 
             // 负载：先插一个访问单元分隔符（AUD，NAL 类型 9），再是这一帧的
             // Annex B —— 分隔符让解复用器能干净地切出「一个访问单元」。
-            byte[] aud = new byte[] { 0x00, 0x00, 0x00, 0x01, 0x09, 0xF0 };
-
             MemoryStream assembled = new MemoryStream();
             assembled.Write(pes, 0, pes.Length);
             assembled.Write(aud, 0, aud.Length);
