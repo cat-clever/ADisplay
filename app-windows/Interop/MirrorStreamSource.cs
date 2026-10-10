@@ -318,9 +318,20 @@ public sealed class MirrorStreamSource
 
         VideoStreamDescriptor descriptor = new VideoStreamDescriptor(properties);
         MediaStreamSource source = new MediaStreamSource(descriptor);
+
+        // 告诉管线「这是个直播流」。
+        //
+        // 屏幕镜像没有时长、也不能拖动，而 MediaPlayerElement 底下是 Media Engine ——
+        // 它和老的 MF 拓扑不同，会按时间轴/时长决定缓冲策略。不给这两个信息，
+        // 它可能一直等一个永远不来的「总时长」，表现就是永远停在缓冲。
+        // （ETW 里能看到它确实走到了 Media Engine 的缓冲逻辑，并且已经建好了解码器。）
+        source.CanSeek = false;
+        source.Duration = TimeSpan.Zero;
+
         source.Starting += OnStarting;
         source.SampleRequested += OnSampleRequested;
         _source = source;
+        RaiseNotice("镜像渲染：已按直播流建源（不可拖动、无总时长）。");
     }
 
     private static void OnStarting(MediaStreamSource sender, MediaStreamSourceStartingEventArgs args)
