@@ -400,7 +400,9 @@ public sealed partial class MainWindow : Window
             UpdateResumeBanner();
             return;
         }
-        EndCasting();
+
+        // 会话真的结束了（不是我们躲开的）：没什么可恢复的，横幅不该出现。
+        EndCasting(false);
     }
 
     // ---------------------------------------------------------------------
@@ -787,14 +789,27 @@ public sealed partial class MainWindow : Window
         ReportPlayback();
     }
 
-    private void EndCasting()
+    /// <summary>
+    /// 收起投屏页，回设置页。
+    ///
+    /// keepRecoverable 区分两种来路：用户点了「结束投屏」（会话还活着，值得在待机页
+    /// 留一个「还能回去」的入口）与核心说这个会话已经结束了（没什么可恢复的，
+    /// 留横幅只会得到一个点了没反应的按钮）。
+    /// </summary>
+    private void EndCasting(bool keepRecoverable)
     {
-        // 记下「还能回去的那一次」：会话本身没结束（核心那边还在），只是我们
-        // 不看了。待机页据此显示「继续观看 / 断开投屏」。
-        if (_castSessionId != 0)
+        if (keepRecoverable && _castSessionId != 0)
         {
+            // 记下「还能回去的那一次」：会话本身没结束（核心那边还在），只是我们
+            // 不看了。待机页据此显示「继续观看 / 断开投屏」。
             _dismissedSessionId = _castSessionId;
             _dismissedIsMirror = _isMirrorSession;
+        }
+        else if (!keepRecoverable)
+        {
+            // 会话已经没了：之前记下的那一次也不再可恢复。
+            _dismissedSessionId = 0;
+            _dismissedIsMirror = false;
         }
 
         // 项目约定不用 ?. 空条件运算符，写成显式判断。
@@ -846,7 +861,9 @@ public sealed partial class MainWindow : Window
     {
         // 只结束本地播放、回设置页，**不停接收服务** —— 服务一停广播就撤了，
         // 手机那边立刻找不到这台机器。核心那边下次收到推送会重新开会话。
-        EndCasting();
+        //
+        // 会话还活着，所以记成「还能回去」：待机页据此显示横幅。
+        EndCasting(true);
     }
 
     // ---------------------------------------------------------------------

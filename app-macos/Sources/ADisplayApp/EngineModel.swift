@@ -436,6 +436,14 @@ final class EngineModel: ObservableObject {
     }
 
     private func endMedia(sessionId: UInt32) {
+        // 会话真的结束了：如果它正是「用户结束掉、但还能回去」的那一次，横幅就该
+        // 收掉 —— 否则待机页会留下一个点了没反应的按钮。
+        if dismissedSessionId == sessionId {
+            dismissedSessionId = nil
+            dismissedMedia = nil
+            castingDismissed = false
+        }
+
         // 镜像会话与媒体会话共用同一个会话号空间，两边都要按会话号收尾。
         if mirrorSessionId == sessionId {
             mirrorSessionId = nil
