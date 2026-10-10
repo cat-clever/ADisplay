@@ -63,6 +63,23 @@ if(ADISPLAY_HAVE_AIRPLAY_RECEIVER)
             "上游改了目录结构就得同步更新这里与 cmake/UxPlayProtocol.cmake。")
     endif()
 
+    # UxPlay 那个补丁打上了没有 —— 在正经过的 configure 里**显式查一遍源码**。
+    #
+    # 补丁是在 FetchContent 的 PATCH_COMMAND 里做的，而那一步的输出被外部工程的
+    # 机制收进日志文件、成功时不显示 —— 也就是说「压根没打上」这件事光看 CI 日志
+    # 发现不了。而它管的是「手机每隔一阵用 /info 重新发现设备时，接收端别把正在
+    # 进行的镜像会话拆掉」，漏了的症状是「投一会儿自己断开」，只有真机才看得见。
+    # 与其发一个要靠用户试出来的包，不如在这里直接失败。
+    file(READ "${UXPLAY_LIB_DIR}/raop.c" adisplay_raop_source)
+    string(FIND "${adisplay_raop_source}" "cseq && httpd_count_connection_type"
+           adisplay_raop_patched)
+    if(adisplay_raop_patched EQUAL -1)
+        message(FATAL_ERROR
+            "UxPlay 的 raop.c 没打上「BLE 信标探测不拆镜像会话」的补丁"
+            "（见 cmake/PatchUxPlayCompat.cmake）。漏了它手机会每隔一阵断一次投屏。")
+    endif()
+    message(STATUS "ADisplay: UxPlay 的镜像保活补丁已确认在源码里")
+
     # 源文件用 GLOB 而不是逐个列。上游版本由标签固定，但增删文件是常事，
     # 一份手写清单会悄悄过期 —— 那种错误的表现是「升级后少了几个符号」。
     file(GLOB UXPLAY_PROTOCOL_SOURCES CONFIGURE_DEPENDS
