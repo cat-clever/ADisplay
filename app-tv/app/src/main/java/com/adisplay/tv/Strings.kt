@@ -109,6 +109,11 @@ abstract class Strings {
 
     // ---- 日志抽屉 ----
     abstract val copyAll: String
+    abstract val exportLog: String
+    abstract val exportDone: String
+
+    /** 导出失败时给用户看的一句（细节由异常给出）。 */
+    abstract fun exportFailed(detail: String): String
     abstract val clearLog: String
     abstract val close: String
 
@@ -223,6 +228,10 @@ object ChineseStrings : Strings() {
     override val nameEmpty = "名称不能为空"
 
     override val copyAll = "复制全部"
+    override val exportLog = "导出日志"
+    override val exportDone = "日志已导出到所选位置"
+
+    override fun exportFailed(detail: String) = "导出失败：" + detail
     override val clearLog = "清除日志"
     override val close = "关闭"
 
@@ -305,6 +314,10 @@ object EnglishStrings : Strings() {
     override val nameEmpty = "Name can't be empty"
 
     override val copyAll = "Copy all"
+    override val exportLog = "Export log"
+    override val exportDone = "Log exported to the chosen location"
+
+    override fun exportFailed(detail: String) = "Export failed: " + detail
     override val clearLog = "Clear log"
     override val close = "Close"
 

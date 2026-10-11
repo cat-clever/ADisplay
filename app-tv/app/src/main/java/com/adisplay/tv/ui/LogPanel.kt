@@ -9,9 +9,14 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import android.content.ClipData
@@ -23,6 +28,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.dp
 import androidx.tv.material3.Text
+import com.adisplay.tv.LogFile
 
 /**
  * 日志内容本身。装在哪由调用方决定 —— 现在只装在抽屉里（见 LogDrawer）。
@@ -82,10 +88,35 @@ fun LogDrawer(
     val landscape = isLandscape()
     val context = LocalContext.current
     val copyFocus = remember { FocusRequester() }
+    val exportFocus = remember { FocusRequester() }
     val clearFocus = remember { FocusRequester() }
     val closeFocus = remember { FocusRequester() }
 
-    // 遥控器一进来就有落点：焦点给「关闭」，方向键往左能走到「清除日志」「复制全部」。
+    // 导出结果那一句话（成功或失败）。放在这里而不是日志里：用户刚点完按钮，
+    // 眼睛就在这一块，等翻日志才知道结果太绕。
+    var exportNote by remember { mutableStateOf("") }
+
+    // 「导出日志」走系统的文件选择器，由用户自己挑位置 —— 那是 Android 上唯一允许
+    // 应用把文件写到应用目录之外的途径（其余地方都要授权）。
+    val exportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("text/plain")
+    ) { uri ->
+        if (uri == null) {
+            // 用户在系统界面里按了返回：什么都不做，也不报错 —— 那不是失败。
+            return@rememberLauncherForActivityResult
+        }
+        exportNote = try {
+            context.contentResolver.openOutputStream(uri)?.use { stream ->
+                stream.write(LogFile.read().toByteArray())
+            }
+            LocalStrings.current.exportDone
+        } catch (error: Exception) {
+            LocalStrings.current.exportFailed(error.message ?: error.javaClass.simpleName)
+        }
+    }
+
+    // 遥控器一进来就有落点：焦点给「关闭」（它在这一块的右上角，方向键往左、往下
+    // 能走到三个操作按钮上）。
     LaunchedEffect(Unit) {
         closeFocus.requestFocus()
     }
@@ -99,6 +130,11 @@ fun LogDrawer(
             Modifier.fillMaxWidth().fillMaxHeight(0.55f)
         },
     ) {
+        // 两行：第一行标题与「关闭」，第二行三个操作。
+        //
+        // 四个按钮挤一行放不下 —— 等分也不行，每个只剩 1/4 宽，四个字的标签会被切掉
+        // （这一类错这个项目里出现过四次：待机页三个服务按钮、画质那一档、结束投屏横幅、
+        // 以及这一行加进第三个按钮那次）。
         Row(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier.fillMaxWidth(),
@@ -109,13 +145,23 @@ fun LogDrawer(
                 color = Color.White,
             )
 
-            Spacer(modifier = Modifier.width(12.dp))
+            Spacer(modifier = Modifier.weight(1f))
 
-            // 三个按钮等分剩下的宽度。
-            //
-            // 原来这里只有「清除日志」「关闭」两个、按内容取宽，加进第三个就会在窄屏
-            // （竖屏）上把最右边那个顶出屏幕 —— 待机页那三个按钮、横幅、画质那一档都
-            // 出过同样的错，这是同一类里的第四处。
+            ActionButton(
+                text = LocalStrings.current.close,
+                textStyle = buttonTextStyle,
+                minWidth = 0.dp,
+                focusRequester = closeFocus,
+                onClick = onDismiss,
+            )
+        }
+
+        Spacer(modifier = Modifier.height(10.dp))
+
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
             ActionButton(
                 text = LocalStrings.current.copyAll,
                 textStyle = buttonTextStyle,
@@ -137,7 +183,23 @@ fun LogDrawer(
                 },
             )
 
-            Spacer(modifier = Modifier.width(12.dp))
+            Spacer(modifier = Modifier.width(10.dp))
+
+            // 导出成文件：日志可能有几万行，剪贴板不好搬运；而且用户可以自己挑位置。
+            // 文件里是**完整**那份（界面上的环只有 500 行，见 LogFile 的文件头）。
+            ActionButton(
+                text = LocalStrings.current.exportLog,
+                textStyle = buttonTextStyle,
+                minWidth = 0.dp,
+                modifier = Modifier.weight(1f),
+                focusRequester = exportFocus,
+                onClick = {
+                    exportNote = ""
+                    exportLauncher.launch("adisplay-log.txt")
+                },
+            )
+
+            Spacer(modifier = Modifier.width(10.dp))
 
             ActionButton(
                 text = LocalStrings.current.clearLog,
@@ -148,17 +210,11 @@ fun LogDrawer(
                 enabled = lines.isNotEmpty(),
                 onClick = onClear,
             )
+        }
 
-            Spacer(modifier = Modifier.width(12.dp))
-
-            ActionButton(
-                text = LocalStrings.current.close,
-                textStyle = buttonTextStyle,
-                minWidth = 0.dp,
-                modifier = Modifier.weight(1f),
-                focusRequester = closeFocus,
-                onClick = onDismiss,
-            )
+        if (exportNote.isNotEmpty()) {
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(text = exportNote, style = textStyle, color = Color.White.copy(alpha = 0.85f))
         }
 
         Spacer(modifier = Modifier.height(12.dp))

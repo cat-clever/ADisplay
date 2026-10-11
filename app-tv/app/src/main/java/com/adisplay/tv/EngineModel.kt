@@ -692,6 +692,15 @@ class EngineModel(context: Context) {
         // 否则界面会显示默认档，而核心按存下来的那一档给尺寸建议。
         qualityPreset = QualityPreset.of(AdDisplayNative.nativeGetQualityPreset(handle))
 
+        // 日志落盘：接上之后这一行本身也会写进文件（它是文件里的第一行）。
+        LogFile.attach(appContext)
+        val logPath = LogFile.path()
+        if (logPath.isNotEmpty()) {
+            appendLog(LogLevel.INFO, "完整日志同时写到：" + logPath + "（可用「导出日志」另存到别处）")
+        } else {
+            appendLog(LogLevel.WARN, "日志文件不可用（写不进去），界面上的日志照旧")
+        }
+
         appendLog(LogLevel.INFO, "核心库 " + version + " 就绪，设备名：" + deviceName)
     }
 
@@ -1126,10 +1135,18 @@ class EngineModel(context: Context) {
      */
     fun clearLogs() {
         logs.clear()
+        // 窗口那份清了，文件那份也要清 —— 只清一份的话用户以为清干净了，
+        // 导出时发现旧内容还在（用户 2026-10-11 明确要求两份都能清）。
+        LogFile.clear()
+        appendLog(LogLevel.INFO, "日志已清除（窗口与文件都清了）")
     }
 
     private fun appendLog(level: LogLevel, message: String) {
-        logs.add("[" + timeFormat.format(Date()) + "] [" + level.label + "] " + message)
+        val line = "[" + timeFormat.format(Date()) + "] [" + level.label + "] " + message
+        logs.add(line)
+        // 同时落盘：界面上的环只有 500 行，排查现场问题时那点容量经常不够用
+        // （见 LogFile 的文件头）。
+        LogFile.append(line)
         // 限长：电视上这个页面会一挂就是一整天，不封顶的话日志迟早把内存吃光。
         while (logs.size > MAX_LOG_LINES) {
             logs.removeAt(0)
