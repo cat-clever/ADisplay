@@ -108,6 +108,7 @@ abstract class Strings {
     abstract val nameEmpty: String
 
     // ---- 日志抽屉 ----
+    abstract val copyAll: String
     abstract val clearLog: String
     abstract val close: String
 
@@ -221,6 +222,7 @@ object ChineseStrings : Strings() {
     override val cancel = "取消"
     override val nameEmpty = "名称不能为空"
 
+    override val copyAll = "复制全部"
     override val clearLog = "清除日志"
     override val close = "关闭"
 
@@ -302,6 +304,7 @@ object EnglishStrings : Strings() {
     override val cancel = "Cancel"
     override val nameEmpty = "Name can't be empty"
 
+    override val copyAll = "Copy all"
     override val clearLog = "Clear log"
     override val close = "Close"
 

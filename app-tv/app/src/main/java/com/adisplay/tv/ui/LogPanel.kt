@@ -14,7 +14,10 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import android.content.ClipData
+import android.content.ClipboardManager
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.text.TextStyle
@@ -77,10 +80,12 @@ fun LogDrawer(
     onDismiss: () -> Unit,
 ) {
     val landscape = isLandscape()
+    val context = LocalContext.current
+    val copyFocus = remember { FocusRequester() }
     val clearFocus = remember { FocusRequester() }
     val closeFocus = remember { FocusRequester() }
 
-    // 遥控器一进来就有落点：焦点给「关闭」，方向键能走到「清除日志」。
+    // 遥控器一进来就有落点：焦点给「关闭」，方向键往左能走到「清除日志」「复制全部」。
     LaunchedEffect(Unit) {
         closeFocus.requestFocus()
     }
@@ -104,14 +109,42 @@ fun LogDrawer(
                 color = Color.White,
             )
 
-            Spacer(modifier = Modifier.weight(1f))
+            Spacer(modifier = Modifier.width(12.dp))
+
+            // 三个按钮等分剩下的宽度。
+            //
+            // 原来这里只有「清除日志」「关闭」两个、按内容取宽，加进第三个就会在窄屏
+            // （竖屏）上把最右边那个顶出屏幕 —— 待机页那三个按钮、横幅、画质那一档都
+            // 出过同样的错，这是同一类里的第四处。
+            ActionButton(
+                text = LocalStrings.current.copyAll,
+                textStyle = buttonTextStyle,
+                minWidth = 0.dp,
+                modifier = Modifier.weight(1f),
+                focusRequester = copyFocus,
+                // 没有日志时压暗：一眼看出这一项此刻没意义（同下面的「清除日志」）。
+                enabled = lines.isNotEmpty(),
+                onClick = {
+                    // 用平台的剪贴板而不是 Compose 那套：后者在 Compose 1.7 起换了 API
+                    // （LocalClipboardManager 废弃、新的要挂协程），而这里只是一次同步写入。
+                    // 复制的是**整份**日志（界面只显示得下最近这些行），与桌面两端一致。
+                    val manager = context.getSystemService(ClipboardManager::class.java)
+                    if (manager != null) {
+                        manager.setPrimaryClip(
+                            ClipData.newPlainText("ADisplay", lines.joinToString("\n"))
+                        )
+                    }
+                },
+            )
+
+            Spacer(modifier = Modifier.width(12.dp))
 
             ActionButton(
                 text = LocalStrings.current.clearLog,
                 textStyle = buttonTextStyle,
                 minWidth = 0.dp,
+                modifier = Modifier.weight(1f),
                 focusRequester = clearFocus,
-                // 没有日志时压暗：一眼看出这一项此刻没意义。
                 enabled = lines.isNotEmpty(),
                 onClick = onClear,
             )
@@ -122,6 +155,7 @@ fun LogDrawer(
                 text = LocalStrings.current.close,
                 textStyle = buttonTextStyle,
                 minWidth = 0.dp,
+                modifier = Modifier.weight(1f),
                 focusRequester = closeFocus,
                 onClick = onDismiss,
             )
