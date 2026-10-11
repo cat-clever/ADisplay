@@ -96,6 +96,12 @@ fun LogDrawer(
     // 眼睛就在这一块，等翻日志才知道结果太绕。
     var exportNote by remember { mutableStateOf("") }
 
+    // 文字在**组合期**读好。下面那个回调不是 composable 上下文，里面读不了
+    // CompositionLocal（编译器直接报「@Composable invocations can only happen from the
+    // context of a @Composable function」），也不能用 try/catch 包住这类读取
+    // （「Try catch is not supported around composable function invocations」）。
+    val strings = LocalStrings.current
+
     // 「导出日志」走系统的文件选择器，由用户自己挑位置 —— 那是 Android 上唯一允许
     // 应用把文件写到应用目录之外的途径（其余地方都要授权）。
     val exportLauncher = rememberLauncherForActivityResult(
@@ -105,14 +111,16 @@ fun LogDrawer(
             // 用户在系统界面里按了返回：什么都不做，也不报错 —— 那不是失败。
             return@rememberLauncherForActivityResult
         }
-        exportNote = try {
+        // try 只包 IO，不包任何 composable 读取（见上面）。
+        val failure: String? = try {
             context.contentResolver.openOutputStream(uri)?.use { stream ->
                 stream.write(LogFile.read().toByteArray())
             }
-            LocalStrings.current.exportDone
+            null
         } catch (error: Exception) {
-            LocalStrings.current.exportFailed(error.message ?: error.javaClass.simpleName)
+            error.message ?: error.javaClass.simpleName
         }
+        exportNote = if (failure == null) strings.exportDone else strings.exportFailed(failure)
     }
 
     // 遥控器一进来就有落点：焦点给「关闭」（它在这一块的右上角，方向键往左、往下
