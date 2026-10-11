@@ -66,9 +66,10 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: artifacts/*
-          generate_release_notes: true
+          # 正文只来自 docs/发布说明.md，不用自动生成的提交列表、也不追加：
+          # 开着那两项的话，页面上是「提交列表 + 整份文档」，长到没人看（用户 2026-10-11 的反馈）。
+          generate_release_notes: false
           fail_on_unmatched_files: true
-          append_body: true
           # 安装说明与「当前进度」从文件读，不写死在 workflow 里。
           #
           # 写死的后果是那段文字从 v0.1.0 一直沿用到 v0.3.2 都没变过 ——
