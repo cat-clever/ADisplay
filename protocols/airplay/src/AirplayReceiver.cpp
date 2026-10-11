@@ -535,6 +535,67 @@ float cb_on_video_playlist_remove(void* cls) {
 // 这一步不是可选的：AirPlay 的失败几乎都以「iPhone 那边转圈然后放弃」的形式
 // 出现，接收端这边不留痕迹的话，排查就只剩猜。而它的日志里恰好有配对、
 // FairPlay 握手、流协商每一步的结果。
+
+// ---------------------------------------------------------------------------
+// 协议层「逐包」日志的抑制
+//
+// 为什么要单独处理这一类：UxPlay 把「收到/重发哪一个包」也记在 DEBUG 上，而下面
+// 把它的 DEBUG 按 INFO 转发（理由见 cb_log 里的注释 —— 握手每一步都记在 DEBUG，
+// 而 AirPlay 失败时接收端一句错误都没有，那一层必须看得见）。但逐包日志的量级
+// 完全不同：链路一抖，音频重传的请求与重发每秒能刷上千行，而界面的日志环只有
+// 500 行 —— 一秒就被冲光，用户点「复制全部」拿到满屏重传，前面真正有用的那几行
+// 早被挤掉了（2026-10-11 用户报的正是这个）。
+//
+// 做法：单条降到我们这层的 Debug（默认 Info 看不见；真去查时把级别调低仍看得到），
+// 但**密度本身是信号** —— 重传风暴正对应着声音断续，所以攒够密度就报一条 Warning。
+// ---------------------------------------------------------------------------
+constexpr int kChatterWindowMs = 2000;
+constexpr int kChatterWarnThreshold = 40;
+
+std::mutex g_chatter_mutex;
+int g_chatter_count = 0;
+int64_t g_chatter_window_ms = 0;
+int64_t g_chatter_last_warn_ms = 0;
+
+// 是不是「逐包」那一类：音频重传的请求与重发、以及每个包的类型与长度。
+bool is_packet_chatter(const char* msg) {
+    static const char* const kNoisyPatterns[] = {
+        "raop_rtp got resend request",
+        "raop_rtp resent audio packet",
+        "raop_buffer_handle_resends",
+        "raop_rtp type_c",
+    };
+    for (const char* pattern : kNoisyPatterns) {
+        if (std::strstr(msg, pattern) != nullptr) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// 记一条被抑制的逐包日志；够密就报一条汇总（每 2 秒最多一条）。
+void note_suppressed_chatter() {
+    const int64_t now = now_ms();
+    int count = 0;
+    {
+        std::lock_guard<std::mutex> lock(g_chatter_mutex);
+        if (g_chatter_window_ms == 0 || now - g_chatter_window_ms > kChatterWindowMs) {
+            g_chatter_window_ms = now;
+            g_chatter_count = 0;
+        }
+        g_chatter_count += 1;
+        count = g_chatter_count;
+        if (count < kChatterWarnThreshold || now - g_chatter_last_warn_ms <= kChatterWindowMs) {
+            return;
+        }
+        g_chatter_last_warn_ms = now;
+    }
+    // 出锁再记日志：日志系统会回调到界面，持锁调它不是好习惯。
+    AD_LOG_WARN("AirPlay 协议层 2 秒内刷了 {} 条逐包日志（多为音频重传的请求与重发）"
+                " —— 说明丢包在持续，伴音多半会断续；这类日志已降到 Debug 级别，"
+                "需要时把日志级别调低即可看到每一条", count);
+}
+
 void cb_log(void* cls, int level, const char* msg) {
     (void) cls;
     if (msg == nullptr) {
@@ -566,6 +627,15 @@ void cb_log(void* cls, int level, const char* msg) {
             // Info。表现是「iPhone 能连上、随后什么日志都没有、然后连不上」，
             // 排查完全无从下手 —— 就是把协议层级别调到 DEBUG 也没用，
             // 因为拦在下面一级。
+            //
+            // 例外是「逐包」那一类（重传的请求与重发、每个包的类型与长度）：
+            // 它们不是状态也不是错误，纯粹是包级流水，量级把日志环一冲就光 ——
+            // 见上面 is_packet_chatter / note_suppressed_chatter 的说明。
+            if (is_packet_chatter(msg)) {
+                note_suppressed_chatter();
+                AD_LOG_DEBUG("[AirPlay] {}", msg);
+                break;
+            }
             AD_LOG_INFO("[AirPlay] {}", msg);
             break;
     }
