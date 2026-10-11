@@ -108,3 +108,90 @@ else()
     file(WRITE "${RAOP_FILE}" "${raop_patched}")
     message(STATUS "PatchUxPlayCompat：已让 BLE 信标探测不再拆掉镜像会话")
 endif()
+
+# ===========================================================================
+# 第三处：丢几个包不该让声音停将近三秒
+#
+# 要修的是 raop_buffer.c 的出队逻辑。上游的写法是：队首那个包还没到时，
+# **只要缓冲里还有空位就返回空、继续等重发**（它自己的注释：
+# "Return nothing and hope resend gets on time"）。于是丢几个包就要一直等到缓冲被填满
+# 才肯往下走 —— 256 个包 × 10.9 毫秒（AAC-ELD 每包 480 样本 / 44100 Hz）≈ **2.8 秒**。
+# 实测的静音时长正是 2.8–4.7 秒（2026-10-11 用户日志里六次：3111 / 2879 / 3506 /
+# 4734 / 3180 / 765 毫秒），而那一刻接收端整条伴音管道只启动过一次 —— 不是管道被拆，
+# 是**帧卡在一个填不上的洞上**。
+#
+# 做法：加一个短超时。一个包等不到就往前跳，把那一小段丢掉 —— 丢一小段远好过静几秒。
+#
+# 入参：-DBUFFER_FILE=<要修补的 raop_buffer.c 路径>
+#
+# 这里用 string(REPLACE)（**字面**替换）而不是正则：要匹配的块里有括号、星号、花括号，
+# 正则写起来又长又容易错。锚点对不上时下面的校验会 FATAL_ERROR，不会静默失效。
+# ===========================================================================
+
+if(NOT DEFINED BUFFER_FILE)
+    message(FATAL_ERROR "PatchUxPlayCompat：缺少 BUFFER_FILE 参数")
+endif()
+
+if(NOT EXISTS "${BUFFER_FILE}")
+    message(FATAL_ERROR "PatchUxPlayCompat：找不到 ${BUFFER_FILE}")
+endif()
+
+file(READ "${BUFFER_FILE}" buffer_content)
+string(REPLACE "\r\n" "\n" buffer_content "${buffer_content}")
+
+# 这个补丁是**插入**而不是替换，锚点在打完之后依然存在 —— 直接重跑会再插一遍。
+# 所以先看标记：已经有了就整段跳过（本脚本在构建目录已存在时会重跑）。
+string(FIND "${buffer_content}" "ADISPLAY_HOLE_TIMEOUT_MS" buffer_already)
+if(NOT buffer_already EQUAL -1)
+    message(STATUS "PatchUxPlayCompat：raop_buffer.c 已修补过，跳过")
+else()
+
+# ---- (1) clock_gettime 要用 <time.h> ----
+string(REPLACE
+    "#include <stdint.h>"
+    "#include <stdint.h>\n/* ADisplay 补丁：下面的洞超时要 clock_gettime */\n#include <time.h>"
+    buffer_content "${buffer_content}")
+
+# ---- (2) 超时常量与取时间的辅助函数（放在结构体定义之前，保证使用点可见）----
+string(REPLACE
+    "struct raop_buffer_s {"
+    "/* ADisplay 补丁：一个缺失的包最多等多久（毫秒）。见 raop_buffer_dequeue。 */\n#define ADISPLAY_HOLE_TIMEOUT_MS 400\n\nstatic int64_t adisplay_now_ms(void) {\n    struct timespec ts;\n    clock_gettime(CLOCK_REALTIME, &ts);\n    return (int64_t) ts.tv_sec * 1000 + ts.tv_nsec / 1000000;\n}\n\nstruct raop_buffer_s {"
+    buffer_content "${buffer_content}")
+
+# ---- (3) 结构体里记「这个洞是什么时候发现的」----
+string(REPLACE
+    "    raop_buffer_entry_t entries[RAOP_BUFFER_LENGTH];\n};"
+    "    raop_buffer_entry_t entries[RAOP_BUFFER_LENGTH];\n\n    /* ADisplay 补丁：当前这个洞是什么时候发现的（毫秒）。0 表示没有洞。\n       calloc 出来就是 0，不需要另外初始化。 */\n    int64_t adisplay_hole_since_ms;\n};"
+    buffer_content "${buffer_content}")
+
+# ---- (4) 出队：等重发，但只等一小会儿 ----
+string(REPLACE
+    "    } else if (!entry->filled) {\n        /* Check how much we have space left in the buffer */\n        if (entry_count < RAOP_BUFFER_LENGTH) {\n            /* Return nothing and hope resend gets on time */\n            return NULL;\n        }\n        /* Risk of buffer overrun, return empty buffer */\n    }"
+    "    } else if (!entry->filled) {\n        /* ADisplay 补丁：等重发，但只等 ADISPLAY_HOLE_TIMEOUT_MS 这么久。\n           上游是「只要缓冲还有空位就一直等」，于是丢几个包要等到缓冲被填满\n           （约 2.8 秒）才往下走 —— 这就是那几次 2.8–4.7 秒静音的来源。 */\n        int64_t now_ms = adisplay_now_ms();\n        if (raop_buffer->adisplay_hole_since_ms == 0) {\n            raop_buffer->adisplay_hole_since_ms = now_ms;\n        }\n        /* Check how much we have space left in the buffer */\n        if (entry_count < RAOP_BUFFER_LENGTH &&\n            now_ms - raop_buffer->adisplay_hole_since_ms < ADISPLAY_HOLE_TIMEOUT_MS) {\n            /* Return nothing and hope resend gets on time（只等上面那点时间）*/\n            return NULL;\n        }\n        /* Risk of buffer overrun，或者等超时了：丢掉这一段往前跳 */\n    }"
+    buffer_content "${buffer_content}")
+
+# ---- (5) 往前走了，洞的计时清零 ----
+string(REPLACE
+    "    /* Update buffer and validate entry */\n    raop_buffer->first_seqnum += 1;"
+    "    /* ADisplay 补丁：往前走了（无论是取到还是超时跳过），洞的计时清零。 */\n    raop_buffer->adisplay_hole_since_ms = 0;\n\n    /* Update buffer and validate entry */\n    raop_buffer->first_seqnum += 1;"
+    buffer_content "${buffer_content}")
+
+# ---- (6) 整块 flush 时也清零 ----
+string(REPLACE
+    "        raop_buffer->first_seqnum = next_seq;"
+    "        /* ADisplay 补丁：整块丢掉了，洞的计时一并清零。 */\n        raop_buffer->adisplay_hole_since_ms = 0;\n        raop_buffer->first_seqnum = next_seq;"
+    buffer_content "${buffer_content}")
+
+# ---- 校验：标记在，且上游那句原注释不在了 ----
+string(FIND "${buffer_content}" "ADISPLAY_HOLE_TIMEOUT_MS" buffer_applied)
+string(FIND "${buffer_content}" "hope resend gets on time */" buffer_leftover)
+if(buffer_applied EQUAL -1 OR NOT buffer_leftover EQUAL -1)
+    message(FATAL_ERROR
+        "PatchUxPlayCompat：raop_buffer.c 的「洞超时」补丁没打上 —— "
+        "上游改了这个文件的写法，请更新本脚本的锚点（文件：${BUFFER_FILE}）")
+endif()
+
+file(WRITE "${BUFFER_FILE}" "${buffer_content}")
+message(STATUS "PatchUxPlayCompat：已给 raop_buffer.c 加上缺失包的超时")
+
+endif()

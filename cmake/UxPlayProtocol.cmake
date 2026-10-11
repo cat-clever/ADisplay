@@ -41,6 +41,7 @@ FetchContent_Declare(uxplay_protocol
     PATCH_COMMAND  ${CMAKE_COMMAND}
                    -DCOMPAT_FILE=<SOURCE_DIR>/lib/compat.h
                    -DRAOP_FILE=<SOURCE_DIR>/lib/raop.c
+                   -DBUFFER_FILE=<SOURCE_DIR>/lib/raop_buffer.c
                    -P "${CMAKE_CURRENT_LIST_DIR}/PatchUxPlayCompat.cmake"
 )
 
