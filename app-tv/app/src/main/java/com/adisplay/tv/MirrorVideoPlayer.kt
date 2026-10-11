@@ -16,6 +16,8 @@
 
 package com.adisplay.tv
 
+import android.graphics.ImageFormat
+import android.media.ImageReader
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
@@ -78,6 +80,19 @@ class MirrorVideoPlayer(private val onNotice: (String) -> Unit) {
 
     // 只有 worker 线程碰这几个。
     private var codec: MediaCodec? = null
+
+    /** 解码器当前绑的输出面。用来判断要不要换面（见 rebindCodecSurface）。 */
+    private var codecSurface: Surface? = null
+
+    /** 占位输出面（见 parkCodecOnPlaceholder）：面没了时把解码器的输出切到它。 */
+    private var placeholder: Surface? = null
+
+    /** 占位面的持有者。不能让它被回收 —— 回收了 Surface 就没了。 */
+    private var placeholderReader: ImageReader? = null
+
+    /** 「参数集不全」报过多少次。这条以前每帧都打，一次会话能刷几百行（见下面的限流）。 */
+    private var parameterSetMisses = 0L
+
     private var codecH265 = false
     private var codecWidth = 0
     private var codecHeight = 0
@@ -98,9 +113,21 @@ class MirrorVideoPlayer(private val onNotice: (String) -> Unit) {
     }
 
     /** 渲染面没了（界面切走、Activity 暂停）。解码器一并收掉，下次重建。 */
+    /**
+     * 渲染面没了（界面切走、**Activity 暂停** —— 例如点「导出日志」会打开系统的文件选择器，
+     * 那时我们会被切到后台）。
+     *
+     * **刻意不释放解码器**：一释放，回来就得重建，而重建必须等发送端下一个 I 帧 ——
+     * iOS 插关键帧极稀（实测一份 1956 帧的日志里只有 1 个关键帧），画面于是会冻很久。
+     * 用户 2026-10-11 点「导出日志」时踩到的就是这个：日志里
+     * `H.264 参数集不全，等下一个关键帧` 刷了 521 次。
+     *
+     * 这里只把「没有面」这件事记下来，具体动作交给 worker 线程（它一个人持有解码器）：
+     * 下一轮它会把输出切到占位面（见 parkCodecOnPlaceholder），回来时再切回真面
+     * （见 rebindCodecSurface）—— 全程不重建，回来第一个 P 帧就能画出来。
+     */
     fun detach() {
         lock.withLock { surface = null }
-        releaseCodec()
     }
 
     /** 会话结束、重新开始时清掉上一路的尺寸，免得沿用旧比例。 */
@@ -183,6 +210,11 @@ class MirrorVideoPlayer(private val onNotice: (String) -> Unit) {
                 val target = picked.second
 
                 if (target == null) {
+                    // 没有渲染面：把解码器的输出切到占位面（它继续解码，输出被丢掉）。
+                    // 既不能让它去渲染那个已经销毁的 surface，也不能把解码器释放掉 ——
+                    // 后者会让画面一直冻着等下一个 I 帧（见 detach 的注释）。
+                    parkCodecOnPlaceholder()
+                    drain(info)
                     continue
                 }
                 if (frame == null) {
@@ -209,6 +241,8 @@ class MirrorVideoPlayer(private val onNotice: (String) -> Unit) {
             codecWidth == frame.width &&
             codecHeight == frame.height
         ) {
+            // 解码器还能用，只需确认它绑的是当前这块面（暂停过、切过页面、换过面）。
+            rebindCodecSurface(target)
             return
         }
         releaseCodec()
@@ -227,7 +261,7 @@ class MirrorVideoPlayer(private val onNotice: (String) -> Unit) {
             val sps = sets.firstOrNull { typeOf(it, true) == 33 }
             val pps = sets.firstOrNull { typeOf(it, true) == 34 }
             if (vps == null || sps == null || pps == null) {
-                onNotice("镜像渲染：H.265 参数集不全，等下一个关键帧")
+                noteParameterSetMiss()
                 return
             }
             format.setByteBuffer("csd-0", java.nio.ByteBuffer.wrap(vps))
@@ -238,7 +272,7 @@ class MirrorVideoPlayer(private val onNotice: (String) -> Unit) {
             val sps = sets.firstOrNull { typeOf(it, false) == 7 }
             val pps = sets.firstOrNull { typeOf(it, false) == 8 }
             if (sps == null || pps == null) {
-                onNotice("镜像渲染：H.264 参数集不全，等下一个关键帧")
+                noteParameterSetMiss()
                 return
             }
             format.setByteBuffer("csd-0", java.nio.ByteBuffer.wrap(startCode() + sps + startCode() + pps))
@@ -248,6 +282,7 @@ class MirrorVideoPlayer(private val onNotice: (String) -> Unit) {
         created.configure(format, target, null, 0)
         created.start()
         codec = created
+        codecSurface = target
         codecH265 = frame.isH265
         codecWidth = frame.width
         codecHeight = frame.height
@@ -294,7 +329,88 @@ class MirrorVideoPlayer(private val onNotice: (String) -> Unit) {
         }
     }
 
+    /// 解码器还在、但绑的面换了：切到新面，而不是重建。
+    ///
+    /// **只在 worker 线程调用** —— 解码器的所有操作都必须留在同一个线程上，
+    /// `setOutputSurface` 也一样（它和取缓冲并发会在真机上抛 IllegalStateException）。
+    private fun rebindCodecSurface(target: Surface) {
+        val current = codec
+        if (current == null || codecSurface === target) {
+            return
+        }
+        try {
+            current.setOutputSurface(target)
+            codecSurface = target
+        } catch (error: Exception) {
+            // 换不了就退回重建（老行为）：画面要等下一个 I 帧，但至少不会画到错的面上去。
+            releaseCodec()
+        }
+    }
+
+    /// 没有渲染面时，把解码器停到占位面上（继续解码、输出丢掉）。只在 worker 线程调用。
+    private fun parkCodecOnPlaceholder() {
+        val current = codec
+        if (current == null) {
+            return
+        }
+        val parked = placeholderSurface()
+        if (parked == null) {
+            // 拿不到占位面：退回释放解码器 —— 总比让它渲染到已销毁的面上强。
+            releaseCodec()
+            return
+        }
+        rebindCodecSurface(parked)
+    }
+
+    /// 占位输出面：一个很小的 ImageReader 面，只用来"接住"解码器的输出。
+    ///
+    /// 用 `ImageFormat.PRIVATE`（不透明）—— 视频解码器的输出正好是这种。拿不到就返回 null，
+    /// 调用方退回老行为。回调里必须把图像取走并关掉，否则生产端（解码器）会堵住。
+    private fun placeholderSurface(): Surface? {
+        val existing = placeholder
+        if (existing != null) {
+            return existing
+        }
+        try {
+            val reader = ImageReader.newInstance(320, 180, ImageFormat.PRIVATE, 2)
+            reader.setOnImageAvailableListener({ source ->
+                try {
+                    val image = source.acquireLatestImage()
+                    if (image != null) {
+                        image.close()
+                    }
+                } catch (error: Exception) {
+                    // 取不到就算了：这一路本来就是"接住再丢掉"。
+                }
+            }, null)
+            placeholderReader = reader
+            placeholder = reader.surface
+            return placeholder
+        } catch (error: Exception) {
+            return null
+        }
+    }
+
+    /// 「参数集不全」的限流提示：首帧报一次，之后每 100 次报一次。
+    ///
+    /// 这条以前**每帧都打** —— 解码器建不起来时一秒钟就能刷几十行，把日志环冲光
+    /// （用户 2026-10-11 那份日志里它出现了 521 次）。现象本身要紧（画面就是冻着的），
+    /// 但不需要每帧说一遍。
+    private fun noteParameterSetMiss() {
+        parameterSetMisses += 1
+        if (parameterSetMisses == 1L || parameterSetMisses % 100L == 0L) {
+            onNotice(
+                "镜像渲染：参数集不全，等下一个关键帧（累计 " + parameterSetMisses +
+                    " 帧）—— 画面会停到发送端插入关键帧为止"
+            )
+        }
+    }
+
     private fun releaseCodec() {
+        codecSurface = null
+        placeholderReader?.close()
+        placeholderReader = null
+        placeholder = null
         val current = codec ?: return
         codec = null
         try {
