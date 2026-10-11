@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
@@ -191,36 +192,80 @@ private fun ResumeBanner(
         }
     }
 
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.Center,
-        modifier = modifier
-            .clip(RoundedCornerShape(12.dp))
-            // 与抽屉同一套观感：半透明面板，底下的待机页透出来一点。
-            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.94f))
-            .padding(horizontal = 20.dp, vertical = 12.dp),
-    ) {
-        Text(
-            text = LocalStrings.current.castingEndedBanner,
-            style = layout.bodyStyle,
-            modifier = Modifier.padding(end = 16.dp),
-        )
-        ActionButton(
-            text = LocalStrings.current.resumeCasting,
-            textStyle = layout.actionStyle,
-            minWidth = 0.dp,
-            focusRequester = resumeFocus,
-            onClick = { model.resumeCasting() },
-        )
-        Spacer(modifier = Modifier.width(12.dp))
-        ActionButton(
-            text = LocalStrings.current.disconnectCasting,
-            textStyle = layout.actionStyle,
-            minWidth = 0.dp,
-            focusRequester = disconnectFocus,
-            onClick = { model.disconnectCasting() },
-        )
+    val panel = modifier
+        .clip(RoundedCornerShape(12.dp))
+        // 与抽屉同一套观感：半透明面板，底下的待机页透出来一点。
+        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.94f))
+        .padding(horizontal = 20.dp, vertical = 12.dp)
+
+    // 竖屏（窄屏）上「一句话 + 两个按钮」挤在一行，最右边的「断开投屏」会被顶出屏幕
+    // —— 待机页那三个按钮、画质那一档都出过同样的错。竖屏改成上下两段：说明一行、
+    // 两个按钮等分整行宽度；横屏空间够，保持原来的一行。
+    if (isLandscape()) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center,
+            modifier = panel,
+        ) {
+            Text(
+                text = LocalStrings.current.castingEndedBanner,
+                style = layout.bodyStyle,
+                modifier = Modifier.padding(end = 16.dp),
+            )
+            BannerButtons(model, layout, resumeFocus, disconnectFocus, equalWidth = false)
+        }
+    } else {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = panel.fillMaxWidth(),
+        ) {
+            Text(
+                text = LocalStrings.current.castingEndedBanner,
+                style = layout.bodyStyle,
+            )
+            Spacer(modifier = Modifier.height(layout.spacingTight))
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                BannerButtons(model, layout, resumeFocus, disconnectFocus, equalWidth = true)
+            }
+        }
     }
+}
+
+/// 横幅上那两个按钮。
+///
+/// 抽出来是因为竖屏与横屏的排法不同、而按钮本身一样 —— 抄两份迟早会改漏一处。
+/// 写成 RowScope 的扩展，好在需要等分宽度时直接用 weight。
+@Composable
+private fun RowScope.BannerButtons(
+    model: EngineModel,
+    layout: StandbyLayout,
+    resumeFocus: FocusRequester,
+    disconnectFocus: FocusRequester,
+    equalWidth: Boolean,
+) {
+    val strings = LocalStrings.current
+    val buttonModifier = if (equalWidth) Modifier.weight(1f) else Modifier
+
+    ActionButton(
+        text = strings.resumeCasting,
+        textStyle = layout.actionStyle,
+        minWidth = 0.dp,
+        modifier = buttonModifier,
+        focusRequester = resumeFocus,
+        onClick = { model.resumeCasting() },
+    )
+    Spacer(modifier = Modifier.width(12.dp))
+    ActionButton(
+        text = strings.disconnectCasting,
+        textStyle = layout.actionStyle,
+        minWidth = 0.dp,
+        modifier = buttonModifier,
+        focusRequester = disconnectFocus,
+        onClick = { model.disconnectCasting() },
+    )
 }
 
 /// 画质档位（文档 2.3 的「低端盒子画质分档」）。
