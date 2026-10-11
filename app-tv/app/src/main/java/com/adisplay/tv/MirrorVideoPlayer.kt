@@ -54,6 +54,14 @@ class MirrorVideoPlayer(private val onNotice: (String) -> Unit) {
     private val hasFrame: Condition = lock.newCondition()
     private val pending = ArrayDeque<Frame>()
 
+    /**
+     * 累计丢掉多少帧（队列溢出）。只用来报警与排查，只在持锁时读写。
+     *
+     * 它一涨，就说明「画面卡一下然后突然加速」是**我们**这层丢帧造成的（只画最新的，
+     * 中间那段被丢掉，看起来就是跳了一下）；它不涨而画面仍然卡，那就是上游没给帧。
+     */
+    private var droppedFrames = 0L
+
     private var surface: Surface? = null
     private var worker: Thread? = null
     private var running = false
@@ -102,15 +110,29 @@ class MirrorVideoPlayer(private val onNotice: (String) -> Unit) {
 
     /** 收一帧（Annex B，核心交过来的原始形态）。由核心的工作线程调用。 */
     fun push(data: ByteArray, isH265: Int, width: Int, height: Int, ptsUs: Long) {
+        var dropped = false
         lock.withLock {
             if (!running || data.isEmpty()) {
                 return
             }
             while (pending.size >= MAX_QUEUED_FRAMES) {
                 pending.pollFirst()
+                droppedFrames += 1
+                dropped = true
             }
             pending.addLast(Frame(data, isH265 != 0, width, height, ptsUs))
             hasFrame.signalAll()
+        }
+
+        // 丢帧要能看见。以前它是完全静默的，于是「画面卡一下然后突然加速」这种事只能靠猜：
+        // 到底是**我们**解码跟不上（丢帧、只画最新的），还是**上游**压根没给帧（iOS 的镜像
+        // 管线顿了一下再补一波）。日志里有没有这一行，就是这两者的分界。
+        // 调用放在锁外 —— 持锁调用户代码是本项目一直避免的事。
+        if (dropped && (droppedFrames == 1L || droppedFrames % 50L == 0L)) {
+            onNotice(
+                "镜像渲染：队列满了，累计丢 " + droppedFrames +
+                    " 帧（解码跟不上到达速度 —— 画面会卡一下再往前跳）"
+            )
         }
     }
 
@@ -118,6 +140,7 @@ class MirrorVideoPlayer(private val onNotice: (String) -> Unit) {
         lock.withLock {
             running = false
             pending.clear()
+            droppedFrames = 0L
             surface = null
             hasFrame.signalAll()
         }
