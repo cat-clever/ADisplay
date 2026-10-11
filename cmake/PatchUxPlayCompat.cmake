@@ -122,6 +122,18 @@ endif()
 #
 # 做法：加一个短超时。一个包等不到就往前跳，把那一小段丢掉 —— 丢一小段远好过静几秒。
 #
+# 2026-10-11 第二轮（v1.0.8 之后）：超时是加上了，静音却**一点没短**（实测 2996 /
+# 3204 / 3182 / 3112 / 3458 / 3621 毫秒）。算一下才明白第一版错在哪：计时在**每跳过一个
+# 洞之后都清零**，于是「连续丢 N 个包」要等 N × 超时 —— 7～9 个包正好又是三秒，和没打
+# 补丁的 256 / 91.9 ≈ 2.78 秒几乎一样，白改。现在改成**一整串洞只在串首计一次时**。
+#
+# 同一份日志还给出两条事实，都写在这里免得下次又猜：
+#   * 那些静音的同一段时间里，**画面那条流一直没停**（视频计数每 5 秒稳定 +150 帧，
+#     = 30 fps 满速），所以不是「发送端停了」；停的只是伴音这一条。
+#   * 每个洞都等满了整段时间才跳 —— 说明我们发出去的重发请求**始终没有兑现**，
+#     等待纯属白等。所以这里再加一行日志把「跳了几个包、等了多久」记下来，
+#     这是唯一能分辨「重发没来」和「洞太大」的证据。
+#
 # 入参：-DBUFFER_FILE=<要修补的 raop_buffer.c 路径>
 #
 # 这里用 string(REPLACE)（**字面**替换）而不是正则：要匹配的块里有括号、星号、花括号，
@@ -155,31 +167,46 @@ string(REPLACE
 # ---- (2) 超时常量与取时间的辅助函数（放在结构体定义之前，保证使用点可见）----
 string(REPLACE
     "struct raop_buffer_s {"
-    "/* ADisplay 补丁：一个缺失的包最多等多久（毫秒）。见 raop_buffer_dequeue。 */\n#define ADISPLAY_HOLE_TIMEOUT_MS 400\n\nstatic int64_t adisplay_now_ms(void) {\n    struct timespec ts;\n    clock_gettime(CLOCK_REALTIME, &ts);\n    return (int64_t) ts.tv_sec * 1000 + ts.tv_nsec / 1000000;\n}\n\nstruct raop_buffer_s {"
+    "/* ADisplay 补丁：一串缺失的包最多等多久（毫秒）。见 raop_buffer_dequeue。\n   依据：重发请求就在同一条线程上、出队循环之后立刻发出，局域网上一个来回是几毫秒\n   到几十毫秒 —— 200 毫秒已经是十倍以上的余量。等更久不会让包回来（实测每次都等到\n   超时），只会把那一段静音拖长。 */\n#define ADISPLAY_HOLE_TIMEOUT_MS 200\n\nstatic int64_t adisplay_now_ms(void) {\n    struct timespec ts;\n    clock_gettime(CLOCK_REALTIME, &ts);\n    return (int64_t) ts.tv_sec * 1000 + ts.tv_nsec / 1000000;\n}\n\nstruct raop_buffer_s {"
     buffer_content "${buffer_content}")
 
 # ---- (3) 结构体里记「这个洞是什么时候发现的」----
 string(REPLACE
     "    raop_buffer_entry_t entries[RAOP_BUFFER_LENGTH];\n};"
-    "    raop_buffer_entry_t entries[RAOP_BUFFER_LENGTH];\n\n    /* ADisplay 补丁：当前这个洞是什么时候发现的（毫秒）。0 表示没有洞。\n       calloc 出来就是 0，不需要另外初始化。 */\n    int64_t adisplay_hole_since_ms;\n};"
+    "    raop_buffer_entry_t entries[RAOP_BUFFER_LENGTH];\n\n    /* ADisplay 补丁：当前这串洞是什么时候发现的（毫秒）。0 表示没有洞。\n       calloc 出来就是 0，不需要另外初始化。\n       注意它表示的是「**这一串**洞的起点」：跳过一个洞之后不清零，\n       否则连续丢 N 个包就要等 N 倍超时（第一版就是这么错的）。 */\n    int64_t adisplay_hole_since_ms;\n\n    /* ADisplay 补丁：这串洞里已经跳掉了几个包（与上面的计时同生共死）。 */\n    unsigned short adisplay_hole_skip;\n};"
     buffer_content "${buffer_content}")
 
-# ---- (4) 出队：等重发，但只等一小会儿 ----
+# ---- (4) 出队：等重发，但一整串洞只等一小会儿 ----
+#
+# 另外：缓冲被取空时也把计时清零（见下面的 (4b)）—— 空缓冲意味着没有洞了，
+# 留着计时会让下一次交付打出一条「等了很久」的假日志。
+
 string(REPLACE
     "    } else if (!entry->filled) {\n        /* Check how much we have space left in the buffer */\n        if (entry_count < RAOP_BUFFER_LENGTH) {\n            /* Return nothing and hope resend gets on time */\n            return NULL;\n        }\n        /* Risk of buffer overrun, return empty buffer */\n    }"
-    "    } else if (!entry->filled) {\n        /* ADisplay 补丁：等重发，但只等 ADISPLAY_HOLE_TIMEOUT_MS 这么久。\n           上游是「只要缓冲还有空位就一直等」，于是丢几个包要等到缓冲被填满\n           （约 2.8 秒）才往下走 —— 这就是那几次 2.8–4.7 秒静音的来源。 */\n        int64_t now_ms = adisplay_now_ms();\n        if (raop_buffer->adisplay_hole_since_ms == 0) {\n            raop_buffer->adisplay_hole_since_ms = now_ms;\n        }\n        /* Check how much we have space left in the buffer */\n        if (entry_count < RAOP_BUFFER_LENGTH &&\n            now_ms - raop_buffer->adisplay_hole_since_ms < ADISPLAY_HOLE_TIMEOUT_MS) {\n            /* Return nothing and hope resend gets on time（只等上面那点时间）*/\n            return NULL;\n        }\n        /* Risk of buffer overrun，或者等超时了：丢掉这一段往前跳 */\n    }"
+    "    } else if (!entry->filled) {\n        /* ADisplay 补丁：等重发，但一整串洞只等 ADISPLAY_HOLE_TIMEOUT_MS 这么久。\n           计时只在**串首**开始，跳过一个洞之后不清零 —— 否则连续丢 N 个包就是\n           N 倍超时，和上游那套「等到缓冲被填满（约 2.8 秒）」一样长（第一版实测\n           3 秒，就是这么来的）。 */\n        int64_t now_ms = adisplay_now_ms();\n        if (raop_buffer->adisplay_hole_since_ms == 0) {\n            raop_buffer->adisplay_hole_since_ms = now_ms;\n            raop_buffer->adisplay_hole_skip = 0;\n        }\n        /* Check how much we have space left in the buffer */\n        if (entry_count < RAOP_BUFFER_LENGTH &&\n            now_ms - raop_buffer->adisplay_hole_since_ms < ADISPLAY_HOLE_TIMEOUT_MS) {\n            /* Return nothing and hope resend gets on time（只等上面那点时间）*/\n            return NULL;\n        }\n        /* Risk of buffer overrun，或者等超时了：丢掉这一段往前跳 */\n        raop_buffer->adisplay_hole_skip++;\n    }"
     buffer_content "${buffer_content}")
 
-# ---- (5) 往前走了，洞的计时清零 ----
+# ---- (4b) 缓冲空了 = 没有洞了：计时与跳数清零 ----
+#
+# 不清的话，下一次交付会打出一条「等了很久」的假日志（等待时间从上一串洞算起）。
 string(REPLACE
-    "    /* Update buffer and validate entry */\n    raop_buffer->first_seqnum += 1;"
-    "    /* ADisplay 补丁：往前走了（无论是取到还是超时跳过），洞的计时清零。 */\n    raop_buffer->adisplay_hole_since_ms = 0;\n\n    /* Update buffer and validate entry */\n    raop_buffer->first_seqnum += 1;"
+    "    /* Cannot dequeue from empty buffer */\n    if (raop_buffer->is_empty || entry_count <= 0) {\n        return NULL;\n    }"
+    "    /* ADisplay 补丁：缓冲空了就是没有洞了，计时与跳数清零。 */\n    if (raop_buffer->is_empty || entry_count <= 0) {\n        raop_buffer->adisplay_hole_since_ms = 0;\n        raop_buffer->adisplay_hole_skip = 0;\n        return NULL;\n    }"
+    buffer_content "${buffer_content}")
+
+# ---- (5) 取到真包 = 这串洞走完了：打一行日志，再清计时 ----
+#
+# 只能挂在这里，不能挂在「往前走了」那一步：跳过洞时也是往前走，而那时候其实
+# 还在同一串洞里。取到 `entry->filled` 为真的包，才说明这串洞真的结束了。
+string(REPLACE
+    "    entry->filled = 0;\n\n    /* Return entry payload buffer */"
+    "    entry->filled = 0;\n\n    /* ADisplay 补丁：这串洞走完了（到这里一定是取到了真包）。\n       跳掉几个、在洞上等了多久 —— 只打这一行，不在每次跳过时打。 */\n    if (raop_buffer->adisplay_hole_since_ms != 0) {\n        logger_log(raop_buffer->logger, LOGGER_INFO,\n                   \"ADisplay 伴音：跳过 %u 个缺失的包（在洞上等了 %d 毫秒）\",\n                   (unsigned) raop_buffer->adisplay_hole_skip,\n                   (int) (adisplay_now_ms() - raop_buffer->adisplay_hole_since_ms));\n        raop_buffer->adisplay_hole_since_ms = 0;\n        raop_buffer->adisplay_hole_skip = 0;\n    }\n\n    /* Return entry payload buffer */"
     buffer_content "${buffer_content}")
 
 # ---- (6) 整块 flush 时也清零 ----
 string(REPLACE
     "        raop_buffer->first_seqnum = next_seq;"
-    "        /* ADisplay 补丁：整块丢掉了，洞的计时一并清零。 */\n        raop_buffer->adisplay_hole_since_ms = 0;\n        raop_buffer->first_seqnum = next_seq;"
+    "        /* ADisplay 补丁：整块丢掉了，洞的计时与跳数一并清零。 */\n        raop_buffer->adisplay_hole_since_ms = 0;\n        raop_buffer->adisplay_hole_skip = 0;\n        raop_buffer->first_seqnum = next_seq;"
     buffer_content "${buffer_content}")
 
 # ---- 校验：标记在，且上游那句原注释不在了 ----

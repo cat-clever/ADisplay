@@ -21,6 +21,7 @@ import android.media.ImageReader
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
+import android.os.SystemClock
 import android.view.Surface
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -97,6 +98,23 @@ class MirrorVideoPlayer(private val onNotice: (String) -> Unit) {
     private var codecWidth = 0
     private var codecHeight = 0
 
+    /**
+     * 解码器建过几次。
+     *
+     * 第 2 次起就意味着一件事：**画面要等发送端下一个关键帧才会回来**，而 iOS 在
+     * 镜像里极少插关键帧（2026-10-11 实测一整场 1657 帧只有 1 个）。所以「一共建了
+     * 几次、为什么建」必须能看见 —— 它就是「导出日志之后画面一直是黑的」的第一现场。
+     */
+    private var codecBuilds = 0
+
+    /** 停在占位面上的起始时刻（0 = 没停）与期间没有显示的帧数。只在 worker 线程读写。 */
+    private var parkedSinceMs = 0L
+    private var parkedFrames = 0L
+    private var parkedNoticeMs = 0L
+
+    /** 换过面、但还没往新面上出过画面（见 drain）。只在 worker 线程读写。 */
+    private var awaitingFirstRender = false
+
     /** 渲染面就绪。可以重复调用（界面重建时会再来一次）。 */
     fun attach(surface: Surface) {
         lock.withLock {
@@ -110,6 +128,9 @@ class MirrorVideoPlayer(private val onNotice: (String) -> Unit) {
             }
             hasFrame.signalAll()
         }
+        // 留痕：一个会话里应该只出现一两次（SurfaceView 建面）。出现得比这频繁，
+        // 说明界面在反复重建，那本身就是问题。
+        onNotice("镜像渲染：渲染面已就绪")
     }
 
     /** 渲染面没了（界面切走、Activity 暂停）。解码器一并收掉，下次重建。 */
@@ -128,6 +149,7 @@ class MirrorVideoPlayer(private val onNotice: (String) -> Unit) {
      */
     fun detach() {
         lock.withLock { surface = null }
+        onNotice("镜像渲染：渲染面被收走（切到后台或系统弹窗），解码器将停到占位面上")
     }
 
     /** 会话结束、重新开始时清掉上一路的尺寸，免得沿用旧比例。 */
@@ -214,8 +236,36 @@ class MirrorVideoPlayer(private val onNotice: (String) -> Unit) {
                     // 既不能让它去渲染那个已经销毁的 surface，也不能把解码器释放掉 ——
                     // 后者会让画面一直冻着等下一个 I 帧（见 detach 的注释）。
                     parkCodecOnPlaceholder()
+                    val parkedNow = SystemClock.uptimeMillis()
+                    if (parkedSinceMs == 0L) {
+                        parkedSinceMs = parkedNow
+                        parkedNoticeMs = parkedNow
+                        parkedFrames = 0L
+                        onNotice("镜像渲染：渲染面没了，解码器改输出到占位面（不重建）")
+                    } else if (parkedNow - parkedNoticeMs >= 5000L) {
+                        // 限流：停在占位面上期间每 5 秒一行，能看出「被系统弹窗挡住了多久」。
+                        parkedNoticeMs = parkedNow
+                        onNotice(
+                            "镜像渲染：还在占位面上（已 " +
+                                ((parkedNow - parkedSinceMs) / 1000L) + " 秒）"
+                        )
+                    }
+                    if (frame != null) {
+                        parkedFrames += 1
+                    }
                     drain(info)
                     continue
+                }
+
+                if (parkedSinceMs != 0L) {
+                    val parkedSeconds = (SystemClock.uptimeMillis() - parkedSinceMs) / 1000L
+                    val parkedFramesSeen = parkedFrames
+                    parkedSinceMs = 0L
+                    parkedFrames = 0L
+                    onNotice(
+                        "镜像渲染：渲染面回来了（在占位面上待了 " + parkedSeconds +
+                            " 秒，这期间 " + parkedFramesSeen + " 帧没有显示）"
+                    )
                 }
                 if (frame == null) {
                     // 没有新帧也要把解码器的输出排空，否则它的缓冲会被占满。
@@ -242,9 +292,20 @@ class MirrorVideoPlayer(private val onNotice: (String) -> Unit) {
             codecHeight == frame.height
         ) {
             // 解码器还能用，只需确认它绑的是当前这块面（暂停过、切过页面、换过面）。
-            rebindCodecSurface(target)
+            rebindCodecSurface(target, "回到渲染面")
             return
         }
+        // 重建是有代价的（见 codecBuilds 的注释），所以「为什么又建了一个」要写清楚。
+        val rebuildReason =
+            if (codec == null) {
+                "上一个解码器已经不存在了"
+            } else if (codecH265 != frame.isH265) {
+                "编码变了（" + (if (codecH265) "H.265" else "H.264") + " → " +
+                    (if (frame.isH265) "H.265" else "H.264") + "）"
+            } else {
+                "尺寸变了（" + codecWidth + "x" + codecHeight + " → " +
+                    frame.width + "x" + frame.height + "）"
+            }
         releaseCodec()
 
         val mime = if (frame.isH265) MediaFormat.MIMETYPE_VIDEO_HEVC else MediaFormat.MIMETYPE_VIDEO_AVC
@@ -286,8 +347,12 @@ class MirrorVideoPlayer(private val onNotice: (String) -> Unit) {
         codecH265 = frame.isH265
         codecWidth = frame.width
         codecHeight = frame.height
-        onNotice("镜像渲染：解码器已就绪（" + (if (frame.isH265) "H.265" else "H.264") +
-            " " + width + "x" + height + "）")
+        codecBuilds += 1
+        onNotice(
+            "镜像渲染：解码器已就绪（" + (if (frame.isH265) "H.265" else "H.264") +
+                " " + width + "x" + height + "，第 " + codecBuilds + " 次建立：" + rebuildReason + "）" +
+                (if (codecBuilds > 1) "—— 重建后要等发送端的关键帧才有画面" else "")
+        )
     }
 
     private fun feed(frame: Frame, info: MediaCodec.BufferInfo) {
@@ -326,6 +391,13 @@ class MirrorVideoPlayer(private val onNotice: (String) -> Unit) {
             }
             // true = 直接送到 Surface 上显示。
             current.releaseOutputBuffer(index, true)
+            if (awaitingFirstRender) {
+                // 换面之后往新面出的第一帧。这一行能把「黑屏」一刀切开：有它，
+                // 说明解码器没被重建、画面确实回来了（那还黑就是别的层的问题）；
+                // 没有它，就是重建了在等关键帧。
+                awaitingFirstRender = false
+                onNotice("镜像渲染：换面后已重新出画面（解码器没有被重建）")
+            }
         }
     }
 
@@ -333,16 +405,33 @@ class MirrorVideoPlayer(private val onNotice: (String) -> Unit) {
     ///
     /// **只在 worker 线程调用** —— 解码器的所有操作都必须留在同一个线程上，
     /// `setOutputSurface` 也一样（它和取缓冲并发会在真机上抛 IllegalStateException）。
-    private fun rebindCodecSurface(target: Surface) {
+    private fun rebindCodecSurface(target: Surface, reason: String) {
         val current = codec
         if (current == null || codecSurface === target) {
             return
         }
+        // 成功与失败都要留痕：这一路以前一声不响，于是「点导出日志之后画面一直是黑的」
+        // 只能靠猜。它其实只有两种情况 —— 换面成功（画面只是被文件选择器挡了一会儿），
+        // 或者换面失败、退回重建（那就要等发送端插关键帧，见 codecBuilds）。
+        var failure: String? = null
         try {
             current.setOutputSurface(target)
             codecSurface = target
+            // 只有切回真面才等「出画」。切到占位面时不算 —— 那时排空的可能是停车前
+            // 就在解码器里的旧输出，报一条「画面回来了」会把人带偏。
+            if (target !== placeholder) {
+                awaitingFirstRender = true
+            }
         } catch (error: Exception) {
-            // 换不了就退回重建（老行为）：画面要等下一个 I 帧，但至少不会画到错的面上去。
+            failure = error.message ?: error.toString()
+        }
+        if (failure == null) {
+            onNotice("镜像渲染：解码器换面成功（" + reason + "）")
+        } else {
+            onNotice(
+                "镜像渲染：解码器换面失败（" + reason + "）：" + failure +
+                    " —— 只能重建，而重建要等发送端的关键帧"
+            )
             releaseCodec()
         }
     }
@@ -356,13 +445,14 @@ class MirrorVideoPlayer(private val onNotice: (String) -> Unit) {
         val parked = placeholderSurface()
         if (parked == null) {
             // 拿不到占位面：退回释放解码器 —— 总比让它渲染到已销毁的面上强。
+            onNotice("镜像渲染：占位面建不起来，只能释放解码器（画面要等发送端的关键帧）")
             releaseCodec()
             return
         }
-        rebindCodecSurface(parked)
+        rebindCodecSurface(parked, "切到占位面")
     }
 
-    /// 占位输出面：一个很小的 ImageReader 面，只用来"接住"解码器的输出。
+    /// 占位输出面：一块 ImageReader 面，只用来"接住"解码器的输出（尺寸见下面的注释）。
     ///
     /// 用 `ImageFormat.PRIVATE`（不透明）—— 视频解码器的输出正好是这种。拿不到就返回 null，
     /// 调用方退回老行为。回调里必须把图像取走并关掉，否则生产端（解码器）会堵住。
@@ -371,8 +461,20 @@ class MirrorVideoPlayer(private val onNotice: (String) -> Unit) {
         if (existing != null) {
             return existing
         }
+        // 尺寸要按解码器配置的来，不能图省事写死一个小尺寸：解码器的输出缓冲得装得下
+        // 一帧画面，给它一块比画面小得多的面，真机上就是 setOutputSurface 直接抛异常
+        // （或解码器报错），而换面一失败就退化成本文件正在极力避免的「拆掉重建」。
+        val placeholderWidth = if (codecWidth > 0) codecWidth else 1280
+        val placeholderHeight = if (codecHeight > 0) codecHeight else 720
         try {
-            val reader = ImageReader.newInstance(320, 180, ImageFormat.PRIVATE, 2)
+            // 3 块而不是 2 块：取走的回调走的是主线程，它偶尔忙一下时留点余量，
+            // 免得生产端（解码器）堵住。
+            val reader = ImageReader.newInstance(
+                placeholderWidth,
+                placeholderHeight,
+                ImageFormat.PRIVATE,
+                3
+            )
             reader.setOnImageAvailableListener({ source ->
                 try {
                     val image = source.acquireLatestImage()
@@ -408,21 +510,27 @@ class MirrorVideoPlayer(private val onNotice: (String) -> Unit) {
 
     private fun releaseCodec() {
         codecSurface = null
+        awaitingFirstRender = false
+        parkedSinceMs = 0L
+        // 顺序要紧：解码器可能正绑在占位面上，先放解码器再关掉那块面 —— 反过来就是
+        // 让解码器去渲染一块已经被关掉的面。
+        val current = codec
+        codec = null
+        if (current != null) {
+            try {
+                current.stop()
+            } catch (ignored: Exception) {
+                // stop 抛异常说明它已经不在跑，直接释放即可。
+            }
+            try {
+                current.release()
+            } catch (ignored: Exception) {
+                // 释放失败也没有补救手段。
+            }
+        }
         placeholderReader?.close()
         placeholderReader = null
         placeholder = null
-        val current = codec ?: return
-        codec = null
-        try {
-            current.stop()
-        } catch (ignored: Exception) {
-            // stop 抛异常说明它已经不在跑，直接释放即可。
-        }
-        try {
-            current.release()
-        } catch (ignored: Exception) {
-            // 释放失败也没有补救手段。
-        }
     }
 
     // ---------------------------------------------------------------------
