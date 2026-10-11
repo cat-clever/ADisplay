@@ -16,6 +16,7 @@ package com.adisplay.tv
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioTrack
+import android.os.Process
 import android.media.MediaCodec
 import android.media.MediaFormat
 import java.nio.ByteBuffer
@@ -46,6 +47,14 @@ class MirrorAudioPlayer(private val onNotice: (String) -> Unit) {
     private val hasFrame: Condition = lock.newCondition()
     private val pending = ArrayDeque<Frame>()
 
+    /**
+     * 累计丢掉多少伴音帧（队列溢出）。
+     *
+     * 只用来报警与排查：它一涨就说明伴音解码跟不上到达速度 —— 那正是「伴音偶尔断一下」
+     * 的直接原因。只在持锁时读写。
+     */
+    private var droppedFrames = 0L
+
     private var running = false
 
     /**
@@ -64,6 +73,7 @@ class MirrorAudioPlayer(private val onNotice: (String) -> Unit) {
 
     /** 收一帧压缩的 AAC-ELD。由核心的工作线程调用。 */
     fun push(data: ByteArray, sampleRate: Int, channels: Int) {
+        var dropped = false
         lock.withLock {
             // 挂起期间连帧都不收：既省掉解码，也彻底堵死「自动复活」这条路。
             if (data.isEmpty() || suspended) {
@@ -78,9 +88,20 @@ class MirrorAudioPlayer(private val onNotice: (String) -> Unit) {
             }
             while (pending.size >= MAX_QUEUED_FRAMES) {
                 pending.pollFirst()
+                droppedFrames += 1
+                dropped = true
             }
             pending.addLast(Frame(data, sampleRate, channels))
             hasFrame.signalAll()
+        }
+
+        // 丢帧要能看见：不然「伴音偶尔断一下」这件事永远只能靠猜（这条就是这么过来的）。
+        // 调用放在锁外面 —— 持锁调用户代码是本项目一直避免的事。
+        if (dropped && (droppedFrames == 1L || droppedFrames % 50L == 0L)) {
+            onNotice(
+                "镜像伴音：队列满了，累计丢 " + droppedFrames +
+                    " 帧（伴音解码跟不上，被别的线程抢了 CPU —— 听到的就是断一下）"
+            )
         }
     }
 
@@ -95,6 +116,7 @@ class MirrorAudioPlayer(private val onNotice: (String) -> Unit) {
             // release 的语义是「停止且不许自己重启」，要重新出声必须显式 resume。
             suspended = true
             pending.clear()
+            droppedFrames = 0L
             hasFrame.signalAll()
         }
         val thread = worker
@@ -114,6 +136,15 @@ class MirrorAudioPlayer(private val onNotice: (String) -> Unit) {
     // ---------------------------------------------------------------------
 
     private fun loop() {
+        // 伴音线程提到「紧急音频」优先级。
+        //
+        // 为什么必须提：这条线程同时做解码与写入 AudioTrack，而视频解码线程就在旁边。
+        // B 站换视频那一刻，盒子的 CPU 会为新的视频内容忙一阵；伴音线程被抢走时间片时，
+        // 上面那个 8 帧的队列就会溢出、丢帧 —— 用户听到的就是「短暂没声音」。音频断一下
+        // 比掉一帧画面显眼得多，而画面那条本来就是「宁可按最新走、丢了也不补」，
+        // 所以把优先级让给伴音是划算的。
+        Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
+
         val info = MediaCodec.BufferInfo()
         try {
             while (true) {
