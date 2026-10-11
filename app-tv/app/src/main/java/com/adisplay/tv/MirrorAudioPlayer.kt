@@ -55,6 +55,17 @@ class MirrorAudioPlayer(private val onNotice: (String) -> Unit) {
      */
     private var droppedFrames = 0L
 
+    /**
+     * 上一帧**到达**的时刻（纳秒），用来量「上游停了多久没给帧」。
+     *
+     * 这是把「伴音断一下到底怪谁」变成事实的那把尺子：我们自己的队列只有 8 帧
+     * （约 160 毫秒），造不出 2–3 秒的空档；那种量级只可能来自上游。只在持锁时读写。
+     */
+    private var lastArrivalNanos = 0L
+
+    /** 上一次报「上游停帧」的时刻，用来限流（详见 push）。 */
+    private var lastGapNoticeNanos = 0L
+
     private var running = false
 
     /**
@@ -74,6 +85,8 @@ class MirrorAudioPlayer(private val onNotice: (String) -> Unit) {
     /** 收一帧压缩的 AAC-ELD。由核心的工作线程调用。 */
     fun push(data: ByteArray, sampleRate: Int, channels: Int) {
         var dropped = false
+        var arrivalGapMs = 0L
+        var gapNotice = false
         lock.withLock {
             // 挂起期间连帧都不收：既省掉解码，也彻底堵死「自动复活」这条路。
             if (data.isEmpty() || suspended) {
@@ -86,6 +99,20 @@ class MirrorAudioPlayer(private val onNotice: (String) -> Unit) {
                 thread.start()
                 worker = thread
             }
+            val now = System.nanoTime()
+            if (lastArrivalNanos != 0L) {
+                arrivalGapMs = (now - lastArrivalNanos) / 1_000_000L
+                // 只关心「顿了一下」：400 毫秒以下算正常抖动；5 秒以上多半是用户按了暂停
+                // （那时候上游本来就不该给帧），报出来只会刷屏。限流：最快 1 秒一条。
+                if (arrivalGapMs in 400..5000 &&
+                    now - lastGapNoticeNanos > 1_000_000_000L
+                ) {
+                    gapNotice = true
+                    lastGapNoticeNanos = now
+                }
+            }
+            lastArrivalNanos = now
+
             while (pending.size >= MAX_QUEUED_FRAMES) {
                 pending.pollFirst()
                 droppedFrames += 1
@@ -97,6 +124,16 @@ class MirrorAudioPlayer(private val onNotice: (String) -> Unit) {
 
         // 丢帧要能看见：不然「伴音偶尔断一下」这件事永远只能靠猜（这条就是这么过来的）。
         // 调用放在锁外面 —— 持锁调用户代码是本项目一直避免的事。
+        // 上游停帧：这一行是「声音断一下到底怪谁」的直接证据 —— 有它，就是上游那段
+        // 时间压根没给帧（拖动进度条、换视频时 App 自己重新缓冲都是这样），我们无能为力；
+        // 没有它而伴音照样断，才轮到我们自己（那时看上面那条丢帧日志）。
+        if (gapNotice) {
+            onNotice(
+                "镜像伴音：上游停了 " + arrivalGapMs +
+                    " 毫秒没给帧 —— 这段静音是发送端造成的（画面同时也停）"
+            )
+        }
+
         if (dropped && (droppedFrames == 1L || droppedFrames % 50L == 0L)) {
             onNotice(
                 "镜像伴音：队列满了，累计丢 " + droppedFrames +
@@ -107,7 +144,13 @@ class MirrorAudioPlayer(private val onNotice: (String) -> Unit) {
 
     /// 解除挂起：下一次收到帧时重新把解码与播放建起来。用于「继续观看」。
     fun resume() {
-        lock.withLock { suspended = false }
+        lock.withLock {
+            suspended = false
+            // 挂起期间本来就不收帧，恢复后的第一帧不能按"停了很久"来算 ——
+            // 那样会报一条假的「上游停帧」。清零之后从这一帧重新起算。
+            lastArrivalNanos = 0L
+            lastGapNoticeNanos = 0L
+        }
     }
 
     fun release() {
@@ -117,6 +160,8 @@ class MirrorAudioPlayer(private val onNotice: (String) -> Unit) {
             suspended = true
             pending.clear()
             droppedFrames = 0L
+            lastArrivalNanos = 0L
+            lastGapNoticeNanos = 0L
             hasFrame.signalAll()
         }
         val thread = worker
