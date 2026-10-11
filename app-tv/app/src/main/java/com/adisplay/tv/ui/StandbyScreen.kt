@@ -70,21 +70,40 @@ fun StandbyScreen(model: EngineModel) {
         // 手机再推一条（castEpisode +1）就重新进播放页。见 EngineModel。
         val dismissed = model.isCastingDismissed()
         val media = model.playingMedia
-        if (model.mirrorSessionId != null && !dismissed) {
+        val mirrorAlive = model.mirrorSessionId != null
+        val showMirror = mirrorAlive && !dismissed
+        val showPlayback = !mirrorAlive && media != null && !dismissed
+
+        // 镜像画面：**只要会话还在就一直留在树上**，哪怕用户已经点了「结束投屏」。
+        //
+        // 不能让它随页面离开组合：一离开，SurfaceView 的 surface 就被销毁，
+        // MirrorVideoPlayer.detach() 跟着把解码器释放掉；「继续观看」回来是**新建
+        // 解码器**，必须等发送端下一个 I 帧才出画面 —— 手机画面静止时 iOS 可能很久
+        // 不插 I 帧，用户看到的就是「一直黑屏但有声音」（2026-10-11 报的）。
+        // active=false 时它只是缩成 1dp 挪到角落：surface 与解码器都还在，
+        // 回来那一刻画面就是现成的。（Windows 一直是这个行为 —— 它的位图一直在更新，
+        // 所以那边恢复是即时的。）
+        if (mirrorAlive) {
             MirrorScreen(
                 model = model,
                 onExit = { model.dismissCasting() },
                 onShowLog = { logOpen = true },
+                active = showMirror,
             )
-        } else if (media != null && !dismissed) {
+        }
+        // 这里再判一次 media 而不是用 !!：判过之后编译器就能智能转换，
+        // 下面直接用 playbackMedia.sessionId 即可，不必用一个断言把空值风险藏起来。
+        val playbackMedia = media
+        if (!mirrorAlive && !dismissed && playbackMedia != null) {
             PlaybackScreen(
                 model = model,
-                sessionId = media.sessionId,
-                url = media.url,
+                sessionId = playbackMedia.sessionId,
+                url = playbackMedia.url,
                 onExit = { model.dismissCasting() },
                 onShowLog = { logOpen = true },
             )
-        } else {
+        }
+        if (!showMirror && !showPlayback) {
             StandbyContent(
                 model = model,
                 onShowLog = { logOpen = true },

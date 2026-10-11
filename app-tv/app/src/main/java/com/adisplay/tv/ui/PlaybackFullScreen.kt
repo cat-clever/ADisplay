@@ -102,6 +102,12 @@ class PlaybackTransport(
  * @param transport 传输控制（暂停、快进、快退）。遥控器那条路必须给，否则遥控器
  *   用户碰不到播放器的控制条；触屏那条路给 null 就行（播放器自己带）。
  * @param content 画面本身：镜像是一条 Surface，DLNA 是一个 PlayerView。
+ * @param active 这一页是不是"正在用"。false 表示**还留在树上但不占屏**（镜像那条在
+ *   「结束投屏」之后的状态）：不铺黑底、不接按键、不劫持返回键、不进沉浸模式 ——
+ *   只是它的 content 还在被组合着，好让那条 Surface / 播放器活着。
+ *   为什么需要它：一离开组合，SurfaceView 的 surface 就被销毁，镜像的解码器跟着释放，
+ *   再回来是新建解码器，必须等发送端下一个 I 帧（手机画面静止时 iOS 可能很久不插），
+ *   用户看到的是「一直黑屏但有声音」。
  */
 @Composable
 fun PlaybackFullScreen(
@@ -111,22 +117,27 @@ fun PlaybackFullScreen(
     captureTouches: Boolean = true,
     playerControlsVisible: Boolean? = null,
     transport: PlaybackTransport? = null,
+    active: Boolean = true,
     content: @Composable BoxScope.() -> Unit,
 ) {
     val view = LocalView.current
     val layout = resolveStandbyLayout(LocalConfiguration.current.screenWidthDp)
 
-    DisposableEffect(view) {
+    // 用 active 当 key，而不是把这个 effect 包在 if 里：效果本身一直挂着，
+    // 只是"不 active 时不进沉浸模式"。这样组合结构不变，缩进也不会乱。
+    DisposableEffect(view, active) {
         val window = view.context.findActivity()?.window
         val controller = if (window != null) {
             WindowCompat.getInsetsController(window, view)
         } else {
             null
         }
-        // 划一下可以临时把系统栏叫回来。电视上用不着，手机上很自然。
-        controller?.systemBarsBehavior =
-            WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-        controller?.hide(WindowInsetsCompat.Type.systemBars())
+        if (active) {
+            // 划一下可以临时把系统栏叫回来。电视上用不着，手机上很自然。
+            controller?.systemBarsBehavior =
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            controller?.hide(WindowInsetsCompat.Type.systemBars())
+        }
 
         onDispose {
             controller?.show(WindowInsetsCompat.Type.systemBars())
@@ -134,7 +145,9 @@ fun PlaybackFullScreen(
     }
 
     // 遥控器「返回」键走 Activity 的返回分派器，不受焦点影响。
-    BackHandler { onExit() }
+    // 不 active 时不接：那时用户看的是待机页，按返回该是「退出/回上一级」，
+    // 而不是「结束投屏」。
+    BackHandler(enabled = active) { onExit() }
 
     // 用「请求计数」而不是一个 Boolean：控件已经显示时再点一下，也要把倒计时
     // 重新计起（用户正在看控件，不该正好在这一刻收走）。Boolean 从 true 再赋
@@ -176,7 +189,12 @@ fun PlaybackFullScreen(
         }
     }
 
-    Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            // 不 active 时不能铺黑底：这一页之下就是待机页，黑底会把它整个盖掉。
+            .background(if (active) Color.Black else Color.Transparent)
+    ) {
         content()
 
         // 触摸层。只在画面自己不处理触摸时铺（镜像那条）。
@@ -189,12 +207,18 @@ fun PlaybackFullScreen(
                     .clickable(
                         interactionSource = remember { MutableInteractionSource() },
                         indication = null,
+                        // 不 active 时不消费触摸：这一层之下可能就是待机页，
+                        // 把它吃掉会让那几个按钮点不动。
+                        enabled = active,
                         onClick = { showRequest++ },
                     )
             )
         }
 
         // 接键层：只接遥控器的按键，**一点触摸面积都不占**。
+        //
+        // 不 active 时这一层既不可聚焦、按键也一律放行 —— 它是个焦点节点，
+        // 不然会把遥控器的方向键从待机页那几个按钮上抢走（那时用户看的不是这一页）。
         //
         // 这一层以前是铺满屏幕的，于是把点击从播放器手里抢走了 —— DLNA 那路的
         // 进度条与快进快退就此永远出不来。焦点不需要面积：1dp 的节点一样能被
@@ -209,8 +233,12 @@ fun PlaybackFullScreen(
                 // 它是一个焦点节点，又正好杵在两个按钮中间 —— 不摘掉的话，
                 // 遥控器按方向键很可能选中它（然后按确定只会再「显示一次控件」），
                 // 用户就换不到旁边那两个按钮上。
-                .focusable(enabled = !controlsVisible)
+                .focusable(enabled = active && !controlsVisible)
                 .onKeyEvent { event ->
+                    // 不 active 时所有按键都放过去（交给 Activity 与待机页）。
+                    if (!active) {
+                        return@onKeyEvent false
+                    }
                     // 只在抬起时响应，否则按下与抬起各触发一次。
                     if (event.type != KeyEventType.KeyUp) {
                         return@onKeyEvent false
@@ -231,7 +259,7 @@ fun PlaybackFullScreen(
 
         // 顶部状态条。悬浮，不占画面高度。
         AnimatedVisibility(
-            visible = controlsVisible,
+            visible = active && controlsVisible,
             enter = fadeIn(),
             exit = fadeOut(),
             modifier = Modifier.align(Alignment.TopCenter),
@@ -264,7 +292,7 @@ fun PlaybackFullScreen(
         // 不排底部：播放器自己的进度条与快进快退就在屏幕最下面，两条挤在一起
         // 既看不清也点不准。竖排还有个好处 —— 拇指 / 遥控器上下走一遍就能全过。
         AnimatedVisibility(
-            visible = controlsVisible,
+            visible = active && controlsVisible,
             enter = fadeIn(),
             exit = fadeOut(),
             modifier = Modifier.align(Alignment.CenterEnd),

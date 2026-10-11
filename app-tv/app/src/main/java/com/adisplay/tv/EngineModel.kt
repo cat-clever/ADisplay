@@ -225,6 +225,14 @@ class EngineModel(context: Context) {
 
         private const val TAG = "EngineModel"
 
+        /**
+         * 会话关闭后，隔多久真正收掉伴音（毫秒）。
+         *
+         * 见 scheduleMirrorAudioRelease：iPhone 切换视频会让镜像流重新协商，
+         * 先关旧会话、紧接着开新会话；这个窗口就是用来跨过那一下的。
+         */
+        private const val AUDIO_RELEASE_DELAY_MS = 1500L
+
         /** 「上次接收服务是开着的」在 SharedPreferences 里的键（见 servicePrefs）。 */
         private const val KEY_SERVICE_WANTED = "service_wanted"
 
@@ -568,7 +576,36 @@ class EngineModel(context: Context) {
         // 「会话真的没了」的权威。
     }
 
+    /**
+     * 会话关闭后**延迟**收伴音。
+     *
+     * 为什么不能立刻收：iPhone 切换视频（竖屏 ↔ 横屏）会让镜像流**重新协商** ——
+     * 那一刻核心先报「上一个镜像会话结束」，紧接着报「新的镜像会话开始」。立刻收掉的话，
+     * 伴音要等新会话的音频帧到齐才重新出声，用户听到的就是「切换视频后短暂没声音」
+     * （2026-10-11 报的）。给一个短窗口：窗口内来了新会话就撤销这次收；真正结束投屏的
+     * 场合仍然会收，只是晚这一会儿。
+     */
+    private fun scheduleMirrorAudioRelease() {
+        cancelMirrorAudioRelease()
+        val task = Runnable {
+            audioReleaseTask = null
+            mirrorAudio.release()
+        }
+        audioReleaseTask = task
+        mainHandler.postDelayed(task, AUDIO_RELEASE_DELAY_MS)
+    }
+
+    private fun cancelMirrorAudioRelease() {
+        val task = audioReleaseTask
+        if (task != null) {
+            mainHandler.removeCallbacks(task)
+            audioReleaseTask = null
+        }
+    }
+
     fun dismissCasting() {
+        // 用户明确要停：撤销还没到点的延迟收，然后立刻收（要的是马上静音）。
+        cancelMirrorAudioRelease()
         dismissedEpisode = castEpisode
         // 光挡住新帧不够：队列里已经排着的那段还会继续响完。要立刻静音就得连
         // 播放线程与解码器一起收掉（release 同时置上挂起标志，之后不会自己重启）。
@@ -585,6 +622,13 @@ class EngineModel(context: Context) {
         get() = AdDisplayNative.isAvailable
 
     private val mainHandler = Handler(Looper.getMainLooper())
+
+    /**
+     * 「延迟收伴音」那个待执行任务。只在主线程读写（调用方都走 post）。
+     *
+     * 见 scheduleMirrorAudioRelease —— 存在的意义是跨过镜像流的重新协商。
+     */
+    private var audioReleaseTask: Runnable? = null
     private val timeFormat = SimpleDateFormat("HH:mm:ss", Locale.US)
 
     /** 引擎句柄。0 表示还没创建（或核心库不可用）。 */
@@ -969,6 +1013,9 @@ class EngineModel(context: Context) {
             }
             post {
                 castEpisode += 1
+                // 上一轮会话如果是被"重新协商"关掉的（iPhone 切视频），这里就是它的
+                // 新会话：撤销那次延迟收，伴音一路不用断。
+                cancelMirrorAudioRelease()
                 // 新一次投屏：解除上一轮「结束投屏」留下的伴音挂起，
                 // 不然这一轮会一直没声音。
                 mirrorAudio.resume()
@@ -1022,7 +1069,10 @@ class EngineModel(context: Context) {
                 pendingIntents.remove(sessionId)
                 if (mirrorSessionId == sessionId) {
                     mirrorSessionId = null
-                    mirrorAudio.release()
+                    // 延迟收，不立刻收 —— 见 scheduleMirrorAudioRelease：
+                    // iPhone 切视频时这里是「旧会话关闭、新会话马上开」，
+                    // 立刻收会让伴音断一下。
+                    scheduleMirrorAudioRelease()
                 }
             }
         }
