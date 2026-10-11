@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>ADisplay</string>
+    <key>CFBundleDisplayName</key>
+    <string>ADisplay 投屏接收端</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.adisplay.receiver</string>
+    <key>CFBundleExecutable</key>
+    <string>ADisplay</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0.0</string>
+    <!-- 构建号。macOS 用它判断是不是新版本，必须随发版递增 ——
+         和 Android 的 versionCode 是一回事：不变的话系统不认为有更新。
+         规则同 Android：主*10000 + 次*100 + 修订。 -->
+    <key>CFBundleVersion</key>
+    <string>10000</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>12.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+
+    <!--
+        DLNA 给的是明文 http:// 地址 —— 局域网媒体服务器、B 站这类 CDN 都是，
+        而 App Transport Security 默认只放行 https。
+
+        不开这个开关，AVPlayer 会直接拒绝加载，而且不会给出任何错误：
+        手机那边显示正在投屏、接收端日志里也有「开始拉流」，唯独屏幕上
+        永远没有画面，手机会一直轮询 GetPositionInfo。投屏接收端天然要
+        拉明文流，这个开关是必需的。
+    -->
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsArbitraryLoads</key>
+        <true/>
+    </dict>
+
+    <!--
+        文档 4.5：较新的 macOS 访问本地网络需要用户授权，
+        Info.plist 中需声明 NSLocalNetworkUsageDescription 与 NSBonjourServices。
+        少了这两项，mDNS 广播会被系统静默拦掉 —— 表现是手机根本搜不到设备，
+        而且日志里看不出任何异常，非常难查。
+    -->
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>ADisplay 需要访问本地网络，才能被手机发现并接收投屏画面。</string>
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_airplay._tcp</string>
+        <string>_raop._tcp</string>
+        <string>_castpc._tcp</string>
+    </array>
+</dict>
+</plist>

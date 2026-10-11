@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Android 9（API 28）起默认禁止明文 HTTP。而我们的媒体地址就是明文 HTTP ——
+    接收端在局域网里提供的就是一个普通的 HTTP 服务（DLNA 与自研协议都是），
+    那条链路上没有 TLS 可言。
+
+    不加这一条的症状极具误导性：手机端显示「正在投屏」，接收端也起了投屏页，
+    但屏幕全黑，而且**连解码都没有开始** —— ExoPlayer 在建立连接之前就被系统
+    拦下了。logcat 里那一行是：
+
+        E ExoPlayerImplInternal: at HttpHandler$CleartextURLFilter.checkURLPermitted
+
+    这与 macOS 上的 ATS（App Transport Security）是同一类问题，桌面端早已加过
+    例外，Android 这边一直漏着。
+
+    base-config 而不是按域名列举：媒体地址是任意的局域网 IP（192.168.x.x 之类），
+    事先列不出来。
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

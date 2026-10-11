@@ -1,0 +1,848 @@
+// ADisplay —— DLNA 渲染器实现（HTTP 服务 + SOAP 分发 + GENA 事件）
+#include <adisplay/dlna/DlnaRenderer.h>
+
+#include <adisplay/common/DeviceIdentity.h>   // generate_uuid_v4，订阅 SID 要用
+#include <adisplay/common/DeviceName.h>
+#include <adisplay/common/Log.h>
+#include <adisplay/common/NetUtil.h>
+#include <adisplay/common/Random.h>
+
+#include "DlnaDescription.h"
+#include "DlnaIcon.h"
+#include "DlnaMediaUrl.h"
+#include "DlnaSoap.h"
+
+#include <httplib.h>
+
+#include <atomic>
+#include <chrono>
+#include <cstdlib>   // atoi，解析 SetVolume 的音量
+#include <cstring>
+#include <map>
+#include <mutex>
+#include <sstream>
+#include <thread>
+#include <vector>
+
+namespace adisplay::dlna {
+namespace {
+
+namespace soap_ns = adisplay::dlna::soap;
+namespace description_ns = adisplay::dlna::description;
+
+// GENA 订阅的默认有效期。手机一般会带 TIMEOUT 头自己指定，没带就用这个。
+constexpr int kDefaultSubscriptionSeconds = 1800;
+
+// 事件推送的超时。手机端如果卡住，不能把我们的线程一起拖住。
+constexpr int kEventPushTimeoutSeconds = 5;
+
+// 事件序列号从 1 开始，0 表示「首次推送」，规范要求如此。
+constexpr uint32_t kInitialEventSequence = 0;
+
+std::string to_string_trimmed(int value) {
+    return std::to_string(value);
+}
+
+}  // namespace
+
+// ===========================================================================
+
+struct DlnaRenderer::Impl {
+    DlnaConfig config;
+    IDlnaListener* listener = nullptr;
+
+    httplib::Server server;
+    std::thread server_thread;
+    std::atomic<bool> running{false};
+    std::atomic<uint64_t> actions_handled{0};
+
+    mutable std::mutex mutex;
+    std::string last_error;
+    std::string base_url;
+
+    // 当前媒体。SetAVTransportURI 记下来，GetMediaInfo 要回给手机。
+    std::string current_uri;
+    std::string current_metadata;
+
+    // ---- GENA 订阅 --------------------------------------------------------
+
+    struct Subscription {
+        std::string sid;
+        std::string callback_url;
+        std::chrono::steady_clock::time_point expires_at;
+        uint32_t sequence = kInitialEventSequence;
+    };
+    std::vector<Subscription> subscriptions;
+
+    // ---- 事件推送 ---------------------------------------------------------
+
+    // 向所有订阅者推一条属性变更通知。
+    //
+    // GENA 的事件体形如：
+    //   <e:propertyset><e:property><TransportState>PLAYING</TransportState>
+    //   </e:property></e:propertyset>
+    //
+    // 手机端的进度条、音量滑块靠它更新。状态没变时不要推 —— 每秒都推会让
+    // 手机端不停重绘，反而卡顿。
+    void push_event(const std::string& service_type,
+                    const std::vector<std::pair<std::string, std::string>>& properties) {
+        std::vector<Subscription> targets;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            const auto now = std::chrono::steady_clock::now();
+            for (Subscription& subscription : subscriptions) {
+                if (subscription.expires_at <= now) {
+                    continue;   // 过期的订阅，顺手跳过
+                }
+                ++subscription.sequence;
+                targets.push_back(subscription);
+            }
+        }
+        if (targets.empty()) {
+            return;
+        }
+
+        std::ostringstream body;
+        body << "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
+             << "<e:propertyset xmlns:e=\"urn:schemas-upnp-org:event-1-0\">\n";
+        for (const auto& property : properties) {
+            body << "<e:property><" << property.first << ">"
+                 << soap_ns::escape_xml(property.second)
+                 << "</" << property.first << "></e:property>\n";
+        }
+        body << "</e:propertyset>\n";
+
+        const std::string payload = body.str();
+
+        for (const Subscription& target : targets) {
+            // 回调 URL 形如 "<http://192.168.1.30:12345/notify>"，可能带尖括号。
+            std::string url = target.callback_url;
+            if (!url.empty() && url.front() == '<') {
+                url.erase(0, 1);
+            }
+            if (!url.empty() && url.back() == '>') {
+                url.pop_back();
+            }
+
+            const std::size_t scheme_end = url.find("://");
+            if (scheme_end == std::string::npos) {
+                continue;
+            }
+            const std::size_t host_begin = scheme_end + 3;
+            const std::size_t path_begin = url.find('/', host_begin);
+            const std::string host =
+                url.substr(host_begin, (path_begin == std::string::npos ? url.size() : path_begin) - host_begin);
+            const std::string path =
+                path_begin == std::string::npos ? std::string("/") : url.substr(path_begin);
+
+            httplib::Client client(host);
+            client.set_connection_timeout(kEventPushTimeoutSeconds, 0);
+            client.set_read_timeout(kEventPushTimeoutSeconds, 0);
+
+            httplib::Headers headers = {
+                {"NT", "upnp:event"},
+                {"NTS", "upnp:propchange"},
+                {"SID", target.sid},
+                {"SEQ", to_string_trimmed(static_cast<int>(target.sequence))},
+                {"CONTENT-TYPE", "text/xml; charset=\"utf-8\""},
+            };
+
+            // 推失败不做重试：手机端下一轮 SUBSCRIBE 会重新订阅，
+            // 而且它自己也会周期性拉 GetPositionInfo 兜底。
+            const auto response = client.Post(path.c_str(), headers, payload, "text/xml; charset=\"utf-8\"");
+            if (!response) {
+                AD_LOG_DEBUG("事件推送失败（手机可能已断开）：{}", target.callback_url);
+            }
+        }
+    }
+
+    // ---- SOAP 动作分发 ----------------------------------------------------
+
+    // 每个动作返回「输出参数名 → 值」的有序列表。顺序应当与 SCPD 里声明的
+    // 一致 —— 部分手机端按位置取值。
+    using ActionResult = std::vector<std::pair<std::string, std::string>>;
+
+    bool dispatch_av_transport(const soap_ns::ActionRequest& request,
+                               const std::string& peer_address,
+                               ActionResult* results, int* error_code, std::string* error_text) {
+        const std::string& action = request.action_name;
+
+        if (action == "SetAVTransportURI") {
+            const std::string raw_uri = request.get("CurrentURI");
+            const std::string metadata = request.get("CurrentURIMetaData");
+            if (raw_uri.empty()) {
+                *error_code = soap_ns::error_code::kInvalidArgs;
+                *error_text = "CurrentURI 为空";
+                return false;
+            }
+
+            // 手机可能推来「它自己手机上的本地代理」地址（127.0.0.1:xxxx）。
+            // 那是相对发送端而言的，对我们就是它自己 —— 换成发送端地址才拉得到。
+            const std::string effective_uri =
+                media_url::rewrite_loopback(raw_uri, peer_address);
+            if (effective_uri != raw_uri) {
+                AD_LOG_INFO("手机给的是回环地址，已改写为发送端：{}", effective_uri);
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                // 存原始地址：手机的 GetMediaInfo 会拿它跟自己设过的比对。
+                current_uri = raw_uri;
+                current_metadata = metadata;
+            }
+            AD_LOG_INFO("手机推送媒体：{}", description_ns::extract_title_from_metadata(metadata));
+            if (listener != nullptr) {
+                listener->on_set_uri(effective_uri, metadata);
+            }
+            return true;   // 无输出参数
+        }
+
+        if (action == "Play") {
+            if (listener != nullptr) {
+                listener->on_play();
+            }
+            return true;
+        }
+        if (action == "Pause") {
+            if (listener != nullptr) {
+                listener->on_pause();
+            }
+            return true;
+        }
+        if (action == "Stop") {
+            if (listener != nullptr) {
+                listener->on_stop();
+            }
+            return true;
+        }
+
+        if (action == "Seek") {
+            // Unit 可能是 REL_TIME / ABS_TIME / TRACK_NR。
+            // 只处理时间单位，TRACK_NR 对单曲播放没有意义。
+            const std::string unit = request.get("Unit");
+            const std::string target = request.get("Target");
+            if (unit != "REL_TIME" && unit != "ABS_TIME") {
+                *error_code = soap_ns::error_code::kInvalidArgs;
+                *error_text = "不支持的 Seek 单位：" + unit;
+                return false;
+            }
+            const int64_t position_ms = soap_ns::parse_duration(target);
+            if (position_ms < 0) {
+                *error_code = soap_ns::error_code::kInvalidArgs;
+                *error_text = "无法解析 Seek 目标：" + target;
+                return false;
+            }
+            if (listener != nullptr) {
+                listener->on_seek(position_ms);
+            }
+            return true;
+        }
+
+        if (action == "GetTransportInfo") {
+            const std::string state = listener != nullptr
+                                          ? listener->current_transport_state()
+                                          : std::string(transport_state::kStopped);
+            results->emplace_back("CurrentTransportState",
+                                  state.empty() ? transport_state::kStopped : state);
+            results->emplace_back("CurrentTransportStatus", "OK");
+            results->emplace_back("CurrentSpeed", "1");
+            return true;
+        }
+
+        if (action == "GetMediaInfo") {
+            std::string uri;
+            std::string metadata;
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                uri = current_uri;
+                metadata = current_metadata;
+            }
+            const int64_t duration = listener != nullptr ? listener->media_duration_ms() : 0;
+
+            results->emplace_back("NrTracks", uri.empty() ? "0" : "1");
+            results->emplace_back("MediaDuration", soap_ns::format_duration(duration));
+            results->emplace_back("CurrentURI", uri);
+            results->emplace_back("CurrentURIMetaData", metadata);
+            results->emplace_back("NextURI", "");
+            results->emplace_back("NextURIMetaData", "");
+            results->emplace_back("PlayMedium", "NETWORK");
+            results->emplace_back("RecordMedium", "NOT_IMPLEMENTED");
+            results->emplace_back("WriteStatus", "NOT_IMPLEMENTED");
+            return true;
+        }
+
+        if (action == "GetPositionInfo") {
+            const int64_t position = listener != nullptr ? listener->current_position_ms() : 0;
+            const int64_t duration = listener != nullptr ? listener->media_duration_ms() : 0;
+
+            std::string uri;
+            std::string metadata;
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                uri = current_uri;
+                metadata = current_metadata;
+            }
+
+            results->emplace_back("Track", "1");
+            results->emplace_back("TrackDuration", soap_ns::format_duration(duration));
+            results->emplace_back("TrackMetaData", metadata);
+            results->emplace_back("TrackURI", uri);
+            // RelTime 是手机端进度条的主要依据，必须给准。
+            results->emplace_back("RelTime", soap_ns::format_duration(position));
+            results->emplace_back("AbsTime", soap_ns::format_duration(position));
+            results->emplace_back("RelCount", "2147483647");
+            results->emplace_back("AbsCount", "2147483647");
+            return true;
+        }
+
+        if (action == "GetCurrentTransportActions") {
+            // AVTransport 的必需动作。客户端拿它判断「这台设备支持哪些播放
+            // 操作」，拿到结果才决定要不要投屏 —— 缺了它，很多客户端会直接
+            // 判定设备不可用于投屏，而且不会再发任何后续请求。
+            //
+            // 实测：某个用 Cling 的 App 拉完描述和三个 SCPD 就停了，
+            // 点投屏直接报失败，日志里一个 POST /control 都没有。
+            const std::string state = listener != nullptr
+                                          ? listener->current_transport_state()
+                                          : std::string(transport_state::kStopped);
+
+            std::string actions = "Play,Stop,Seek";
+            if (state == transport_state::kPlaying) {
+                actions = "Pause,Stop,Seek";
+            } else if (state == transport_state::kNoMedia) {
+                actions = "Stop";
+            }
+            results->emplace_back("Actions", actions);
+            return true;
+        }
+
+        if (action == "GetTransportSettings") {
+            results->emplace_back("PlayMode", "NORMAL");
+            results->emplace_back("RecQualityMode", "NOT_IMPLEMENTED");
+            return true;
+        }
+
+        if (action == "GetDeviceCapabilities") {
+            results->emplace_back("PlayMedia", "NETWORK,NONE");
+            results->emplace_back("RecMedia", "NOT_IMPLEMENTED");
+            results->emplace_back("RecQualityModes", "NOT_IMPLEMENTED");
+            return true;
+        }
+
+        *error_code = soap_ns::error_code::kInvalidAction;
+        *error_text = "不支持的动作：" + action;
+        return false;
+    }
+
+    bool dispatch_rendering_control(const soap_ns::ActionRequest& request,
+                                    ActionResult* results, int* error_code, std::string* error_text) {
+        const std::string& action = request.action_name;
+
+        if (action == "GetVolume") {
+            const int volume = listener != nullptr ? listener->current_volume() : 100;
+            results->emplace_back("CurrentVolume", to_string_trimmed(volume));
+            return true;
+        }
+
+        if (action == "SetVolume") {
+            const std::string desired = request.get("DesiredVolume");
+            if (desired.empty()) {
+                *error_code = soap_ns::error_code::kInvalidArgs;
+                *error_text = "缺少 DesiredVolume";
+                return false;
+            }
+            const int volume = std::atoi(desired.c_str());
+            if (volume < 0 || volume > 100) {
+                *error_code = soap_ns::error_code::kArgumentValueOutOfRange;
+                *error_text = "音量超出 0..100：" + desired;
+                return false;
+            }
+            if (listener != nullptr) {
+                listener->on_set_volume(volume);
+            }
+            return true;
+        }
+
+        if (action == "ListPresets") {
+            // RenderingControl 的必需动作。我们没有多种音效预设，
+            // 报一个 FactoryDefaults 即可 —— 但必须应答，缺了会让严格的
+            // 客户端认为服务不完整。
+            results->emplace_back("CurrentPresetNameList", "FactoryDefaults");
+            return true;
+        }
+
+        if (action == "SelectPreset") {
+            // 只有一个预设，接受任何请求。
+            return true;
+        }
+
+        if (action == "GetMute") {
+            const bool mute = listener != nullptr && listener->current_mute();
+            results->emplace_back("CurrentMute", mute ? "1" : "0");
+            return true;
+        }
+
+        if (action == "SetMute") {
+            const std::string desired = request.get("DesiredMute");
+            const bool mute = desired == "1" || desired == "true" || desired == "True";
+            if (listener != nullptr) {
+                listener->on_set_mute(mute);
+            }
+            return true;
+        }
+
+        *error_code = soap_ns::error_code::kInvalidAction;
+        *error_text = "不支持的动作：" + action;
+        return false;
+    }
+
+    bool dispatch_connection_manager(const soap_ns::ActionRequest& request,
+                                     ActionResult* results, int* error_code, std::string* error_text) {
+        const std::string& action = request.action_name;
+
+        if (action == "GetProtocolInfo") {
+            // Source 留空：我们不往外推流。Sink 列出能接收的格式，
+            // 手机端据此判断要不要把某个视频投过来。
+            results->emplace_back("Source", "");
+            results->emplace_back("Sink",
+                "http-get:*:video/mp4:*,"
+                "http-get:*:video/x-matroska:*,"
+                "http-get:*:video/webm:*,"
+                "http-get:*:video/mpeg:*,"
+                "http-get:*:application/vnd.apple.mpegurl:*,"
+                "http-get:*:application/x-mpegurl:*,"
+                "http-get:*:audio/mpeg:*,"
+                "http-get:*:audio/mp4:*,"
+                "http-get:*:audio/flac:*,"
+                "http-get:*:image/jpeg:*,"
+                "http-get:*:image/png:*");
+            return true;
+        }
+
+        if (action == "GetCurrentConnectionIDs") {
+            results->emplace_back("ConnectionIDs", "0");
+            return true;
+        }
+
+        if (action == "GetCurrentConnectionInfo") {
+            results->emplace_back("RcsID", "0");
+            results->emplace_back("AVTransportID", "0");
+            results->emplace_back("ProtocolInfo", "");
+            results->emplace_back("PeerConnectionManager", "");
+            results->emplace_back("PeerConnectionID", "-1");
+            results->emplace_back("Direction", "Input");
+            results->emplace_back("Status", "OK");
+            return true;
+        }
+
+        *error_code = soap_ns::error_code::kInvalidAction;
+        *error_text = "不支持的动作：" + action;
+        return false;
+    }
+
+    // ---- HTTP 处理 --------------------------------------------------------
+
+    // 请求一次自己的设备描述，确认服务真的在监听且路由能响应。
+    // 监听是异步启动的，所以重试几次。
+    bool verify_listening(uint16_t port) const {
+        for (int attempt = 0; attempt < 10; ++attempt) {
+            httplib::Client probe("127.0.0.1", port);
+            probe.set_connection_timeout(0, 300 * 1000);   // 300ms
+            probe.set_read_timeout(1, 0);
+
+            const auto response = probe.Get("/description.xml");
+            if (response && response->status == 200) {
+                return true;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        return false;
+    }
+
+    void handle_description(httplib::Response& response) {
+        const std::string xml = description_ns::build_device_description(config, base_url);
+        response.set_content(xml, "text/xml; charset=\"utf-8\"");
+    }
+
+    void handle_scpd(const std::string& service_id, httplib::Response& response) {
+        // SCPDURL 形如 /scpd/urn:upnp-org:serviceId:AVTransport.xml
+        std::string service_type;
+        if (service_id.find("AVTransport") != std::string::npos) {
+            service_type = description_ns::kAvTransportType;
+        } else if (service_id.find("RenderingControl") != std::string::npos) {
+            service_type = description_ns::kRenderingControlType;
+        } else if (service_id.find("ConnectionManager") != std::string::npos) {
+            service_type = description_ns::kConnectionManagerType;
+        }
+
+        const std::string xml = description_ns::build_service_description(service_type);
+        if (xml.empty()) {
+            response.status = 404;
+            return;
+        }
+        response.set_content(xml, "text/xml; charset=\"utf-8\"");
+    }
+
+    void handle_control(const httplib::Request& request, httplib::Response& response) {
+        const std::string soap_action = request.get_header_value("SOAPAction");
+
+        soap_ns::ActionRequest parsed;
+        std::string parse_error;
+        if (!soap_ns::parse_action_request(soap_action, request.body, &parsed, &parse_error)) {
+            AD_LOG_WARN("SOAP 解析失败：{}", parse_error);
+            response.status = 500;
+            response.set_content(
+                soap_ns::build_fault(soap_ns::error_code::kInvalidArgs, parse_error),
+                "text/xml; charset=\"utf-8\"");
+            return;
+        }
+
+        actions_handled.fetch_add(1, std::memory_order_relaxed);
+
+        ActionResult results;
+        int error_code = soap_ns::error_code::kInvalidAction;
+        std::string error_text;
+
+        bool ok = false;
+        if (parsed.service_type == description_ns::kAvTransportType) {
+            ok = dispatch_av_transport(parsed, request.remote_addr, &results, &error_code,
+                                       &error_text);
+        } else if (parsed.service_type == description_ns::kRenderingControlType) {
+            ok = dispatch_rendering_control(parsed, &results, &error_code, &error_text);
+        } else if (parsed.service_type == description_ns::kConnectionManagerType) {
+            ok = dispatch_connection_manager(parsed, &results, &error_code, &error_text);
+        } else {
+            error_text = "未知服务类型：" + parsed.service_type;
+        }
+
+        if (!ok) {
+            AD_LOG_WARN("SOAP 动作失败 {}：{}", parsed.action_name, error_text);
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                last_error = error_text;
+            }
+            // 注意 HTTP 状态码仍然是 500 + SOAP Fault，而不是 400 —— 这是
+            // UPnP 的约定，手机端靠 Fault 里的 errorCode 区分原因。
+            response.status = 500;
+            response.set_content(soap_ns::build_fault(error_code, error_text),
+                                 "text/xml; charset=\"utf-8\"");
+            return;
+        }
+
+        response.set_content(
+            soap_ns::build_action_response(parsed.service_type, parsed.action_name, results),
+            "text/xml; charset=\"utf-8\"");
+    }
+
+    void handle_subscribe(const httplib::Request& request, httplib::Response& response) {
+        const std::string callback = request.get_header_value("CALLBACK");
+        const std::string sid = request.get_header_value("SID");
+
+        if (callback.empty() && sid.empty()) {
+            response.status = 412;   // Precondition Failed，UPnP 约定
+            return;
+        }
+
+        // sid 非空表示续订，callback 非空表示新订阅。
+        std::lock_guard<std::mutex> lock(mutex);
+
+        if (!sid.empty()) {
+            for (Subscription& subscription : subscriptions) {
+                if (subscription.sid == sid) {
+                    subscription.expires_at = std::chrono::steady_clock::now() +
+                                              std::chrono::seconds(kDefaultSubscriptionSeconds);
+                    response.set_header("SID", subscription.sid);
+                    response.set_header("TIMEOUT", "Second-" + std::to_string(kDefaultSubscriptionSeconds));
+                    return;
+                }
+            }
+            response.status = 412;   // 续订一个不存在的 SID
+            return;
+        }
+
+        // 新订阅：生成 SID。规范要求形如 "uuid:<uuid>"。
+        Subscription subscription;
+        subscription.sid = "uuid:" + common::generate_uuid_v4();
+        subscription.callback_url = callback;
+        subscription.expires_at = std::chrono::steady_clock::now() +
+                                  std::chrono::seconds(kDefaultSubscriptionSeconds);
+        subscriptions.push_back(subscription);
+
+        AD_LOG_DEBUG("收到 GENA 订阅：{}", callback);
+
+        response.set_header("SID", subscription.sid);
+        response.set_header("TIMEOUT", "Second-" + std::to_string(kDefaultSubscriptionSeconds));
+    }
+
+    void handle_unsubscribe(const httplib::Request& request, httplib::Response& response) {
+        const std::string sid = request.get_header_value("SID");
+        std::lock_guard<std::mutex> lock(mutex);
+        for (auto it = subscriptions.begin(); it != subscriptions.end(); ++it) {
+            if (it->sid == sid) {
+                subscriptions.erase(it);
+                return;
+            }
+        }
+        response.status = 412;
+    }
+
+    void register_routes() {
+        // 记录每一个进来的 HTTP 请求（方法、路径、来源、User-Agent），
+        // 并在同一个处理器里接手 SUBSCRIBE / UNSUBSCRIBE。
+        //
+        // cpp-httplib 只允许一个 pre-routing handler，所以两件事必须合并 —— 
+        // 分成两个的话后者会覆盖前者，日志或订阅会静默失效。
+        //
+        // 排查「某个 App 搜不到设备」时，这是最关键的一条线索：
+        // SSDP 那层只能证明「我们回了响应」，但客户端收到之后有没有兴趣
+        // 来拉设备描述，只有这里看得到。
+        //   * 完全没日志 → 客户端收到响应后直接跳过了我们（多半是描述字段
+        //     或 SERVER 头不合它的口味）
+        //   * 有日志但没继续 → 看它请求了什么、我们回了什么
+        server.set_pre_routing_handler(
+            [](const httplib::Request& request, httplib::Response&) {
+                AD_LOG_INFO("HTTP {} {} ← {} [{}]", request.method, request.path,
+                            request.remote_addr, request.get_header_value("User-Agent"));
+                return httplib::Server::HandlerResponse::Unhandled;
+            });
+
+        server.Get("/description.xml", [this](const httplib::Request&, httplib::Response& response) {
+            handle_description(response);
+        });
+
+        // 设备图标。描述里的 iconList 指向这里。
+        server.Get("/icon.png", [](const httplib::Request&, httplib::Response& response) {
+            response.set_content(
+                reinterpret_cast<const char*>(description_ns::kDeviceIconPng),
+                description_ns::kDeviceIconPngSize, "image/png");
+        });
+
+        // presentationURL 指向这里。给一个极简的说明页 —— 客户端一般不
+        // 会真的去打开它，但地址必须存在，否则部分客户端会判定设备不完整。
+        server.Get("/", [this](const httplib::Request&, httplib::Response& response) {
+            std::string body;
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                body = "<!doctype html><meta charset=\"utf-8\"><title>" +
+                       config.device_name + "</title><h1>" + config.device_name +
+                       "</h1><p>ADisplay 投屏接收端</p>";
+            }
+            response.set_content(body, "text/html; charset=utf-8");
+        });
+
+        // SCPDURL 用的是带冒号的 serviceId，作为路径段要能匹配上。
+        server.Get(R"(/scpd/(.+))", [this](const httplib::Request& request, httplib::Response& response) {
+            handle_scpd(request.matches[1], response);
+        });
+
+        server.Post("/control", [this](const httplib::Request& request, httplib::Response& response) {
+            handle_control(request, response);
+        });
+
+        // 手机有时会先 GET 一下事件地址探测可用性。
+        server.Get("/event", [](const httplib::Request&, httplib::Response& response) {
+            response.status = 405;
+        });
+
+        // GENA 事件订阅 / 退订。
+        //
+        // 必须走 CustomRoute 注册。cpp-httplib 对内置方法表（GET/HEAD/POST/
+        // PUT/DELETE/OPTIONS/PATCH）之外的方法，在「解析请求行」阶段就直接
+        // 回 400，请求根本到不了处理器 —— 连上面那行访问日志都不会打，
+        // 所以日志里完全看不到 SUBSCRIBE 的踪迹。
+        //
+        // 这不是锦上添花：Cling 系控制点（天际视频用的正是它）要求先订阅
+        // AVTransport 事件、拿到 200 + SID + TIMEOUT 才算订阅建立，然后在
+        // 「连接成功」回调里才发 SetAVTransportURI。订阅被回 400，它就只
+        // 显示「投屏失败」，且全程不发任何 POST /control；而 B 站 / 夸克
+        // 那类不订阅、直接发 SOAP 的客户端不受影响，所以问题只在一部分
+        // App 上暴露。
+        server.CustomRoute("SUBSCRIBE", "/event",
+                           [this](const httplib::Request& request, httplib::Response& response) {
+                               handle_subscribe(request, response);
+                           });
+        server.CustomRoute("UNSUBSCRIBE", "/event",
+                           [this](const httplib::Request& request, httplib::Response& response) {
+                               handle_unsubscribe(request, response);
+                           });
+    }
+};
+
+// ===========================================================================
+
+DlnaRenderer::DlnaRenderer() : impl_(new Impl()) {}
+
+DlnaRenderer::~DlnaRenderer() {
+    stop();
+}
+
+bool DlnaRenderer::start(const DlnaConfig& config, std::string* out_error) {
+    if (impl_->running.load()) {
+        return true;
+    }
+
+    const std::string address = config.local_address.empty()
+                                    ? common::primary_local_ipv4()
+                                    : config.local_address;
+    if (address.empty()) {
+        const std::string message = "没有可用的局域网地址，DLNA 无法提供设备描述";
+        if (out_error != nullptr) {
+            *out_error = message;
+        }
+        AD_LOG_ERROR("{}", message);
+        return false;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(impl_->mutex);
+        impl_->config = config;
+        impl_->base_url = "http://" + address + ":" + std::to_string(config.http_port);
+        impl_->last_error.clear();
+    }
+
+    impl_->register_routes();
+
+    // 先绑定再异步监听，这样端口占用能立刻发现。
+    //
+    // 这里必须用 bind_to_port（返回 bool）而不是 bind_to_any_port ——
+    // 后者返回的是 int（成功给端口号，失败给 -1），于是
+    //「if (!bind_to_any_port(...))」在失败时同样是假，绑定失败会被完全
+    // 吞掉：日志照样打「设备描述已就绪」，而 HTTP 服务根本没起来，
+    // 手机拿到 LOCATION 后拉不到描述，设备就不出现在列表里。
+    if (!impl_->server.bind_to_port("0.0.0.0", config.http_port)) {
+        const std::string message =
+            "DLNA 端口 " + std::to_string(config.http_port) +
+            " 绑定失败，可能被占用。";
+        {
+            std::lock_guard<std::mutex> lock(impl_->mutex);
+            impl_->last_error = message;
+        }
+        if (out_error != nullptr) {
+            *out_error = message;
+        }
+        AD_LOG_ERROR("{}", message);
+        return false;
+    }
+
+    impl_->running.store(true);
+    impl_->server_thread = std::thread([this]() {
+        impl_->server.listen_after_bind();
+    });
+
+    // ---- 启动自检 --------------------------------------------------------
+    //
+    // 起来之后立刻请求一次自己的设备描述，确认真能在端口上响应。
+    //
+    // 不做这一步的话，「日志说就绪、实际没在监听」这种问题只能等用户
+    // 从外部发现 —— 而这正是刚刚发生的事：SSDP 一侧全部正常、我们收到了
+    // 手机的查询也回了响应，但手机拿到 LOCATION 后拉不到描述，
+    // 设备就是不出现。中间隔了好几轮排查才定位到这里。
+    //
+    // 监听是异步的，所以带几次重试。
+    if (!impl_->verify_listening(config.http_port)) {
+        const std::string message =
+            "DLNA 启动自检失败：HTTP 服务未能在端口 " +
+            std::to_string(config.http_port) + " 上响应设备描述请求。";
+        {
+            std::lock_guard<std::mutex> lock(impl_->mutex);
+            impl_->last_error = message;
+        }
+        if (out_error != nullptr) {
+            *out_error = message;
+        }
+        AD_LOG_ERROR("{}", message);
+
+        impl_->running.store(false);
+        impl_->server.stop();
+        if (impl_->server_thread.joinable()) {
+            impl_->server_thread.join();
+        }
+        return false;
+    }
+
+    AD_LOG_INFO("DLNA 设备描述已就绪：{}/description.xml", impl_->base_url);
+    return true;
+}
+
+void DlnaRenderer::stop() {
+    if (!impl_->running.exchange(false)) {
+        return;
+    }
+
+    impl_->server.stop();
+
+    if (impl_->server_thread.joinable()) {
+        impl_->server_thread.join();
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(impl_->mutex);
+        impl_->subscriptions.clear();
+    }
+
+    AD_LOG_INFO("DLNA 已停止");
+}
+
+bool DlnaRenderer::is_running() const {
+    return impl_->running.load();
+}
+
+bool DlnaRenderer::set_device_name(const std::string& name, std::string* out_error) {
+    const common::DeviceNameValidation validation = common::validate_device_name(name);
+    if (!validation.valid) {
+        if (out_error != nullptr) {
+            *out_error = validation.reason;
+        }
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    impl_->config.device_name = validation.normalized;
+    // 不需要重启 HTTP 服务：描述是每次请求现生成的，下次手机来拉就是新名字。
+    return true;
+}
+
+void DlnaRenderer::set_listener(IDlnaListener* listener) {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    impl_->listener = listener;
+}
+
+std::string DlnaRenderer::description_url() const {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    return impl_->base_url + "/description.xml";
+}
+
+uint16_t DlnaRenderer::port() const {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    return impl_->config.http_port;
+}
+
+void DlnaRenderer::notify_transport_state(const std::string& state) {
+    impl_->push_event(description_ns::kAvTransportType, {{"TransportState", state}});
+}
+
+void DlnaRenderer::notify_volume_changed(int volume) {
+    const int clamped = volume < 0 ? 0 : (volume > 100 ? 100 : volume);
+    impl_->push_event(description_ns::kRenderingControlType,
+                      {{"Volume", std::to_string(clamped)}});
+}
+
+void DlnaRenderer::notify_mute_changed(bool mute) {
+    impl_->push_event(description_ns::kRenderingControlType,
+                      {{"Mute", mute ? "1" : "0"}});
+}
+
+void DlnaRenderer::notify_duration_changed(int64_t duration_ms) {
+    impl_->push_event(description_ns::kAvTransportType,
+                      {{"CurrentMediaDuration", soap_ns::format_duration(duration_ms)}});
+}
+
+uint64_t DlnaRenderer::action_count() const {
+    return impl_->actions_handled.load(std::memory_order_relaxed);
+}
+
+std::string DlnaRenderer::last_error() const {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    return impl_->last_error;
+}
+
+}  // namespace adisplay::dlna

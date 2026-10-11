@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    通知栏用的小图标。
+
+    单独做一个纯白剪影，不复用 ic_launcher：通知栏的小图标只取 alpha 通道当
+    形状用，颜色一律由系统按主题刷成白色。拿彩色图标去当小图标，显示出来的
+    是一块白色实心方块 —— 看不出是什么。
+
+    形状借用系统那个「投射」图标（屏幕 + 右下角扩散的弧），和这份应用的用途
+    对得上。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M21,3H3C1.9,3 1,3.9 1,5v3h2V5h18v14h-7v2h7c1.1,0 2,-0.9 2,-2V5C23,3.9 22.1,3 21,3zM1,18v3h3C4,19.34 2.66,18 1,18zM1,14v2c2.76,0 5,2.24 5,5h2C8,17.13 4.87,14 1,14zM1,10v2c4.97,0 9,4.03 9,9h2C12,14.92 7.07,10 1,10z" />
+</vector>

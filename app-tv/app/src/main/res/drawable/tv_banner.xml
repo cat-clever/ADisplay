@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    电视桌面上显示的横幅图标。文档 4.5 要求提供 320×180 横幅。
+    用 vector 而不是 png，省掉多套位图资源。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="320dp"
+    android:height="180dp"
+    android:viewportWidth="320"
+    android:viewportHeight="180">
+
+    <path
+        android:fillColor="#101418"
+        android:pathData="M0,0 h320 v180 h-320 z" />
+
+    <!-- 屏幕轮廓 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M96,50 h128 a6,6 0 0 1 6,6 v62 a6,6 0 0 1 -6,6 h-128 a6,6 0 0 1 -6,-6 v-62 a6,6 0 0 1 6,-6 z M102,62 v50 h116 v-50 z" />
+
+    <!-- 底座 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M146,124 h28 v8 h-28 z" />
+
+    <!-- 投屏信号 -->
+    <path
+        android:fillColor="#4FC3F7"
+        android:pathData="M160,84 m-10,0 a10,10 0 1,0 20,0 a10,10 0 1,0 -20,0" />
+</vector>

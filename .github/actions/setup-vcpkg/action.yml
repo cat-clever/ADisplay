@@ -1,0 +1,118 @@
+name: 准备 vcpkg
+description: 克隆并引导 vcpkg，恢复二进制缓存，让各平台的依赖编译结果可以复用
+
+inputs:
+  triplet:
+    description: vcpkg 目标三元组（如 x64-windows、arm64-osx-universal）
+    required: true
+  host-triplet:
+    description: vcpkg 宿主三元组，留空表示与目标相同
+    required: false
+    default: ''
+  overlay-triplets:
+    description: 自定义三元组目录（绝对路径），留空表示不使用
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    # 二进制缓存是这套方案能用的前提：vcpkg 要源码编译 FFmpeg / OpenSSL 这类重库，
+    # 没有缓存的话每次 CI 都要多花几十分钟。缓存文件放在工作区，由 actions/cache 托管。
+    # 一个坑，写在这里免得下次再踩：
+    #
+    # GitHub 的缓存**按 ref 分域** —— tag 上创建的缓存，别的 ref（包括别的 tag
+    # 和 main）读不到；只有默认分支上创建的缓存对所有 ref 可见。而 release 是
+    # tag 触发的，于是每个 tag 轮次自己存下的包谁都读不到，真正能复用的只有
+    # main 上跑 ci.yml 时留下的那一份。
+    #
+    # 后果：**改了 vcpkg.json 的依赖之后，如果不先在 main 上跑一轮 ci.yml**，
+    # tag 轮次会一直拿旧缓存、发现所需 ABI 不在里面、于是每轮都从头编 FFmpeg
+    # （Windows 上 14 分钟）。2026-10-10 加 swscale 时就吃了这个亏。
+    - name: 恢复 vcpkg 二进制缓存
+      uses: actions/cache@v4
+      with:
+        path: ${{ github.workspace }}/vcpkg-cache
+        key: vcpkg-${{ runner.os }}-${{ inputs.triplet }}-${{ hashFiles('vcpkg.json') }}
+        restore-keys: |
+          vcpkg-${{ runner.os }}-${{ inputs.triplet }}-
+          vcpkg-${{ runner.os }}-
+
+    - name: 克隆 vcpkg（Unix）
+      if: runner.os != 'Windows'
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        # 已经克隆好且内容完整就直接用。
+        if [ -f "${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" ]; then
+          exit 0
+        fi
+
+        # --filter=blob:none：vcpkg 仓库很大，只拉提交与目录树，文件按需下载。
+        # 代价是 checkout 时还要再联一次网，那一步失败会留下一个「克隆成功但
+        # 检出失败」的半成品目录 —— 所以每次重试都先清干净，并用一个 vcpkg
+        # 必需的脚本文件判断完整性，而不是只看 .git 在不在。
+        for attempt in 1 2 3; do
+          rm -rf "${VCPKG_ROOT}"
+          if git clone --filter=blob:none \
+               https://github.com/microsoft/vcpkg.git "${VCPKG_ROOT}" \
+             && [ -f "${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" ]; then
+            exit 0
+          fi
+          echo "第 ${attempt} 次克隆 vcpkg 未成功，5 秒后重试"
+          sleep 5
+        done
+
+        echo "克隆 vcpkg 连续失败三次" >&2
+        exit 1
+
+    - name: 引导 vcpkg（Unix）
+      if: runner.os != 'Windows'
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [ ! -x "${VCPKG_ROOT}/vcpkg" ]; then
+          "${VCPKG_ROOT}/bootstrap-vcpkg.sh" -disableMetrics
+        fi
+        "${VCPKG_ROOT}/vcpkg" version
+
+    - name: 克隆 vcpkg（Windows）
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        if (Test-Path "$env:VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake") { exit 0 }
+
+        for ($attempt = 1; $attempt -le 3; $attempt++) {
+          if (Test-Path "$env:VCPKG_ROOT") { Remove-Item -Recurse -Force "$env:VCPKG_ROOT" }
+          git clone --filter=blob:none https://github.com/microsoft/vcpkg.git "$env:VCPKG_ROOT"
+          if ($LASTEXITCODE -eq 0 -and (Test-Path "$env:VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake")) {
+            exit 0
+          }
+          Write-Host "第 $attempt 次克隆 vcpkg 未成功，5 秒后重试"
+          Start-Sleep -Seconds 5
+        }
+        Write-Error "克隆 vcpkg 连续失败三次"
+        exit 1
+
+    - name: 引导 vcpkg（Windows）
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        if (-not (Test-Path "$env:VCPKG_ROOT\vcpkg.exe")) {
+          & "$env:VCPKG_ROOT\bootstrap-vcpkg.bat" -disableMetrics
+        }
+        & "$env:VCPKG_ROOT\vcpkg.exe" version
+
+    - name: 记录三元组配置
+      shell: bash
+      run: |
+        {
+          echo "VCPKG_TARGET_TRIPLET=${{ inputs.triplet }}"
+          if [ -n "${{ inputs.host-triplet }}" ]; then
+            echo "VCPKG_HOST_TRIPLET=${{ inputs.host-triplet }}"
+          fi
+          if [ -n "${{ inputs.overlay-triplets }}" ]; then
+            echo "VCPKG_OVERLAY_TRIPLETS=${{ inputs.overlay-triplets }}"
+          fi
+        } >> "$GITHUB_ENV"

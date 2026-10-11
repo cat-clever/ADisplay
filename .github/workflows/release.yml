@@ -1,0 +1,77 @@
+name: 发布
+
+# 打一个 v* 的 tag 就出全平台安装包，并挂到 Release 上。
+#
+# 构建部分直接复用 ci.yml（workflow_call），保证发出去的包与 CI 上验证过的
+# 是同一套流程产出的 —— 不会出现「CI 绿了但发布的包是另一套参数编的」。
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 已存在的 tag 名（如 v0.4.0）
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  # 发布自己构建并打包 —— 但它要的是「构建产物」，不是在发布时再跑一遍测试，
+  # 所以复用 ci.yml 的构建定义、把测试关掉（run-tests: false）。想验证某个提交
+  # 时，先手动跑一轮构建与测试（gh workflow run ci.yml），再打 tag。
+  #
+  # 没有把构建步骤抄一份到本文件里：那等于同时维护两套打包流程，改了一处忘了
+  # 另一处只是时间问题，而这套流程里全是「漏一个文件包就坏掉」的细节。
+  build:
+    uses: ./.github/workflows/ci.yml
+    with:
+      run-tests: false
+
+  publish:
+    name: 汇总产物并发布
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 下载全部构建产物
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          # 把各 job 的产物平铺到一个目录，方便一次性挂上去。
+          merge-multiple: true
+
+      - name: 清点产物
+        run: |
+          set -euo pipefail
+          find artifacts -type f -printf '%s\t%p\n' | sort -k2
+
+          # 任何一个平台的包缺失都算发布失败 —— 宁可这一步红掉，
+          # 也不要发出一个「看起来正常但少了某个平台」的 Release。
+          for expected in \
+            adisplay-windows-x64.zip \
+            adisplay-windows-arm64.zip \
+            adisplay-macos-universal.dmg \
+            adisplay-android-tv.apk
+          do
+            if [ ! -f "artifacts/${expected}" ]; then
+              echo "缺少产物：${expected}" >&2
+              exit 1
+            fi
+          done
+          echo "四个平台的产物都在。"
+
+      - name: 发布 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          append_body: true
+          # 安装说明与「当前进度」从文件读，不写死在 workflow 里。
+          #
+          # 写死的后果是那段文字从 v0.1.0 一直沿用到 v0.3.2 都没变过 ——
+          # 每次发版改了代码却忘了改它，Release 页上一直挂着「这是批次 0」。
+          # 改一个普通文件比记得改 workflow 容易得多。
+          body_path: docs/发布说明.md

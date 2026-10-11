@@ -1,0 +1,1606 @@
+// ADisplay —— Windows 主窗口
+//
+// 界面刻意做得很薄：所有状态都在 castcore 里，这里只负责显示和转发用户操作。
+// 文档 v2 第 5.2 节的设计前提就是「界面层与核心之间只通过一组 C 接口通信」，
+// 所以这个文件里不应该出现任何协议相关的逻辑。
+
+using System;
+using System.Collections.ObjectModel;
+using System.Globalization;
+using System.Net.Http;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Threading;
+using System.Threading.Tasks;
+using Microsoft.UI.Dispatching;
+using Microsoft.UI.Xaml.Media.Imaging;
+using Microsoft.UI.Windowing;
+using Windows.Graphics;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Controls;
+using Windows.Media.Core;
+using Windows.Media.Playback;
+using WinRT;
+using ADisplay.Windows.Interop;
+
+namespace ADisplay.Windows;
+
+public sealed partial class MainWindow : Window
+{
+    // 日志只留最近这些行。长时间挂着接收服务时，无限增长会拖慢界面。
+    private const int MaxLogLines = 500;
+
+    /// <summary>
+    /// 关窗时留给收尾的时间上限（毫秒）。见 OnWindowClosed 里的说明：
+    /// 正常收尾是毫秒级，卡住的话也不能让用户停在一个不动的窗口前面。
+    /// </summary>
+    private const int TeardownBudgetMs = 3000;
+
+    private readonly AdEngine _engine = new();
+    private readonly DispatcherQueue _dispatcher;
+
+    // 当前投屏会话。0 表示没有在投屏。
+    private uint _castSessionId;
+    // 每秒把播放器状态回报给核心。手机每隔一段时间会拉 GetPositionInfo，
+    // 位置必须持续更新，否则手机上的进度条一直停在起点。
+    private DispatcherTimer? _reportTimer;
+    // 镜像会话的帧源。null 表示当前不是镜像会话。
+    /// <summary>
+    /// 镜像这条路的本地流服务：把帧封成 MPEG-TS，从本地 HTTP 发出去，
+    /// 播放器按 URL 拉（与 DLNA 同一条路）。
+    /// </summary>
+    private LiveTsServer? _liveTs;
+    // 播放器对象由我们自己创建、自己持有。
+    //
+    // 不靠 MediaPlayerElement 自动建：那样「什么时候能拿到对象、事件订上没有」
+    // 就变成了时序问题，而这正是上一轮查不出结果的原因 —— 日志上完全看不出
+    // 播放器到底动没动。
+    private readonly MediaPlayer _player = new();
+    // 镜像伴音的播放端。核心里已经解成 PCM，这里只负责送进系统音频。
+    private readonly MirrorAudioPlayer _mirrorAudio = new();
+
+    /// <summary>镜像诊断的间隔。延迟会随时间变化，只看起播那一刻看不出趋势。</summary>
+    private static readonly TimeSpan MirrorProbeInterval = TimeSpan.FromSeconds(5);
+
+    private DispatcherTimer? _mirrorProbeTimer;
+    private DateTime _mirrorStartedAt;
+
+    // 自解码那条路的画面交接。
+    //
+    // 核心线程写、界面线程读：核心交下来的指针只在回调期间有效，必须当场拷走，
+    // 而 WriteableBitmap 只能在界面线程碰。两边用这把锁隔开。
+    private readonly object _frameLock = new object();
+    private byte[] _frameBuffer = new byte[0];
+    private int _frameWidth;
+    private int _frameHeight;
+    private bool _framePending;
+    private int _renderQueued;
+    private WriteableBitmap? _mirrorBitmap;
+    private bool _mirrorRenderLogged;
+
+    /// <summary>
+    /// 用户点了「结束投屏」：本地画面收起来了，但发送端可能还在推。
+    ///
+    /// 它管两件事：投屏页收起之后不再往音频里送帧（不然声音会自己回来），
+    /// 以及待机页上那条「还能回去」的横幅要不要显示。
+    /// </summary>
+    private bool _castingDismissedByUser;
+
+    /// <summary>
+    /// 最近一次投屏的地址。DLNA 这条路结束之后想「继续观看」就得靠它 ——
+    /// 播放器的 Source 已经被清掉了，没有这个字段就再也起不来。
+    /// </summary>
+    private string? _castingUrl;
+
+    /// <summary>
+    /// 用户结束掉的那一次投屏的会话号。0 表示没有「还能回去」的会话。
+    ///
+    /// 它同时是横幅的开关：待机页只在它非 0 时显示「继续观看 / 断开投屏」。
+    /// </summary>
+    private uint _dismissedSessionId;
+
+    /// <summary>被结束的那一次是不是屏幕镜像。恢复那条路两端做法不同，得记住。</summary>
+    private bool _dismissedIsMirror;
+
+    /// <summary>
+    /// 当前这次是不是屏幕镜像。
+    ///
+    /// 不能靠 _liveTs 判断 —— 自解码那条路画上第一帧之后就会把它收掉（置 null），
+    /// 镜像进行中它反而是空的。
+    /// </summary>
+    private bool _isMirrorSession;
+
+
+    // 自解码这条路的两个诊断数：画了多少帧、最近一帧「从核心交下来到画上屏」花了
+    // 多久。后者是判断「慢在哪一段」的关键 —— 它小就说明瓶颈在我们上游。
+    private long _renderedFrames;
+    private double _lastRenderDelayMs;
+    private long _frameArrivedTicks;
+    // 独立的日志窗口。null 表示当前没开着。
+    private LogWindow? _logWindow;
+    private readonly ObservableCollection<string> _logLines = new();
+
+    // 程序化改动 ToggleSwitch.IsOn 时会再次触发 Toggled，
+    // 用它避免在失败回滚时递归调用 Start/Stop。
+    private bool _suppressToggle;
+    // 同理：程序化设置画质下拉框的选中项也会触发 SelectionChanged。
+    private bool _suppressQuality;
+
+    /// <summary>当前界面文字。语言一变就换成另一份并重填界面，见 ApplyLanguage。</summary>
+    private Strings _strings = LanguageStore.Current();
+
+    /// <summary>程序化拨动语言下拉框也会触发 SelectionChanged，用它挡住（同 _suppressQuality）。</summary>
+    private bool _suppressLanguage;
+
+    /// <summary>
+    /// 最近一次收到的核心状态。语言一变要按新语言重算状态文字，而那一刻不一定
+    /// 正好有回调进来 —— 所以记着它（DescribeState 只吃这个值）。
+    /// </summary>
+    private AdServiceState _lastState = AdServiceState.Stopped;
+
+    public MainWindow()
+    {
+        StartupLog.Enter("MainWindow 构造函数");
+
+        // XAML 解析失败是「进程活着却没有窗口」的头号嫌疑，这一对进入/离开
+        // 正好把它圈出来：日志停在「进入」而没有「离开」，就是解析这一步炸了。
+        StartupLog.Enter("MainWindow.InitializeComponent()");
+        InitializeComponent();
+        StartupLog.Leave("MainWindow.InitializeComponent()");
+
+        // 按存下来的语言（没存过就按系统语言）把界面文字填一遍。
+        // 放在这里而不是引擎起来之后：引擎起不来时界面照样应该是用户选的语言。
+        ApplyLanguage();
+
+        _dispatcher = DispatcherQueue.GetForCurrentThread();
+
+        // 指针在投屏画面上一动，就把悬浮控件叫出来。
+        //
+        // 用 AddHandler(..., handledEventsToo: true) 而不是在 XAML 上挂
+        // PointerMoved：MediaPlayerElement 自己会处理指针事件（它要靠悬停显示
+        // 传输控件），XAML 上挂的处理器收不到已经被标记成 handled 的事件。
+        CastingPanel.AddHandler(UIElement.PointerMovedEvent,
+                                new PointerEventHandler(OnCastingPointerMoved),
+                                true);
+        // 播放器尽早挂上、尽早订阅：MediaPlayer 一拿到源就开始打开，
+        // 订阅晚了会漏掉 None→Opening 那一次（也是唯一一次）状态变化。
+        //
+        // 包一层 try：挂不上最多是投屏不出画面，而这里在窗口构造函数里 ——
+        // 让异常冒出去，用户看到的是「程序打不开」，那比不出画面难查得多。
+        try
+        {
+            PlayerElement.SetMediaPlayer(_player);
+            EnsurePlayerEvents();
+        }
+        catch (Exception error)
+        {
+            StartupLog.Failed("把播放器挂到 MediaPlayerElement 上", error);
+        }
+
+        // 日志集合由独立的日志窗口显示（见 LogWindow.xaml）。这里只持有它 ——
+        // 谁显示、显示在哪，都是那个窗口自己的事。
+
+        _engine.StateChanged += OnEngineStateChanged;
+        _engine.LogEmitted += OnEngineLogEmitted;
+        _engine.MediaUrlReceived += OnMediaUrlReceived;
+        _engine.PlaybackCommandReceived += OnPlaybackCommandReceived;
+        _engine.CastingEnded += OnCastingEnded;
+        _engine.MirrorStarted += OnMirrorStarted;
+        _engine.MirrorFrameReceived += OnMirrorFrameReceived;
+        _engine.VideoFrameReceived += OnVideoFrameReceived;
+        _engine.AudioFrameReceived += OnAudioFrameReceived;
+        _mirrorAudio.Notice += OnMirrorNotice;
+
+        Closed += OnWindowClosed;
+
+        // 创建核心引擎要加载 castcore.dll 及其原生依赖，是启动路上第二容易出事的地方。
+        StartupLog.Enter("InitializeEngine");
+        InitializeEngine();
+        StartupLog.Leave("InitializeEngine");
+
+        StartupLog.Leave("MainWindow 构造函数");
+    }
+
+    private void InitializeEngine()
+    {
+        try
+        {
+            // 核心自带一套日志（adisplay.log，默认落在 %APPDATA%\ADisplay），
+            // 但它要等 Create 成功之后才开写。这里的启动日志比它早，负责的是
+            // 「引擎还没起来、或压根起不来」的那一段，两者不重复也不共用文件。
+            StartupLog.Enter("_engine.Create");
+            _engine.Create(
+                deviceName: string.Empty,   // 空表示由核心取主机名作为默认设备名
+                logFilePath: string.Empty,  // 空表示用平台默认日志路径
+                configFilePath: string.Empty);
+            StartupLog.Leave("_engine.Create");
+
+            DeviceNameBox.Text = _engine.DeviceName;
+            // 档位的下拉项顺序与 AdQualityPreset 的取值一一对应（0/1/2）。
+            _suppressQuality = true;
+            QualityBox.SelectedIndex = ReadQualityIndex();
+            _suppressQuality = false;
+            DeviceIdRun.Text = _engine.DeviceId;
+            AddressRun.Text = FormatAddresses(_engine.LocalAddresses);
+            VersionRun.Text = ReadVersion();
+
+            AppendLog(AdLogLevel.Info, "ADisplay 已就绪。打开开关即可开始接收投屏。");
+        }
+        catch (Exception ex)
+        {
+            StartupLog.Failed("_engine.Create", ex);
+            StatusText.Text = ex.Message;
+            AppendLog(AdLogLevel.Error, ex.Message);
+            ServiceToggle.IsEnabled = false;
+        }
+    }
+
+    private string ReadVersion()
+    {
+        IntPtr text = AdNative.ad_version_string();
+        if (text == IntPtr.Zero)
+        {
+            return _strings.Unknown;
+        }
+        return Marshal.PtrToStringAnsi(text) ?? _strings.Unknown;
+    }
+
+    // 核心返回的地址是换行分隔的，直接塞进一行会很难看。
+    private string FormatAddresses(string raw)
+    {
+        if (string.IsNullOrEmpty(raw))
+        {
+            return _strings.NoLocalAddress;
+        }
+        string[] lines = raw.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+        return lines.Length == 0
+            ? _strings.NoLocalAddress
+            : string.Join(_strings.AddressSeparator, lines);
+    }
+
+    // ---------------------------------------------------------------------
+    // 服务开关
+    // ---------------------------------------------------------------------
+
+    private void OnServiceToggled(object sender, RoutedEventArgs e)
+    {
+        if (_suppressToggle)
+        {
+            return;
+        }
+
+        if (ServiceToggle.IsOn)
+        {
+            // 成对记录进出。原生崩溃不会抛托管异常，try/catch 接不住 ——
+            // 那种情况下日志会停在「进入」而没有「离开」，一眼就能看出
+            // 是死在核心库里，而不是界面层或配置读写。
+            StartupLog.Enter("_engine.Start");
+            try
+            {
+                _engine.Start();
+                StartupLog.Leave("_engine.Start");
+            }
+            catch (Exception ex)
+            {
+                StartupLog.Failed("_engine.Start", ex);
+                // 启动失败（最常见的是端口被占）要立刻把开关拨回去，
+                // 否则界面会显示成「已开启」但实际没在监听。
+                AppendLog(AdLogLevel.Error, ex.Message);
+                SetToggleSilently(false);
+                StatusText.Text = ex.Message;
+            }
+        }
+        else
+        {
+            _engine.Stop();
+        }
+    }
+
+    private void SetToggleSilently(bool value)
+    {
+        _suppressToggle = true;
+        ServiceToggle.IsOn = value;
+        _suppressToggle = false;
+    }
+
+    // ---------------------------------------------------------------------
+    // 设备名称
+    // ---------------------------------------------------------------------
+
+    private void OnDeviceNameTextChanged(object sender, TextChangedEventArgs e)
+    {
+        string? reason = AdEngine.ValidateDeviceName(DeviceNameBox.Text);
+
+        if (reason == null)
+        {
+            NameHintText.Visibility = Visibility.Collapsed;
+            ApplyNameButton.IsEnabled = true;
+        }
+        else
+        {
+            NameHintText.Text = reason;
+            NameHintText.Visibility = Visibility.Visible;
+            ApplyNameButton.IsEnabled = false;
+        }
+    }
+
+    private void OnApplyNameClick(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            _engine.DeviceName = DeviceNameBox.Text;
+            // 核心改完名称会重新注册 mDNS / SSDP，手机端列表几秒内跟着变。
+            AppendLog(AdLogLevel.Info, $"设备名称已保存为「{DeviceNameBox.Text}」。手机端列表可能需要几秒刷新。");
+        }
+        catch (Exception ex)
+        {
+            AppendLog(AdLogLevel.Error, ex.Message);
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // 画质档位（文档 2.3）
+    // ---------------------------------------------------------------------
+
+    /// <summary>读回已保存的档位。读不到就用「均衡」。</summary>
+    private int ReadQualityIndex()
+    {
+        try
+        {
+            int preset = _engine.QualityPreset;
+            if (preset >= 0 && preset <= 2)
+            {
+                return preset;
+            }
+        }
+        catch (Exception ex)
+        {
+            AppendLog(AdLogLevel.Error, ex.Message);
+        }
+        return (int)AdQualityPreset.Balanced;
+    }
+
+    /// <summary>
+    /// 按当前语言把界面上的文字重新填一遍。
+    ///
+    /// 为什么是「填一遍」而不是绑定：XAML 里那些字是解析时定下的，WinUI 的资源系统
+    /// （x:Uid + .resw）同样只在解析时取一次值 —— 而用户要求**切换语言不重启应用**
+    /// （2026-10-11）。所以给每个会变的元素起了名（见 MainWindow.xaml），这里逐个赋值。
+    ///
+    /// **新增界面文字时两处都要动**：XAML 里写中文默认值，这里补一句回填；漏了的话
+    /// 中文界面看不出来，切到英文才会发现那句没变。
+    /// </summary>
+    private void ApplyLanguage()
+    {
+        Strings s = _strings;
+
+        // 设置页
+        DeviceNameLabelText.Text = s.DeviceNameLabel;
+        DeviceNameBox.PlaceholderText = s.DeviceNamePlaceholder;
+        ApplyNameButton.Content = s.Save;
+        ServiceLabelText.Text = s.ReceiverService;
+        ServiceToggle.OnContent = s.ToggleOn;
+        ServiceToggle.OffContent = s.ToggleOff;
+        QualityLabelText.Text = s.MirrorQuality;
+        QualityHintText.Text = s.QualityHint;
+        LanguageLabelText.Text = s.UiLanguage;
+        LocalInfoLabelText.Text = s.LocalInfo;
+        AddressLabelRun.Text = s.InfoLocalAddress;
+        DeviceIdLabelRun.Text = s.InfoDeviceId;
+        VersionLabelRun.Text = s.InfoCoreVersion;
+        ShowLogButtonSettings.Content = s.ViewLog;
+        LogHintText.Text = s.LogHint;
+
+        // 画质下拉：档位名跟着语言走（分辨率与语言无关）。下拉项的顺序与
+        // AdQualityPreset 的取值一一对应（0/1/2），与初始化那处同一个约定。
+        for (int i = 0; i < QualityBox.Items.Count; i++)
+        {
+            ComboBoxItem item = QualityBox.Items[i] as ComboBoxItem;
+            if (item != null)
+            {
+                item.Content = s.QualityItem((AdQualityPreset)i);
+            }
+        }
+
+        // 语言下拉自己：两个词都不翻译，只把选中项拨到当前语言
+        _suppressLanguage = true;
+        LanguageBox.SelectedIndex = _strings.Language == Language.En ? 1 : 0;
+        _suppressLanguage = false;
+
+        // 投屏页与悬浮控件
+        PlaybackHintText.Text = s.PlaybackHintMouse;
+        ShowLogButton.Content = s.ViewLog;
+        StopCastingButton.Content = s.EndCasting;
+        ResumeBannerText.Text = _dismissedIsMirror ? s.BannerMirrorEnded : s.BannerCastEnded;
+        ResumeCastingButton.Content = s.ResumeCasting;
+        DisconnectCastingButton.Content = s.DisconnectCasting;
+        FullScreenButton.Content = IsFullScreen() ? s.ExitFullScreen : s.FullScreen;
+        CastingTitleText.Text = _isMirrorSession ? s.MirroringScreen : s.ReceivingCast;
+
+        // 代码算出来的那几处：状态文字按记下的状态重算
+        StatusText.Text = DescribeState(_lastState);
+
+        // 日志窗是独立窗口，不在 XAML 树里，得单独叫它一声（关着就不用管，
+        // 它每次打开都会按当前语言填）。
+        if (_logWindow != null)
+        {
+            _logWindow.ApplyLanguage(_strings);
+        }
+    }
+
+    /// <summary>语言下拉框换了。写盘 + 立刻重填界面 —— 不重启应用。</summary>
+    private void OnLanguageChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressLanguage || LanguageBox.SelectedIndex < 0)
+        {
+            return;
+        }
+
+        Language target = LanguageBox.SelectedIndex == 1 ? Language.En : Language.Zh;
+        if (target == _strings.Language)
+        {
+            return;
+        }
+
+        _strings = Strings.Of(target);
+        LanguageStore.Write(target);
+        ApplyLanguage();
+        // 日志一律中文，不跟着界面走。
+        AppendLog(AdLogLevel.Info, "界面语言已切换为「" + (target == Language.En ? "en" : "zh") + "」");
+    }
+
+    private void OnQualityChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressQuality || QualityBox.SelectedIndex < 0)
+        {
+            return;
+        }
+        try
+        {
+            _engine.SetQualityPreset((AdQualityPreset)QualityBox.SelectedIndex);
+        }
+        catch (Exception ex)
+        {
+            AppendLog(AdLogLevel.Error, ex.Message);
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // 来自核心的事件
+    //
+    // 回调在核心的工作线程上触发，必须切回 UI 线程再碰控件。
+    // ---------------------------------------------------------------------
+
+    // ---------------------------------------------------------------------
+    // 投屏播放（文档 3.2、4.1）
+    //
+    // 核心不播放：DLNA 给的是一条 URL，解码渲染交给系统播放器 ——
+    // MediaPlayerElement 背后是 Media Foundation，硬解与音画同步都是现成的。
+    // 这一层只做三件事：起播、执行手机发来的控制意图、把真实状态回报给核心。
+    //
+    // 第三条是必须的，不是可选优化：核心不碰播放器，手机的 GetTransportInfo /
+    // GetPositionInfo / GetVolume 全靠这份回报作答。
+    // ---------------------------------------------------------------------
+
+    private void OnMediaUrlReceived(uint sessionId, string url)
+    {
+        // 回调在核心的工作线程上触发，控件只能在 UI 线程碰。
+        _dispatcher.TryEnqueue(() => BeginCasting(sessionId, url));
+    }
+
+    private void OnPlaybackCommandReceived(int command, long value)
+    {
+        _dispatcher.TryEnqueue(() => ApplyPlaybackCommand(command, value));
+    }
+
+    private void OnCastingEnded(uint sessionId)
+    {
+        _dispatcher.TryEnqueue(() => HandleCastingEnded(sessionId));
+    }
+
+    /// <summary>
+    /// 会话结束了。要分清是谁结束的：
+    ///
+    ///   * 我们刚断开、或者手机自己停了那一条 —— 本地早就收拾过，只要把横幅收掉；
+    ///   * 被新会话抢占 —— 维持原来的行为，走一遍收尾。
+    /// </summary>
+    private void HandleCastingEnded(uint sessionId)
+    {
+        if (_dismissedSessionId != 0 && sessionId == _dismissedSessionId)
+        {
+            _dismissedSessionId = 0;
+            _castingDismissedByUser = false;
+            UpdateResumeBanner();
+            return;
+        }
+
+        // 会话真的结束了（不是我们躲开的）：没什么可恢复的，横幅不该出现。
+        EndCasting(false);
+    }
+
+    // ---------------------------------------------------------------------
+    // AirPlay 屏幕镜像
+    //
+    // 与 DLNA 那条路的区别只在「画面从哪来」：那边是一条 URL 交给播放器引擎，
+    // 这边是持续的压缩帧。解码与渲染同样不归我们管 —— 帧喂进 MediaStreamSource，
+    // 背后是 Media Foundation。
+    // ---------------------------------------------------------------------
+
+    private void OnMirrorStarted(uint sessionId)
+    {
+        _dispatcher.TryEnqueue(() =>
+        {
+            try
+            {
+                StartMirroring(sessionId);
+            }
+            catch (Exception error)
+            {
+                // 不接住的话，这个异常会消失在消息泵里：界面上没提示、日志里没
+                // 记录，用户看到的只是「投屏了但不出画面」。上一轮就是卡在
+                // 这种「什么都看不到」的状态里，只能靠猜。
+                AppendLog(AdLogLevel.Error, "镜像启动失败：" + error.GetType().Name
+                    + "：" + error.Message);
+            }
+        });
+    }
+
+    private void StartMirroring(uint sessionId)
+    {
+        if (_liveTs != null)
+        {
+            return;
+        }
+        // 会话号来自核心。「断开投屏」要靠它指定断开哪一条，所以不能像原来那样
+        // 写 0 糊过去。
+        _castSessionId = sessionId;
+        _isMirrorSession = true;
+        _castingUrl = null;
+        _dismissedSessionId = 0;
+        _dismissedIsMirror = false;
+        UpdateResumeBanner();
+
+        // 先把本地流服务起来，再让播放器去拉它 —— 与 DLNA 完全同一条路：
+        // 播放器看到的是一个普通的 HTTP URL，不经过 MediaStreamSource
+        // 那层黑箱契约（那条路上的失败是静默的，我们查了很久）。
+        LiveTsServer server = new LiveTsServer();
+        server.Notice += OnMirrorNotice;
+        if (!server.Start())
+        {
+            return;
+        }
+        _liveTs = server;
+
+        // 直播开关：告诉播放器这是实时流，别为了抗抖动先攒一段再开播。
+        // 默认行为下画面会永远落在直播后面好几秒 —— 镜像这场景，落后比偶尔
+        // 卡一下难受得多。
+        // 新一次镜像：把上一轮结束留下的状态清干净（含伴音的挂起）。
+        _castingDismissedByUser = false;
+        _mirrorRenderLogged = false;
+        _renderedFrames = 0;
+        _lastRenderDelayMs = 0;
+        _mirrorAudio.Resume();
+
+        _player.RealTimePlayback = true;
+        _player.Source = MediaSource.CreateFromUri(new Uri(server.Url));
+        _player.Volume = 1.0;
+        _player.Play();
+        AppendLog(AdLogLevel.Info, "镜像：本地流已交给播放器，当前状态 "
+            + _player.PlaybackSession.PlaybackState + "。");
+
+        SettingsPanel.Visibility = Visibility.Collapsed;
+        CastingPanel.Visibility = Visibility.Visible;
+        CastingTitleText.Text = _strings.MirroringScreen;
+        // 刚进投屏先把控件亮出来一次：让用户知道现在什么状态、退路在哪，
+        // 之后它自己会收起。
+        ShowCastingControls();
+        // 镜像这条没有 URL（帧是核心直接交下来的，不是渐进式下载），
+        // 所以取不到文件大小，界面上只显示「正在缓冲」。
+        StartBufferingWatch(null);
+        // 每 5 秒报一次管线状态。播放器卡在 Opening/Buffering 时不会再有
+        // 状态变化、也就不会再有日志，这几行是唯一能看出「卡在哪一步」的信号；
+        // 而延迟更要看趋势，只报一次说明不了问题。
+        _mirrorStartedAt = DateTime.Now;
+        _mirrorProbeTimer ??= new DispatcherTimer { Interval = MirrorProbeInterval };
+        _mirrorProbeTimer.Tick -= OnMirrorProbeTick;
+        _mirrorProbeTimer.Tick += OnMirrorProbeTick;
+        _mirrorProbeTimer.Stop();
+        _mirrorProbeTimer.Start();
+        AppendLog(AdLogLevel.Info, "iPhone 开始屏幕镜像");
+    }
+
+    private void OnMirrorProbeTick(object? sender, object e)
+    {
+        ReportMirrorState();
+    }
+
+    private void ReportMirrorState()
+    {
+        // 这里**不能**因为 _liveTs 为空就返回：自解码那条路在第一帧画出来时就把
+        // 本地流服务收掉了，一返回就等于这行诊断永远不出现。
+        int elapsed = (int)(DateTime.Now - _mirrorStartedAt).TotalSeconds;
+
+        // 两条路各报各自的数。以前固定报播放器的位置与「已送出到第几秒」，那是给
+        // 中转流量用的 —— 自解码这条路不用它，于是会报出「落后 0.5 秒」这种没有
+        // 意义的数字（中转早停了）。哪条在跑就报哪条。
+        string video;
+        if (_renderedFrames > 0)
+        {
+            video = "自解码 已画 " + _renderedFrames + " 帧（最近一帧从收到到上屏 "
+                + _lastRenderDelayMs.ToString("F1") + " 毫秒）";
+        }
+        else
+        {
+            MediaPlaybackSession session = _player.PlaybackSession;
+            video = "播放器 " + session.PlaybackState + "，位置 "
+                + session.Position.TotalSeconds.ToString("F1") + " 秒，缓冲 "
+                + (session.BufferingProgress * 100).ToString("F0") + "%";
+        }
+
+        AppendLog(AdLogLevel.Info, "镜像诊断（第 " + elapsed + " 秒）：" + video
+            + "；伴音 " + _mirrorAudio.State + "，收 "
+            + _mirrorAudio.EnqueuedSamples + " 个样本，送出 "
+            + _mirrorAudio.DeliveredFrames + " 帧，丢 "
+            + _mirrorAudio.DroppedSamples + " 个，峰值 "
+            + _mirrorAudio.TakePeak().ToString("F4") + "。");
+    }
+
+    /// <summary>
+    /// 订阅播放器的打开 / 失败 / 状态变化事件（幂等）。
+    ///
+    /// **要早于任何一次 Source 赋值**：MediaPlayer 一拿到源就开始打开，
+    /// None→Opening 那一次变化可能发生在订阅之前。而卡住的流不会再变第二次
+    /// 状态 —— 于是日志上看起来就像「播放器从没动过」，怎么查都查不出来。
+    /// </summary>
+    private void EnsurePlayerEvents()
+    {
+        _player.MediaOpened -= OnMediaOpened;
+        _player.MediaOpened += OnMediaOpened;
+        _player.MediaFailed -= OnMediaFailed;
+        _player.MediaFailed += OnMediaFailed;
+        _player.PlaybackSession.PlaybackStateChanged -= OnPlaybackStateChanged;
+        _player.PlaybackSession.PlaybackStateChanged += OnPlaybackStateChanged;
+    }
+
+    /// <summary>
+    /// 状态一变就说一句。卡在 Opening / Buffering 时这一行是唯一能看出
+    /// 「管线到底走到哪一步」的信号。
+    /// </summary>
+    private void OnPlaybackStateChanged(MediaPlaybackSession sender, object args)
+    {
+        _dispatcher.TryEnqueue(() =>
+        {
+            AppendLog(AdLogLevel.Info, "媒体播放状态：" + sender.PlaybackState
+                + "（缓冲进度 " + (sender.BufferingProgress * 100).ToString("F0") + "%）");
+        });
+    }
+
+    /// <summary>
+    /// 媒体管线打开成功 / 失败都要说话。
+    ///
+    /// 镜像这条路上的失败是静默的：播放器不出画面，界面上就是一个转圈，
+    /// 而「格式被拒」「系统没有 HEVC 解码器」「数据没喂进去」三种原因看起来
+    /// 一模一样。MediaFailed 会带上具体错误码，是唯一能一句话分清它们的信号。
+    /// </summary>
+    private void OnMediaOpened(MediaPlayer sender, object args)
+    {
+        // 这两个事件在**工作线程**上触发，而日志集合只能在界面线程碰 ——
+        // 直接写会抛异常（上一版就因此看不到这行日志，害得我以为管线从没打开过）。
+        _dispatcher.TryEnqueue(() =>
+        {
+            AppendLog(AdLogLevel.Info, "媒体管线已就绪，开始接收画面。");
+        });
+    }
+
+    private void OnMediaFailed(MediaPlayer sender, MediaPlayerFailedEventArgs args)
+    {
+        string detail = args.ErrorMessage;
+        if (detail == null || detail.Length == 0)
+        {
+            detail = args.Error.ToString();
+        }
+        // 项目约定不用 ?. 空条件运算符，写成显式判断。
+        string extended = "无扩展错误码";
+        if (args.ExtendedErrorCode != null)
+        {
+            extended = "0x" + args.ExtendedErrorCode.HResult.ToString("X8");
+        }
+        _dispatcher.TryEnqueue(() =>
+        {
+            AppendLog(AdLogLevel.Error,
+                "媒体管线失败：" + detail + "（" + args.Error + "，" + extended + "）。"
+                + "若是解码器缺失，装一下系统的「HEVC 视频扩展」即可。");
+        });
+    }
+
+    /// <summary>
+    /// 核心解好的一帧镜像画面。**在核心的工作线程上触发**，而指针只在本次调用
+    /// 期间有效 —— 所以当场拷进交接缓冲，再请界面线程来取。
+    ///
+    /// 刻意不每帧都排队：界面线程慢的时候我们要的是最新那一帧，把旧帧一帧帧补上
+    /// 只会让画面越来越落后 —— 这正是播放器那条路的老毛病。
+    /// </summary>
+    private void OnVideoFrameReceived(IntPtr data, int width, int height, long ptsUs)
+    {
+        if (data == IntPtr.Zero || width <= 0 || height <= 0)
+        {
+            return;
+        }
+
+        int bytes = width * 4 * height;
+        lock (_frameLock)
+        {
+            if (_frameBuffer.Length < bytes)
+            {
+                _frameBuffer = new byte[bytes];
+            }
+            Marshal.Copy(data, _frameBuffer, 0, bytes);
+            _frameWidth = width;
+            _frameHeight = height;
+            _framePending = true;
+            _frameArrivedTicks = Stopwatch.GetTimestamp();
+        }
+
+        // 只挂一次：已经在等界面线程取的那一帧会被新数据盖掉，正好是我们想要的。
+        if (Interlocked.Exchange(ref _renderQueued, 1) == 0)
+        {
+            _dispatcher.TryEnqueue(RenderMirrorFrame);
+        }
+    }
+
+    /// <summary>把最新一帧画上屏。在界面线程上跑。</summary>
+    private unsafe void RenderMirrorFrame()
+    {
+        Interlocked.Exchange(ref _renderQueued, 0);
+
+        byte[] pixels;
+        int width;
+        int height;
+        long arrivedTicks;
+        lock (_frameLock)
+        {
+            if (!_framePending)
+            {
+                return;
+            }
+            _framePending = false;
+            pixels = _frameBuffer;
+            width = _frameWidth;
+            height = _frameHeight;
+            arrivedTicks = _frameArrivedTicks;
+        }
+        _lastRenderDelayMs = (Stopwatch.GetTimestamp() - arrivedTicks) * 1000.0
+            / Stopwatch.Frequency;
+
+        try
+        {
+            // 尺寸变了（横竖屏切换、编码参数变化）就重建位图。
+            if (_mirrorBitmap == null || _mirrorBitmap.PixelWidth != width
+                || _mirrorBitmap.PixelHeight != height)
+            {
+                _mirrorBitmap = new WriteableBitmap(width, height);
+                MirrorImage.Source = _mirrorBitmap;
+            }
+
+            int bytes = width * 4 * height;
+            byte* raw = null;
+            // 同 MirrorAudioPlayer 里那处：CsWinRT 下投影对象必须用 .As<>() 来取
+            // 非投影的 COM 接口，C 风格强转会抛 InvalidCastException。
+            _mirrorBitmap.PixelBuffer.As<IBufferByteAccess>().Buffer(out raw);
+            fixed (byte* source = pixels)
+            {
+                Buffer.MemoryCopy(source, raw, bytes, bytes);
+            }
+            _mirrorBitmap.Invalidate();
+            _renderedFrames++;
+
+            if (!_mirrorRenderLogged)
+            {
+                _mirrorRenderLogged = true;
+                // 第一帧画出来了才让播放器那条路让开 —— 万一这边有问题，
+                // 那条还能兜着。
+                MirrorImage.Visibility = Visibility.Visible;
+                PlayerElement.Visibility = Visibility.Collapsed;
+                StopBufferingWatch();
+
+                // 播放器与本地流服务一并收掉：留着只是空转（它拉的那条流已经没有
+                // 数据了），而且它的状态混进诊断行会让人误读成「落后 0.5 秒」。
+                // 自解码一旦画上第一帧就不会退回播放器那条 —— 解码器起不起得来在
+                // 第一帧就定了，那时还没走到这里。
+                _player.Pause();
+                if (_liveTs != null)
+                {
+                    _liveTs.Notice -= OnMirrorNotice;
+                    _liveTs.Dispose();
+                    _liveTs = null;
+                }
+                AppendLog(AdLogLevel.Info, "镜像：自解码渲染已开始（" + width + "×" + height
+                    + "），播放器与本地流已收掉。");
+            }
+        }
+        catch (Exception error)
+        {
+            // 渲染失败不能沉默：界面线程上抛出去就是一个没人接的异常，
+            // 用户看到的只是「黑屏」，而日志里什么都没有。
+            AppendLog(AdLogLevel.Error, "镜像：画面渲染失败 —— " + error.GetType().Name
+                + "：" + error.Message);
+        }
+    }
+
+    private void OnAudioFrameReceived(float[] samples, int sampleRate, int channels)
+    {
+        // 用户已经结束投屏：这一帧不该出声。音频播放端自己也有一道挂起门禁，
+        // 这里是第二道 —— 两道都留着，因为「声音自己回来」是最难解释的一种坏法。
+        if (_castingDismissedByUser)
+        {
+            return;
+        }
+        EnqueueAudioFrame(samples, sampleRate, channels);
+    }
+
+    private void EnqueueAudioFrame(float[] samples, int sampleRate, int channels)
+    {
+        // 不切回 UI 线程：伴音每秒约 92 帧，每帧跳一次会把主线程压满、声音断续。
+        // 播放端只入队，音频图按自己的节奏来取。
+        _mirrorAudio.Enqueue(samples, sampleRate, channels);
+    }
+
+    private void OnMirrorNotice(string message)
+    {
+        // 回调在核心的工作线程上触发，日志集合只能在 UI 线程碰。
+        _dispatcher.TryEnqueue(() => AppendLog(AdLogLevel.Info, message));
+    }
+
+    private void OnMirrorFrameReceived(byte[] data, bool isH265, uint width, uint height, long ptsUs)
+    {
+        // 不切回 UI 线程：封 TS 与入队都不阻塞，每秒几十帧不该跳回主线程。
+        LiveTsServer? server = _liveTs;
+        if (server != null)
+        {
+            server.WriteFrame(data, isH265, ptsUs);
+        }
+    }
+
+    private void BeginCasting(uint sessionId, string url)
+    {
+        if (!Uri.TryCreate(url, UriKind.Absolute, out Uri? uri))
+        {
+            AppendLog(AdLogLevel.Error, $"投屏地址无法解析，播放器起不来：{url}");
+            return;
+        }
+
+        _castSessionId = sessionId;
+        _isMirrorSession = false;
+        // 结束之后想「继续观看」就得靠这条地址重新拉流 —— 播放器那时已经被
+        // 清空，没有它这场投屏就再也起不来了。
+        _castingUrl = url;
+        // 新一次投屏开始：上一轮结束留下的状态清干净（尤其是伴音的挂起，
+        // 不清的话这一轮会一直没声音）。
+        _castingDismissedByUser = false;
+        _dismissedSessionId = 0;
+        _dismissedIsMirror = false;
+        UpdateResumeBanner();
+        AppendLog(AdLogLevel.Info, $"开始拉流：{url}");
+
+        SettingsPanel.Visibility = Visibility.Collapsed;
+        CastingPanel.Visibility = Visibility.Visible;
+        CastingTitleText.Text = _strings.ReceivingCast;
+        ShowCastingControls();
+
+        _player.Source = MediaSource.CreateFromUri(uri);
+        EnsurePlayerEvents();
+        _player.Volume = 1.0;
+        _player.Play();
+
+        _reportTimer ??= new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+        _reportTimer.Tick -= OnReportTick;
+        _reportTimer.Tick += OnReportTick;
+        _reportTimer.Start();
+
+        StartBufferingWatch(url);
+
+        ReportPlayback();
+    }
+
+    /// <summary>
+    /// 收起投屏页，回设置页。
+    ///
+    /// keepRecoverable 区分两种来路：用户点了「结束投屏」（会话还活着，值得在待机页
+    /// 留一个「还能回去」的入口）与核心说这个会话已经结束了（没什么可恢复的，
+    /// 留横幅只会得到一个点了没反应的按钮）。
+    /// </summary>
+    private void EndCasting(bool keepRecoverable)
+    {
+        if (keepRecoverable && _castSessionId != 0)
+        {
+            // 记下「还能回去的那一次」：会话本身没结束（核心那边还在），只是我们
+            // 不看了。待机页据此显示「继续观看 / 断开投屏」。
+            _dismissedSessionId = _castSessionId;
+            _dismissedIsMirror = _isMirrorSession;
+        }
+        else if (!keepRecoverable)
+        {
+            // 会话已经没了：之前记下的那一次也不再可恢复。
+            _dismissedSessionId = 0;
+            _dismissedIsMirror = false;
+        }
+
+        // 项目约定不用 ?. 空条件运算符，写成显式判断。
+        if (_reportTimer != null)
+        {
+            _reportTimer.Stop();
+        }
+        _castSessionId = 0;
+        if (_mirrorProbeTimer != null)
+        {
+            _mirrorProbeTimer.Stop();
+        }
+
+        // 自解码那条路的状态也要收掉：位图留着（下次分辨率变了会重建），
+        // 但两个画面要换回来。
+        MirrorImage.Visibility = Visibility.Collapsed;
+        PlayerElement.Visibility = Visibility.Visible;
+        // 这里**不复位** _mirrorRenderLogged：帧还在继续画（只是画在隐藏的位图上），
+        // 复位会让下一帧再走一次「首帧」分支，把可见性与播放器状态又翻一遍。
+        // 它只在真正开始新一次镜像时复位，见 StartMirroring。
+        lock (_frameLock)
+        {
+            _framePending = false;
+        }
+
+        // 实时播放是给镜像这条直播流的。回到普通播放（DLNA）要还原 ——
+        // 那边是文件，先缓冲一段再播才是对的。
+        _player.RealTimePlayback = false;
+        _player.Source = null;
+        // 伴音停掉**并且挂起**：手机还在推流，不挂起的话下一帧就把声音拉回来了。
+        _castingDismissedByUser = true;
+        _mirrorAudio.Stop();
+        // 本地流服务要显式收掉：它还握着监听端口与播放器那条连接。
+        if (_liveTs != null)
+        {
+            _liveTs.Notice -= OnMirrorNotice;
+            _liveTs.Dispose();
+            _liveTs = null;
+        }
+        ExitFullScreenOnCastingEnd();
+        HideCastingControls();
+        StopBufferingWatch();
+        CastingPanel.Visibility = Visibility.Collapsed;
+        SettingsPanel.Visibility = Visibility.Visible;
+        UpdateResumeBanner();
+    }
+
+    private void OnStopCastingClick(object sender, RoutedEventArgs e)
+    {
+        // 只结束本地播放、回设置页，**不停接收服务** —— 服务一停广播就撤了，
+        // 手机那边立刻找不到这台机器。核心那边下次收到推送会重新开会话。
+        //
+        // 会话还活着，所以记成「还能回去」：待机页据此显示横幅。
+        EndCasting(true);
+    }
+
+    // ---------------------------------------------------------------------
+    // 全屏
+    //
+    // 走 AppWindow 而不是 MediaPlayerElement.IsFullWindow：后者只让画面填满
+    // 窗口，标题栏与边框还在原处，投屏时用户要的是整块屏幕。
+    // ---------------------------------------------------------------------
+
+    private void OnToggleFullScreenClick(object sender, RoutedEventArgs e)
+    {
+        SetFullScreen(!IsFullScreen());
+    }
+
+    private void OnEscapeInvoked(KeyboardAccelerator sender,
+                                 KeyboardAcceleratorInvokedEventArgs args)
+    {
+        // 只在全屏时响应。窗口模式下按 Esc 什么也不做 —— 否则用户想关掉
+        // 某个东西时会莫名进入全屏。
+        if (IsFullScreen())
+        {
+            SetFullScreen(false);
+            args.Handled = true;
+        }
+    }
+
+    private bool IsFullScreen()
+    {
+        return AppWindow.Presenter.Kind == AppWindowPresenterKind.FullScreen;
+    }
+
+    private void SetFullScreen(bool fullScreen)
+    {
+        AppWindow.SetPresenter(fullScreen ? AppWindowPresenterKind.FullScreen
+                                          : AppWindowPresenterKind.Default);
+        FullScreenButton.Content = fullScreen ? _strings.ExitFullScreen : _strings.FullScreen;
+
+        // 进出全屏时把控件亮出来一次，让用户看到按钮文字已经跟着变了；
+        // 之后照旧自动收起。控制条不再单独隐藏 —— 它已经是悬浮的。
+        ShowCastingControls();
+    }
+
+    private void ExitFullScreenOnCastingEnd()
+    {
+        // 投屏结束时人可能正停在全屏画面里，而那时投屏面板会被整个收起来 ——
+        // 不收全屏的话，用户面对的就是一块没有内容的黑屏，还找不到退出按钮。
+        if (IsFullScreen())
+        {
+            SetFullScreen(false);
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // 缓冲提示
+    //
+    // 大码率的片子（4K、B 站的高清源）起播前要拉一大段，那段时间画面是黑的 ——
+    // 用户看到的就是「投屏没反应」。缓冲期间把速度摆出来，一眼能看出它在动、
+    // 动得多快。
+    // ---------------------------------------------------------------------
+
+    private DispatcherTimer? _bufferingTimer;
+
+    /// <summary>上一次 tick 时的下载进度（0..1）。相邻两次之差 × 文件大小 = 速度。</summary>
+    private double _lastDownloadProgress;
+
+    /// <summary>媒体文件的总字节数。取不到就退化成只显示「正在缓冲」。</summary>
+    private long? _mediaSizeBytes;
+
+    private void StartBufferingWatch(string? mediaUrl)
+    {
+        _lastDownloadProgress = 0;
+        _mediaSizeBytes = null;
+
+        if (mediaUrl != null && mediaUrl.Length > 0)
+        {
+            // 想要「多少 MB/s」就得知道总大小 —— MediaPlayerElement 只给 0..1 的
+            // 进度，不给字节数，所以自己发一个 HEAD 问一下。问不到也不要紧。
+            FetchMediaSize(mediaUrl);
+        }
+
+        _bufferingTimer ??= new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+        _bufferingTimer.Tick -= OnBufferingTick;
+        _bufferingTimer.Tick += OnBufferingTick;
+        // 先停再起：连投两段视频时不会留下上一条的计时。
+        _bufferingTimer.Stop();
+        _bufferingTimer.Start();
+    }
+
+    private void StopBufferingWatch()
+    {
+        if (_bufferingTimer != null)
+        {
+            _bufferingTimer.Stop();
+        }
+        BufferingBadge.Visibility = Visibility.Collapsed;
+    }
+
+    private async void FetchMediaSize(string url)
+    {
+        try
+        {
+            using HttpClient client = new HttpClient();
+            using HttpRequestMessage request = new HttpRequestMessage(HttpMethod.Head, url);
+            using HttpResponseMessage response = await client.SendAsync(request);
+            _mediaSizeBytes = response.Content.Headers.ContentLength;
+        }
+        catch (Exception)
+        {
+            // 有些 CDN 不认 HEAD，或者要 Referer。取不到就退回只显示「正在缓冲」。
+            _mediaSizeBytes = null;
+        }
+    }
+
+    private void OnBufferingTick(object? sender, object e)
+    {
+        MediaPlayer? player = _player;
+        if (player == null)
+        {
+            BufferingBadge.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        MediaPlaybackSession session = player.PlaybackSession;
+        // Opening 也算：那是「连上了但还没开始供数据」，在用户眼里同样是黑屏。
+        bool buffering = session.PlaybackState == MediaPlaybackState.Buffering
+                         || session.PlaybackState == MediaPlaybackState.Opening;
+
+        // 一秒内的进度增量 × 总大小 = 字节/秒。
+        double progress = session.DownloadProgress;
+        double bytesPerSecond = 0;
+        if (_mediaSizeBytes.HasValue && progress > _lastDownloadProgress)
+        {
+            bytesPerSecond = (progress - _lastDownloadProgress) * _mediaSizeBytes.Value;
+        }
+        _lastDownloadProgress = progress;
+
+        if (buffering)
+        {
+            BufferingText.Text = bytesPerSecond > 0
+                ? _strings.BufferingWithSpeed(FormatSpeed(bytesPerSecond))
+                : _strings.Buffering;
+        }
+        BufferingBadge.Visibility = buffering ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    /// <summary>
+    /// 把字节/秒写成「1.2 MB/s」这种。
+    /// 用固定区域格式：中文区域下小数点同样是点，但万一落到用逗号做小数点的
+    /// 区域，同一行里「1,2 MB/s」会被读成一千二百。
+    /// </summary>
+    private static string FormatSpeed(double bytesPerSecond)
+    {
+        if (bytesPerSecond >= 1024 * 1024)
+        {
+            return string.Format(CultureInfo.InvariantCulture, "{0:F1} MB/s", bytesPerSecond / 1024 / 1024);
+        }
+        if (bytesPerSecond >= 1024)
+        {
+            return string.Format(CultureInfo.InvariantCulture, "{0:F0} KB/s", bytesPerSecond / 1024);
+        }
+        return string.Format(CultureInfo.InvariantCulture, "{0:F0} B/s", bytesPerSecond);
+    }
+
+    // ---------------------------------------------------------------------
+    // 悬浮控件
+    //
+    // 默认收起，鼠标一动才显示，几秒后自己收起来 —— 投屏时用户看的就是画面，
+    // 常驻一条控件既挡画面又白占高度。收起不是「消失」：鼠标一动就回来。
+    // ---------------------------------------------------------------------
+
+    /// <summary>悬浮控件出现后停留多久自动收起。</summary>
+    private static readonly TimeSpan ControlsTimeout = TimeSpan.FromSeconds(4);
+
+    private DispatcherTimer? _controlsTimer;
+
+    /// <summary>唤出悬浮控件，并重新计时。</summary>
+    private void ShowCastingControls()
+    {
+        if (CastingPanel.Visibility != Visibility.Visible)
+        {
+            return;
+        }
+
+        CastingOverlay.Visibility = Visibility.Visible;
+
+        _controlsTimer ??= new DispatcherTimer { Interval = ControlsTimeout };
+        _controlsTimer.Tick -= OnControlsTimerTick;
+        _controlsTimer.Tick += OnControlsTimerTick;
+        // 先停再起：控件正在显示时鼠标又动了一下，倒计时要重新计，
+        // 而不是接着原来的走 —— 用户正在看控件，不该正好在这一刻收走。
+        _controlsTimer.Stop();
+        _controlsTimer.Start();
+    }
+
+    private void HideCastingControls()
+    {
+        if (_controlsTimer != null)
+        {
+            _controlsTimer.Stop();
+        }
+        CastingOverlay.Visibility = Visibility.Collapsed;
+    }
+
+    private void OnControlsTimerTick(object? sender, object e)
+    {
+        HideCastingControls();
+    }
+
+    private void OnCastingPointerMoved(object sender, PointerRoutedEventArgs e)
+    {
+        ShowCastingControls();
+    }
+
+    private void OnReportTick(object? sender, object e)
+    {
+        ReportPlayback();
+    }
+
+    private void ApplyPlaybackCommand(int command, long value)
+    {
+        MediaPlayer? player = _player;
+        if (player == null)
+        {
+            return;
+        }
+
+        switch ((AdPlaybackCommand)command)
+        {
+            case AdPlaybackCommand.Play:
+                player.Play();
+                break;
+            case AdPlaybackCommand.Pause:
+                player.Pause();
+                break;
+            case AdPlaybackCommand.Seek:
+                player.PlaybackSession.Position = TimeSpan.FromMilliseconds(value);
+                break;
+            case AdPlaybackCommand.SetVolume:
+                player.Volume = Math.Clamp(value, 0, 100) / 100.0;
+                break;
+            case AdPlaybackCommand.SetMute:
+                player.IsMuted = value != 0;
+                break;
+            case AdPlaybackCommand.Stop:
+                // DLNA 的 Stop 是「停止播放」而不是「结束投屏」：媒体还挂着，
+                // 手机随后可以再 Play。所以回到起点并暂停，不销毁会话。
+                player.Pause();
+                player.PlaybackSession.Position = TimeSpan.Zero;
+                break;
+        }
+
+        // 控制结果立刻回报，不等下一拍。
+        ReportPlayback();
+    }
+
+    private void ReportPlayback()
+    {
+        MediaPlayer? player = _player;
+        if (_castSessionId == 0 || player == null)
+        {
+            return;
+        }
+
+        MediaPlaybackSession session = player.PlaybackSession;
+
+        int transport = session.PlaybackState switch
+        {
+            MediaPlaybackState.Playing => (int)AdTransportState.Playing,
+            MediaPlaybackState.Paused => (int)AdTransportState.Paused,
+            MediaPlaybackState.Opening => (int)AdTransportState.Transitioning,
+            MediaPlaybackState.Buffering => (int)AdTransportState.Transitioning,
+            _ => (int)AdTransportState.Stopped,
+        };
+
+        // 直播流的 NaturalDuration 是 0 或者无穷，这种按「未知」(-1) 上报，
+        // 否则手机上会出现一条荒谬的进度条。
+        long durationMs = -1;
+        if (session.NaturalDuration > TimeSpan.Zero &&
+            !double.IsInfinity(session.NaturalDuration.TotalMilliseconds))
+        {
+            durationMs = (long)session.NaturalDuration.TotalMilliseconds;
+        }
+
+        _engine.ReportPlayback(
+            _castSessionId,
+            transport,
+            (long)session.Position.TotalMilliseconds,
+            durationMs,
+            (int)Math.Round(player.Volume * 100),
+            player.IsMuted ? 1 : 0);
+    }
+
+    private void OnEngineStateChanged(AdServiceState state)
+    {
+        _dispatcher.TryEnqueue(() => ApplyState(state));
+    }
+
+    private void OnEngineLogEmitted(AdLogLevel level, string message)
+    {
+        _dispatcher.TryEnqueue(() => AppendLog(level, message));
+    }
+
+    private void ApplyState(AdServiceState state)
+    {
+        _lastState = state;
+        StatusText.Text = DescribeState(state);
+
+        switch (state)
+        {
+            case AdServiceState.Stopped:
+            case AdServiceState.Error:
+                SetToggleSilently(false);
+                break;
+            case AdServiceState.Running:
+            case AdServiceState.Streaming:
+                SetToggleSilently(true);
+                break;
+            default:
+                break;
+        }
+    }
+
+    private string DescribeState(AdServiceState state)
+    {
+        return _strings.StateText(state);
+    }
+
+    // ---------------------------------------------------------------------
+    // 日志
+    // ---------------------------------------------------------------------
+
+    private void AppendLog(AdLogLevel level, string message)
+    {
+        string stamp = DateTime.Now.ToString("HH:mm:ss");
+        _logLines.Add($"[{stamp}] [{level.ToString().ToUpperInvariant()}] {message}");
+
+        while (_logLines.Count > MaxLogLines)
+        {
+            _logLines.RemoveAt(0);
+        }
+
+        // 日志窗口自己盯着集合变化并滚动（见 LogWindow），
+        // 这里不需要知道有没有窗口开着、开在哪一页。
+    }
+
+    // ---------------------------------------------------------------------
+    // 日志窗口
+    // ---------------------------------------------------------------------
+
+    /// <summary>
+    /// 刷新待机页上那条横幅：只在「用户结束过本地播放、而且会话还在」时出现。
+    /// </summary>
+    private void UpdateResumeBanner()
+    {
+        bool show = _dismissedSessionId != 0;
+        ResumeBanner.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
+        if (show)
+        {
+            ResumeBannerText.Text = _dismissedIsMirror
+                ? _strings.BannerMirrorEnded
+                : _strings.BannerCastEnded;
+        }
+    }
+
+    /// <summary>点「继续观看」：回到投屏页。会话一直在，不需要重开会话。</summary>
+    private void OnResumeCastingClick(object sender, RoutedEventArgs e)
+    {
+        uint sessionId = _dismissedSessionId;
+        if (sessionId == 0)
+        {
+            return;
+        }
+
+        bool wasMirror = _dismissedIsMirror;
+        _dismissedSessionId = 0;
+        _dismissedIsMirror = false;
+        _castingDismissedByUser = false;
+        _mirrorAudio.Resume();
+        UpdateResumeBanner();
+
+        CastingPanel.Visibility = Visibility.Visible;
+        SettingsPanel.Visibility = Visibility.Collapsed;
+        CastingTitleText.Text = wasMirror ? _strings.MirroringScreen : _strings.ReceivingCast;
+        _castSessionId = sessionId;
+        ShowCastingControls();
+
+        if (wasMirror)
+        {
+            // 镜像这条：自解码一直在往位图上画（只是画在隐藏的位图里），
+            // 位图里就是最新一帧，把画面换回来即可。
+            //
+            // 刻意**不走** StartMirroring：那会重建本地流服务、把播放器指过去，
+            // 而自解码那条路早就把那两样收掉了。
+            // 画面会立刻回来（冻结在最后一帧），等发送端下一个关键帧才动起来。
+            MirrorImage.Visibility = Visibility.Visible;
+            PlayerElement.Visibility = Visibility.Collapsed;
+            _mirrorStartedAt = DateTime.Now;
+            if (_mirrorProbeTimer != null)
+            {
+                _mirrorProbeTimer.Start();
+            }
+        }
+        else
+        {
+            // DLNA 那条：播放器被清空过了，得用缓存下来的地址重新拉。
+            string? url = _castingUrl;
+            if (url != null && url.Length > 0)
+            {
+                BeginCasting(sessionId, url);
+            }
+        }
+    }
+
+    /// <summary>
+    /// 点「断开投屏」：让核心真的结束这一次会话。
+    ///
+    /// AirPlay 那条会让 iPhone 停下来；DLNA 只能本地结束并推一条 STOPPED 事件
+    /// —— 接收端在 DLNA 里是被动方，协议上命令不了手机。
+    /// </summary>
+    private void OnDisconnectCastingClick(object sender, RoutedEventArgs e)
+    {
+        uint sessionId = _dismissedSessionId;
+        if (sessionId == 0)
+        {
+            return;
+        }
+
+        AdResult result = _engine.DisconnectSession(sessionId);
+        if (result == AdResult.NotFound)
+        {
+            // 会话其实已经不在了（手机自己停的，而回调刚到）：自我修复，收掉横幅。
+            _dismissedSessionId = 0;
+            _dismissedIsMirror = false;
+            _castingDismissedByUser = false;
+            UpdateResumeBanner();
+            return;
+        }
+        if (result != AdResult.Ok)
+        {
+            AppendLog(AdLogLevel.Warn, "断开投屏失败：" + result + "（会话 " + sessionId + "）");
+        }
+        // 成功时不自作主张清状态：等 on_session_closed 走 HandleCastingEnded 收尾，
+        // 那条路才是「会话真的没了」的权威。
+    }
+
+    private void OnShowLogClick(object sender, RoutedEventArgs e)
+    {
+        if (_logWindow != null)
+        {
+            // WinUI 的窗口关了就是销毁，不能重新 Activate；所以只有还活着时
+            // 才把它提到前面。
+            _logWindow.Activate();
+            return;
+        }
+
+        _logWindow = new LogWindow(_logLines, _strings);
+        // 引用要在关闭时清掉：不清的话下次点「查看日志」会去 Activate 一个
+        // 已经销毁的窗口，什么也不会发生。
+        _logWindow.Closed += OnLogWindowClosed;
+        PlaceLogWindow();
+        _logWindow.Activate();
+    }
+
+    /// <summary>
+    /// 把日志窗摆到主窗**标题栏下方**。
+    ///
+    /// 不指定位置时由系统随手摆，实测正好压在主窗上 —— 于是用户点主窗标题栏上的
+    /// X，第一次点击落在盖着它的日志窗上（先关掉日志窗），得再点一次才关主窗。
+    /// 往下让开一个标题栏的高度，无论主窗多宽，它的关闭按钮都不会被盖住。
+    /// </summary>
+    private void PlaceLogWindow()
+    {
+        LogWindow? window = _logWindow;
+        if (window == null)
+        {
+            return;
+        }
+        try
+        {
+            AppWindow log = window.AppWindow;
+            SizeInt32 size = log.Size;
+            PointInt32 main = AppWindow.Position;
+            DisplayArea area = DisplayArea.GetFromWindowId(AppWindow.Id, DisplayAreaFallback.Primary);
+            RectInt32 work = area.WorkArea;
+
+            int x = main.X + 72;
+            int y = main.Y + 96;
+
+            // 夹进主窗所在显示器的工作区。主窗贴着屏幕右边时，光加个偏移会把日志窗
+            // 推出去一半 —— 那是这个改动自己引入的毛病，得自己堵上。
+            // 窗口比工作区还大时 max 会小于 min，所以两头的判断都不能省。
+            int maxX = work.X + Math.Max(0, work.Width - size.Width);
+            int maxY = work.Y + Math.Max(0, work.Height - size.Height);
+            if (x > maxX)
+            {
+                x = maxX;
+            }
+            if (y > maxY)
+            {
+                y = maxY;
+            }
+            if (x < work.X)
+            {
+                x = work.X;
+            }
+            if (y < work.Y)
+            {
+                y = work.Y;
+            }
+
+            log.Move(new PointInt32(x, y));
+        }
+        catch (Exception)
+        {
+            // 摆不成只是位置难看，不影响功能 —— 不该因此打断「查看日志」。
+        }
+    }
+
+    private void OnLogWindowClosed(object sender, WindowEventArgs args)
+    {
+        if (_logWindow != null)
+        {
+            _logWindow.Closed -= OnLogWindowClosed;
+            _logWindow = null;
+        }
+
+        // 刻意**不**在这里去关主窗：关日志窗就只关日志窗，主窗留着继续用。
+        // 反过来（关主窗 → 强制带上日志窗）走 OnWindowClosed，那一条才是必须的 ——
+        // 主窗没了而日志窗还挂着，进程会被吊住不退出。
+    }
+
+    /// <summary>
+    /// 主窗关闭 —— 这就是「用户要退出应用」，不是「关掉一个窗口」。
+    ///
+    /// 日志窗是独立的 Window，**不会**随主窗消失；不主动收它，进程就会被它吊着
+    /// 不退（Windows 的窗口模型里，只要还有窗口就还在跑）。
+    ///
+    /// 每一步**各自兜异常**，而且顺序固定：任何一步抛出去，后面的清理就都不会跑，
+    /// 用户看到的就是「窗口关了、进程还在任务管理器里」—— 而那时界面已经没了，
+    /// 连日志窗口都看不到，是最难查的一种坏法。
+    ///
+    /// ## 为什么收尾有 3 秒上限
+    ///
+    /// 用户报过两次「点 X 之后主窗不动、只有日志窗没了，得再点一次」。
+    /// 那种表现有两个可能的原因，而且都真实发生过：
+    ///   * 日志窗盖住了主窗的 X —— 点在日志窗上了（见 PlaceLogWindow）；
+    ///   * 收尾卡住 —— 日志窗那一步很快、看得见，后面几步卡住就完全没有反馈。
+    /// 第二种情况下，UI 线程被卡在关闭处理里，窗口就一直挂在那儿，用户面对的是
+    /// 一个「点什么都没反应」的窗口。所以播放器与引擎的销毁挪到后台线程做，
+    /// 主线程最多等 3 秒 —— 超时就直接退出，**宁可少做一点收尾**（进程一没，
+    /// 句柄与端口都由系统回收，代价只是 mDNS 那条广播没能体面撤回、手机的列表
+    /// 要多留几秒），也不能把用户困在一个不动的窗口前面。
+    ///
+    /// 每一步的耗时都写进 StartupLog：下次再出这种事，一眼就能分开是哪种 ——
+    /// 日志里写着「收尾超时」就是卡住，写着毫秒级完成就是点在别的窗口上了。
+    /// </summary>
+    private void OnWindowClosed(object sender, WindowEventArgs args)
+    {
+        Stopwatch clock = Stopwatch.StartNew();
+        StartupLog.Mark("关窗：开始收尾");
+
+        // 先收日志窗：它盯着日志集合，集合一旦停更，留着也是空窗。这一步必须留在
+        // 主线程（窗口操作），而且要快 —— 它一关用户立刻看得见反馈。
+        try
+        {
+            if (_logWindow != null)
+            {
+                _logWindow.Close();
+                _logWindow = null;
+            }
+        }
+        catch (Exception)
+        {
+        }
+        StartupLog.Mark($"关窗：日志窗已收（{clock.ElapsedMilliseconds} 毫秒）");
+
+        bool finished = false;
+        try
+        {
+            Task teardown = Task.Run(() =>
+            {
+                // 播放器握着一条到本地流服务的连接与解码资源，不收会多吊一会儿。
+                try
+                {
+                    _player.Dispose();
+                }
+                catch (Exception)
+                {
+                }
+
+                // 先摘事件再销毁引擎，避免销毁过程中的状态回调打到已经在拆的界面上。
+                try
+                {
+                    _engine.StateChanged -= OnEngineStateChanged;
+                    _engine.LogEmitted -= OnEngineLogEmitted;
+                    _engine.MirrorStarted -= OnMirrorStarted;
+                    _engine.MirrorFrameReceived -= OnMirrorFrameReceived;
+                    _engine.Dispose();
+                }
+                catch (Exception)
+                {
+                }
+            });
+            finished = teardown.Wait(TimeSpan.FromMilliseconds(TeardownBudgetMs));
+        }
+        catch (Exception)
+        {
+            // 后台那一步抛出来的异常（Task.Wait 会包成 AggregateException）：
+            // 收尾失败不是把用户留在窗口前的理由，下面照样退出。
+        }
+
+        StartupLog.Mark(finished
+            ? $"关窗：收尾完成（{clock.ElapsedMilliseconds} 毫秒）"
+            : $"关窗：收尾超时（{clock.ElapsedMilliseconds} 毫秒，上限 {TeardownBudgetMs}）—— 不等了，直接退出");
+
+        // 最后显式退出，不去赌「最后一个窗口关掉后系统会自己收尾」。
+        // 上面已经把该收的都收了（或者已确认收不动），这一句是确定性的兜底。
+        try
+        {
+            Application.Current.Exit();
+        }
+        catch (Exception)
+        {
+        }
+    }
+}

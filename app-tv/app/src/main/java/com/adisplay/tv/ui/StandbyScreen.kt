@@ -1,0 +1,540 @@
+package com.adisplay.tv.ui
+
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
+import androidx.tv.material3.MaterialTheme
+import androidx.tv.material3.Surface
+import androidx.tv.material3.Text
+import com.adisplay.tv.EngineModel
+import com.adisplay.tv.Language
+import com.adisplay.tv.QualityPreset
+
+/**
+ * 界面入口：按「有没有媒体在播」在待机页与播放页之间切，并负责那两块抽屉。
+ *
+ * 不另开 Activity —— 文档 2.3 要求投屏开始时自动全屏并置于最上层、结束后回到
+ * 待机页，同一个 Activity 里换内容比走 Intent 更直接，也少一层「切回来时
+ * 还剩下多少状态」的麻烦。切换的唯一依据是 model.playingMedia：核心说会话
+ * 开着就有媒体在播，说关了就没有，界面不自己猜。
+ *
+ * 抽屉放在这里而不是各自的页面里：日志在待机页与播放页都要能看（投屏中出问题
+ * 时正是最该看它的时候），改名的入口只在待机页。抽屉盖在最上层，两个页面共用
+ * 同一套开合状态，不用各自记一份。
+ */
+@Composable
+fun StandbyScreen(model: EngineModel) {
+
+    // 日志抽屉开着没有。改名的开合不用另记：草稿在模型里（model.nameDraft），
+    // 核心那边要拿它校验名称，界面跟着它走就行。
+    var logOpen by remember { mutableStateOf(false) }
+
+    // 抽屉里的字号沿用待机页那套分档参数：两边各写一份，改了一处忘了另一处，
+    // 同一块日志在抽屉里和（曾经）页面上的会长得不一样。
+    val layout = resolveStandbyLayout(LocalConfiguration.current.screenWidthDp)
+    val inputMode = rememberInputMode()
+
+    Box(modifier = Modifier.fillMaxSize()) {
+
+        // 「结束投屏」只回主界面，**不停接收服务** —— 服务一停广播就撤了，
+        // 手机那边立刻找不到这台设备。核心那边的会话还开着（JNI 面上没有
+        // 「只关掉某一个会话」的接口），所以界面自己记着「这一次我不看了」；
+        // 手机再推一条（castEpisode +1）就重新进播放页。见 EngineModel。
+        val dismissed = model.isCastingDismissed()
+        val media = model.playingMedia
+        if (model.mirrorSessionId != null && !dismissed) {
+            MirrorScreen(
+                model = model,
+                onExit = { model.dismissCasting() },
+                onShowLog = { logOpen = true },
+            )
+        } else if (media != null && !dismissed) {
+            PlaybackScreen(
+                model = model,
+                sessionId = media.sessionId,
+                url = media.url,
+                onExit = { model.dismissCasting() },
+                onShowLog = { logOpen = true },
+            )
+        } else {
+            StandbyContent(
+                model = model,
+                onShowLog = { logOpen = true },
+            )
+        }
+
+        // 结束投屏之后，发送端往往还在推流 —— 给两个入口：回去看，或者真正断开。
+        //
+        // 盖在底部、而不是排进待机页的 Column：那一页的高度是算着放的，插一行
+        // 进去会把下面的内容挤出可视区。
+        val resumable = model.mirrorSessionId != null || model.playingMedia != null
+        if (dismissed && resumable) {
+            ResumeBanner(
+                model = model,
+                layout = layout,
+                inputMode = inputMode,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = layout.spacingLoose * 3),
+            )
+        }
+
+        // 抽屉组合在页面之后，所以返回键的处理也排在页面之后 —— 抽屉开着时按
+        // 返回先关抽屉，而不是把投屏停掉（见 Drawer）。
+        if (logOpen) {
+            LogDrawer(
+                lines = model.logs,
+                textStyle = layout.logStyle,
+                buttonTextStyle = layout.actionStyle,
+                onClear = { model.clearLogs() },
+                onDismiss = { logOpen = false },
+            )
+        }
+
+        // 改名抽屉。竖屏按内容取高（就三行），横屏占满高度、宽度占一块 ——
+        // 横屏从侧边抽，高度不占满的话上面会空出来一大截。
+        if (model.nameDraft != null) {
+            Drawer(
+                onDismiss = { model.cancelRename() },
+                modifier = if (isLandscape()) {
+                    Modifier.fillMaxHeight().fillMaxWidth(0.42f)
+                } else {
+                    Modifier.fillMaxWidth()
+                },
+            ) {
+                NameEditor(model = model, layout = layout)
+            }
+        }
+    }
+}
+
+/**
+ * 待机页。
+ *
+ * 文档 2.3 的电视端要求：
+ *   * 10 英尺界面 —— 大字号，遥控器方向键与「确定 / 返回」键完成全部操作。
+ *   * 显示设备名称、局域网 IP 和连接说明，方便手机用户找到设备。
+ *
+ * 排版参数由 resolveStandbyLayout 按屏幕宽度分档给出，不写死尺寸 ——
+ * 电视端的屏幕跨度太大（手机横屏 640dp、1080p 电视 960dp、4K 电视 1920dp），
+ * 一套固定字号必然在某一档上不合适。
+ *
+ * 日志与改名都不在这一页里常驻，收进抽屉（见 StandbyScreen）：常驻会把上面的
+ * 按钮往上挤，而这一页的高度是算着放的。
+ */
+/// 待机页底部那条「还能回去」的横幅。
+///
+/// 只在「用户结束了本地播放、而且会话还在」时出现 —— 会话真的没了就该消失，
+/// 否则会变成一个点了没反应的按钮。
+@Composable
+private fun ResumeBanner(
+    model: EngineModel,
+    layout: StandbyLayout,
+    inputMode: InputMode,
+    modifier: Modifier = Modifier,
+) {
+    val resumeFocus = remember { FocusRequester() }
+    val disconnectFocus = remember { FocusRequester() }
+
+    // 用户刚按过「结束投屏」，下一步最可能按的就是「继续观看」—— 遥控器模式下把
+    // 初始焦点给它，省得还要按方向键去找。触屏不抢焦点（与待机页那三个按钮一致）。
+    LaunchedEffect(inputMode) {
+        if (inputMode == InputMode.Remote) {
+            resumeFocus.requestFocus()
+        }
+    }
+
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.Center,
+        modifier = modifier
+            .clip(RoundedCornerShape(12.dp))
+            // 与抽屉同一套观感：半透明面板，底下的待机页透出来一点。
+            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.94f))
+            .padding(horizontal = 20.dp, vertical = 12.dp),
+    ) {
+        Text(
+            text = LocalStrings.current.castingEndedBanner,
+            style = layout.bodyStyle,
+            modifier = Modifier.padding(end = 16.dp),
+        )
+        ActionButton(
+            text = LocalStrings.current.resumeCasting,
+            textStyle = layout.actionStyle,
+            minWidth = 0.dp,
+            focusRequester = resumeFocus,
+            onClick = { model.resumeCasting() },
+        )
+        Spacer(modifier = Modifier.width(12.dp))
+        ActionButton(
+            text = LocalStrings.current.disconnectCasting,
+            textStyle = layout.actionStyle,
+            minWidth = 0.dp,
+            focusRequester = disconnectFocus,
+            onClick = { model.disconnectCasting() },
+        )
+    }
+}
+
+/// 画质档位（文档 2.3 的「低端盒子画质分档」）。
+///
+/// 它决定的是**手机按多大分辨率编码屏幕**：核心在每次 /info 应答时把这个尺寸
+/// 给出去，所以只影响下次连接 —— 当前这一路镜像不受影响，也不必重启服务。
+/// 这一句必须写在界面上：否则用户在投屏中改档位、看到画面毫无变化，会以为
+/// 这个开关坏了。
+///
+/// 排成按钮行下面独立的一行，而不是塞进那一行里加第四个按钮：那三个已经用
+/// weight 占满整行，加进去会在窄屏上把字挤没（那一行上出过一次同样的错，
+/// 见 StandbyContent 里的注释）。这一行在按钮之下，矮屏上被裁掉的是它而不是
+/// 按钮 —— 与连接说明一样，本来就排在「必须先看见」的内容之后。
+@Composable
+private fun QualityRow(
+    model: EngineModel,
+    layout: StandbyLayout,
+    modifier: Modifier = Modifier,
+) {
+    // 每个档位一个 FocusRequester（ActionButton 要求必填）。档位是固定三项，
+    // 所以这个列表的长度在组合期间恒定，remember 放在 map 里是安全的。
+    val strings = LocalStrings.current
+    val focuses = QualityPreset.entries.map { remember { FocusRequester() } }
+
+    Column(
+        modifier = modifier.fillMaxWidth(),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Text(
+            text = strings.mirrorQuality,
+            style = layout.bodyStyle,
+        )
+
+        Spacer(modifier = Modifier.height(layout.spacingTight))
+
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            QualityPreset.entries.forEachIndexed { index, preset ->
+                if (index > 0) {
+                    Spacer(modifier = Modifier.width(10.dp))
+                }
+                ActionButton(
+                    // 按钮上只写档位名，分辨率放到下面那行说明里 —— 竖屏（窄屏）
+                    // 上「高清 2160p」这三个挤在一行会把最后一个挤出屏幕，这一行
+                    // 出过一次同样的错（见上面三个按钮的注释）。
+                    text = strings.qualityLabel(preset),
+                    textStyle = layout.actionStyle,
+                    minWidth = 0.dp,
+                    // 等分整行宽度：三个按钮的宽度跟着屏幕走，窄屏上会一起变窄
+                    // 而不是把最右边那个顶出去。
+                    modifier = Modifier.weight(1f),
+                    focusRequester = focuses[index],
+                    selected = model.qualityPreset == preset,
+                    // 核心库没起来时压暗且不可聚焦，与上面那三个按钮一致。
+                    enabled = model.isNativeAvailable,
+                    onClick = { model.applyQualityPreset(preset) },
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(layout.spacingTight))
+
+        Text(
+            text = strings.qualityHint(
+                QualityPreset.SMOOTH.resolution,
+                QualityPreset.BALANCED.resolution,
+                QualityPreset.SHARP.resolution,
+            ),
+            style = layout.bodyStyle,
+            textAlign = TextAlign.Center,
+            modifier = Modifier
+                .fillMaxWidth()
+                .widthIn(max = 900.dp)
+        )
+    }
+}
+
+/// 界面语言那一行。
+///
+/// 「中文」与「English」两个词**不翻译** —— 任何语言下都这么写，用户找的是自己认得的
+/// 那两个字，而不是当前语言的译名（通行做法，也省掉「English 用中文怎么写」这种问题）。
+///
+/// 排法与「镜像画质」那一行一致（标签一行、按钮等分整行宽度），理由见那里的注释：
+/// 窄屏上等分宽度不会把最右边的按钮顶出屏幕。
+@Composable
+private fun LanguageRow(
+    model: EngineModel,
+    layout: StandbyLayout,
+    modifier: Modifier = Modifier,
+) {
+    val strings = LocalStrings.current
+    val chineseFocus = remember { FocusRequester() }
+    val englishFocus = remember { FocusRequester() }
+
+    Column(
+        modifier = modifier.fillMaxWidth(),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Text(text = strings.uiLanguage, style = layout.bodyStyle)
+
+        Spacer(modifier = Modifier.height(layout.spacingTight))
+
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            ActionButton(
+                text = "中文",
+                textStyle = layout.actionStyle,
+                minWidth = 0.dp,
+                modifier = Modifier.weight(1f),
+                focusRequester = chineseFocus,
+                selected = model.language == Language.ZH,
+                onClick = { model.applyLanguage(Language.ZH) },
+            )
+            Spacer(modifier = Modifier.width(10.dp))
+            ActionButton(
+                text = "English",
+                textStyle = layout.actionStyle,
+                minWidth = 0.dp,
+                modifier = Modifier.weight(1f),
+                focusRequester = englishFocus,
+                selected = model.language == Language.EN,
+                onClick = { model.applyLanguage(Language.EN) },
+            )
+        }
+    }
+}
+
+@Composable
+private fun StandbyContent(model: EngineModel, onShowLog: () -> Unit) {
+
+    val configuration = LocalConfiguration.current
+    val layout = resolveStandbyLayout(configuration.screenWidthDp)
+    val inputMode = rememberInputMode()
+
+    val buttonFocus = remember { FocusRequester() }
+    val logFocus = remember { FocusRequester() }
+    val renameFocus = remember { FocusRequester() }
+    val hotspotFocus = remember { FocusRequester() }
+
+    Surface(modifier = Modifier.fillMaxSize()) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(
+                    horizontal = layout.horizontalPadding,
+                    vertical = layout.verticalPadding
+                ),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            // 内容整体居中，并且可以滚动 —— 矮屏上放不下时裁掉的是最下面那行
+            // 提示，而按钮在块的顶部，一定看得见。
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .verticalScroll(rememberScrollState()),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                Text(
+                    text = model.deviceName,
+                    style = layout.titleStyle,
+                    textAlign = TextAlign.Center
+                )
+
+                Spacer(modifier = Modifier.height(layout.spacingTight))
+
+                Text(
+                    text = model.statusText,
+                    style = layout.statusStyle,
+                    textAlign = TextAlign.Center
+                )
+
+                // 按钮紧跟状态文字、排在说明之前 —— 矮屏上它必须在首屏可见区内。
+                Spacer(modifier = Modifier.height(layout.spacingMedium))
+
+                // 按钮并排而不是上下叠：叠起来会多占一行高度，而矮屏上这个位置
+                // 是算着放的。三个按钮用 weight 等分整行宽度 —— 之前用固定宽度，
+                // 三个加起来超过了屏宽，第三个（修改名称）被挤出可视区。
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.Center,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    ActionButton(
+                        text = if (model.serviceEnabled) LocalStrings.current.stopReceiving
+                               else LocalStrings.current.startReceiving,
+                        textStyle = layout.actionStyle,
+                        minWidth = 0.dp,
+                        modifier = Modifier.weight(1f),
+                        focusRequester = buttonFocus,
+                        // 核心库没加载起来时按钮压暗且不可聚焦：让用户看出是这一块
+                        // 坏了，而不是对着一个按了没反应的按钮猜网络。
+                        enabled = model.isNativeAvailable,
+                        onClick = { model.toggleService() },
+                    )
+
+                    Spacer(modifier = Modifier.width(16.dp))
+
+                    // 日志收进抽屉（横屏从侧边抽、竖屏从下面抽），「清除日志」
+                    // 也跟着挪进抽屉里 —— 看不见的日志不需要一个常驻的清除按钮。
+                    ActionButton(
+                        text = LocalStrings.current.viewLog,
+                        textStyle = layout.actionStyle,
+                        minWidth = 0.dp,
+                        modifier = Modifier.weight(1f),
+                        focusRequester = logFocus,
+                        onClick = onShowLog,
+                    )
+
+                    Spacer(modifier = Modifier.width(16.dp))
+
+                    // 电视上没有键盘，改名的入口必须显式给出来。名字是手机端
+                    // 投屏列表里看到的东西，改不了就只能认设备型号那一个默认名。
+                    ActionButton(
+                        text = LocalStrings.current.rename,
+                        textStyle = layout.actionStyle,
+                        minWidth = 0.dp,
+                        modifier = Modifier.weight(1f),
+                        focusRequester = renameFocus,
+                        onClick = { model.beginRename() },
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(layout.spacingMedium))
+
+                QualityRow(model = model, layout = layout)
+
+                Spacer(modifier = Modifier.height(layout.spacingLoose))
+
+                LanguageRow(model = model, layout = layout)
+
+                Spacer(modifier = Modifier.height(layout.spacingLoose))
+
+                // 连接说明。用户的典型困惑是「手机搜不到电视」，多半是没连同一个
+                // Wi-Fi 或路由器开了 AP 隔离（文档 6.3），所以把提示写在待机页上。
+                //
+                // widthIn 限制最大宽度：4K 电视上如果让文字铺满 1920dp，
+                // 每行会太长而不便阅读。
+                // 提示文案按输入方式区分：用户拿遥控器时提醒他按确定键，
+                // 拿手机时提醒他点击。写反了会让人对着屏幕按半天。
+                val strings = LocalStrings.current
+                val hintLead = if (inputMode == InputMode.Remote) {
+                    strings.hintRemoteLead
+                } else {
+                    strings.hintTouchLead
+                }
+
+                Text(
+                    text = hintLead + strings.hintHowToCast,
+                    style = layout.bodyStyle,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .widthIn(max = 900.dp)
+                )
+
+                // 本机地址：手机搜不到设备时，DLNA 类 App 可以直接手填这个地址，
+                // 也是判断「电视到底在哪张网卡上」最快的办法（文档 2.3 要求显示）。
+                if (model.localAddresses.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(layout.spacingTight))
+
+                    Text(
+                        text = LocalStrings.current.localAddressLabel +
+                            model.localAddresses.replace("\n", "  "),
+                        style = layout.bodyStyle,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+
+                // 「手机搜不到这台电视」的兜底办法。
+                //
+                // 让**电视**开热点、手机连过来：两者就在同一张网里了，这条对付的是
+                // 路由器开了 AP 隔离、或者压根没有可用路由器的情况（手机开热点是反
+                // 过来的方向，那样得在电视上用遥控器敲 Wi-Fi 密码，更别说手机还要
+                // 费电）。
+                //
+                // 只能跳设置页让用户自己按：真热点是系统签名级权限，应用开不了（见
+                // EngineModel.openHotspotSettings）。所以这一块的重点是把「接下来该
+                // 干什么」说清楚，而不是指望点了就自动开。
+                Spacer(modifier = Modifier.height(layout.spacingLoose))
+
+                Text(
+                    text = LocalStrings.current.hotspotLead,
+                    style = layout.bodyStyle,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .widthIn(max = 900.dp)
+                )
+
+                Spacer(modifier = Modifier.height(layout.spacingTight))
+
+                ActionButton(
+                    text = LocalStrings.current.openHotspotSettings,
+                    textStyle = layout.actionStyle,
+                    minWidth = 0.dp,
+                    focusRequester = hotspotFocus,
+                    onClick = { model.openHotspotSettings() },
+                )
+
+                // 三个候选页面都跳不到时的那句话。@Composable 里不留这个状态：它要
+                // 同时进日志，所以放在模型里（与其它失败提示一个去处）。
+                if (model.hotspotNote.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(layout.spacingTight))
+
+                    Text(
+                        text = model.hotspotNote,
+                        style = layout.bodyStyle,
+                        color = Color(0xFFFF8A80),
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .widthIn(max = 900.dp)
+                    )
+                }
+            }
+        }
+    }
+
+    // 只有遥控器设备才自动抢焦点。
+    //
+    // 电视上不这么做的话，用户按方向键没有任何反馈，会以为应用卡死；
+    // 但触屏设备上抢焦点会让焦点框一直挂在按钮上，看起来像没点干净。
+    LaunchedEffect(inputMode) {
+        if (inputMode == InputMode.Remote) {
+            buttonFocus.requestFocus()
+        }
+    }
+}

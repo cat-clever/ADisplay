@@ -1,0 +1,107 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- mDNS 收发组播包需要它，少了就永远搜不到设备（文档 4.5）。 -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+
+    <!-- 前台服务：接收服务要在应用退到后台之后继续跑（文档 2.3）。 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <!-- Android 14 起前台服务要声明类型，类型对应的权限也得申请。 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <!-- 开机自启那一路报的是 connectedDevice 而不是 mediaPlayback：Android 15 起
+         不允许从 BOOT_COMPLETED 起 mediaPlayback 类型的前台服务（理由写在
+         ReceiverService.startForegroundCompat 的注释里）。它要求声明这条权限，
+         并要求 CHANGE_NETWORK_STATE / CHANGE_WIFI_STATE / CHANGE_WIFI_MULTICAST_STATE
+         三者之一 —— 上面那条组播权限正好满足。 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <!-- Android 13 起，那条常驻通知要用户允许通知才显示得出来。
+         拒绝了不影响接收，只是没有通知。 -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- 开机自启（文档 2.3）：收 BOOT_COMPLETED 来恢复上次开着的接收服务。
+         注意国产定制系统大多默认拦第三方应用自启，声明了也不一定生效 ——
+         安装说明里那条「加进自启动白名单」说的就是这件事。 -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+    <!-- 文档 4.5：触屏设为非必需，否则纯遥控器设备在应用商店会被过滤。 -->
+    <uses-feature
+        android:name="android.hardware.touchscreen"
+        android:required="false" />
+    <uses-feature
+        android:name="android.software.leanback"
+        android:required="true" />
+    <uses-feature
+        android:name="android.hardware.wifi"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.ethernet"
+        android:required="false" />
+
+    <!-- 局域网里的媒体地址是明文 HTTP，Android 9 起默认会被拦掉。
+         理由写在 network_security_config.xml 的文件头。
+         注意：这条注释只能放在标签**外面** —— XML 不允许注释出现在起始标签的
+         属性之间，上一版就是这么挂掉的。 -->
+    <application
+        android:allowBackup="true"
+        android:banner="@drawable/tv_banner"
+        android:icon="@drawable/ic_launcher"
+        android:label="@string/app_name"
+        android:networkSecurityConfig="@xml/network_security_config"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.ADisplayTV">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|smallestScreenSize|uiMode"
+            android:launchMode="singleTask"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <!-- LEANBACK_LAUNCHER 是电视桌面上的入口（文档 4.5）。 -->
+                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!--
+            MainActivity 用 adjustResize（见上面 activity 的 windowSoftInputMode）：
+            软键盘弹出时窗口跟着收缩，底部的抽屉就自然浮到键盘之上。
+            默认的 adjustUnspecified 在这台机器上落到了 adjustPan —— 窗口不缩、
+            只把内容整体上推，于是改名抽屉被键盘整个盖住，输入框和保存/取消都
+            看不见。adjustResize 是 Compose 里输入框的常规选择。
+        -->
+
+        <!--
+            接收服务的前台服务外壳：只负责让进程在后台活着（见 ReceiverService）。
+
+            声明两个类型，用哪个由服务按来源决定（见 startForegroundCompat）：
+            界面上按开的报 mediaPlayback；开机自启拉起来的报 connectedDevice，
+            因为 Android 15 起不允许从 BOOT_COMPLETED 起 mediaPlayback 类型。
+
+            stopWithTask=false 是从最近任务里划掉应用也**不**停服务，投屏继续。
+            这是默认值，写出来是为了表明有意为之，而不是漏配。
+        -->
+        <service
+            android:name=".ReceiverService"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback|connectedDevice"
+            android:stopWithTask="false" />
+
+        <!--
+            开机自启。exported=false 就够：系统广播（BOOT_COMPLETED 就是）不受它限制，
+            文档里 <receiver> 的 android:exported 写明「false 时仍能收到系统发来的消息」，
+            而那正是我们唯一要收的。
+        -->
+        <receiver
+            android:name=".BootReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>

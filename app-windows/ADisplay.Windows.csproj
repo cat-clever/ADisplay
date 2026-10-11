@@ -1,0 +1,62 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    ADisplay Windows 界面：C# + WinUI 3（Windows App SDK）。
+    文档 v2 第 5.2 节选型。
+
+    打包形态是 unpackaged + self-contained：
+      * unpackaged —— 不走 MSIX，不需要签名证书，贴合文档 1.1「仅个人自用、
+        不上架应用商店、不需要正式签名」以及 5 节「绿色版 exe 或简易安装包」。
+      * self-contained —— 把 Windows App SDK 运行时一起带上，用户机器上
+        不需要预装 Runtime，解压即用。
+  -->
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
+    <RootNamespace>ADisplay.Windows</RootNamespace>
+    <AssemblyName>ADisplay</AssemblyName>
+    <!-- 版本号要跟 CMakeLists.txt 一致（那里是唯一权威来源）。
+         会出现在 exe 的文件属性与「关于」里。 -->
+    <Version>1.0.0</Version>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <Platforms>x64;ARM64</Platforms>
+    <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
+    <UseWinUI>true</UseWinUI>
+    <!-- unpackaged：不走 MSIX，因此也不需要 EnableMsixTooling 那套打包目标。 -->
+    <WindowsPackageType>None</WindowsPackageType>
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.7.*" />
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.26100.*" />
+  </ItemGroup>
+
+  <!--
+    核心库 castcore.dll 由 CMake 单独构建（见 .github/workflows/ci.yml），
+    不参与 msbuild。CI 通过 AdDisplayCoreDir 告诉这里去哪找。
+  -->
+  <PropertyGroup>
+    <AdDisplayCoreDir Condition="'$(AdDisplayCoreDir)' == ''">$(MSBuildThisFileDirectory)..\build\bin</AdDisplayCoreDir>
+  </PropertyGroup>
+
+  <!--
+    必须作为 Content 引入，不能用 AfterTargets="Build" 手动 Copy。
+    手动拷进 bin 的文件不会被 Publish 收集 —— publish 只认已知的项集合，
+    结果就是发出去的包里少了 castcore.dll，一运行就报找不到 DLL。
+    声明成 Content 并打开 CopyToPublishDirectory，两条路径都会有它。
+  -->
+  <ItemGroup Condition="Exists('$(AdDisplayCoreDir)\castcore.dll')">
+    <Content Include="$(AdDisplayCoreDir)\castcore.dll">
+      <Link>castcore.dll</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+  </ItemGroup>
+
+</Project>

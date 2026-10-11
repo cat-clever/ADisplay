@@ -1,0 +1,860 @@
+name: 构建与测试
+
+# 运行标题带上这次改动的内容。
+#
+# 手动触发时标题默认就是这个工作流名，Actions 列表里一排跑下来全叫「构建与测试」，
+# 翻历史只能一个个点开看。所以手动触发时把改动的标题传进来：
+#     gh workflow run 构建与测试 -f title="修中转的换封装"
+# 列表里就能直接看出每一轮跑的是什么。没传就退回分支名。
+run-name: 构建与测试 · ${{ inputs.title || github.event.pull_request.title || github.ref_name }}
+
+# 这个 workflow 既直接响应 push / PR，也被 release.yml 通过 workflow_call 复用 ——
+# 发版时的产物与 CI 上验证过的产物是同一套构建流程，不会出现
+# 「CI 绿了但发出去的包是另一套参数编的」这种事。
+on:
+  # 推分支不自动构建。
+  #
+  # 推送密的时候每推一次就要把整套矩阵跑一遍（依赖命中二进制缓存也要几分钟），
+  # 而多数中间提交并不需要那份产物 —— 只有少数几次推送才真的要看构建结果。
+  # 改成按需触发，两种触发途径：
+  #   * 想验证时手动跑一轮：gh workflow run ci.yml
+  #   * 发版时由 release.yml 经 workflow_call 调起来构建并打包
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      # 只用于运行标题，构建本身不看它 —— 所以不是必填。
+      title:
+        description: 这次改动的内容（显示在运行标题里）
+        required: false
+        type: string
+  workflow_call:
+    # 发布那条路会传 false：发布要的是「构建并打包」，不是在发布时再跑一遍测试。
+    # 默认 true，所以手动触发与 PR 都照常跑测试。
+    #
+    # 注意这意味着发版那次构建不跑测试 —— 推分支已经不触发构建了，所以打 tag 那次
+    # 就是该提交唯一的 CI 构建。想让它顺带验一遍，把 release.yml 里的
+    # run-tests: false 去掉即可。
+    inputs:
+      run-tests:
+        description: 是否运行单元测试
+        required: false
+        type: boolean
+        default: true
+
+# 并发策略：不同提交的运行各跑各的，不互相取消、也不排队。
+#
+# 原来 group 用的是「workflow + 分支」，于是同一个分支上来了新推送就会把
+# 上一轮取消掉（cancel-in-progress），或者退一步变成排队等待 —— 两种都不是
+# 我们想要的：推送很密的时候，某一次运行的验证结果会被后一次顶掉，
+# 而那一版恰恰是需要看的。
+#
+# 改成按提交（sha）分组之后：不同提交落在不同组，立刻并行跑；只有同一个
+# 提交被重复触发（重跑、手动触发）才会去重，那次取消是无害的。
+#
+# 注意 GitHub 账号本身有并发 job 上限（公开仓库免费额度是 20 个）。我们一轮
+# 矩阵 7 个任务，所以同时跑两轮没问题，三轮开始会撞上限 —— 那一层的排队是
+# 账号级的，改 workflow 绕不过去。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.sha }}
+  cancel-in-progress: true
+
+env:
+  VCPKG_ROOT: ${{ github.workspace }}/vcpkg
+  VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}/vcpkg-cache,readwrite
+  VCPKG_DISABLE_METRICS: 1
+  # 核心库与界面源码里有大量中文注释与文案，统一按 UTF-8 处理。
+  LANG: C.UTF-8
+
+jobs:
+  # =========================================================================
+  # 版本号一致性
+  #
+  # CMakeLists.txt 是版本号的唯一权威来源，其余各处都要跟它一致。
+  # 这个检查不构建任何东西，几秒钟就跑完，但能挡住一类很隐蔽的问题：
+  # 版本号散落在四个文件里，改一处漏一处不会报错，只是某个平台上显示的
+  # 版本对不上 —— 排查时会怀疑自己装错了包。
+  # =========================================================================
+  version-check:
+    name: 版本号一致性
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 校验各处版本号
+        run: |
+          set -euo pipefail
+
+          CORE=$(grep -oE 'VERSION [0-9]+\.[0-9]+\.[0-9]+' CMakeLists.txt | head -1 | awk '{print $2}')
+          MAJOR=$(echo "${CORE}" | cut -d. -f1)
+          MINOR=$(echo "${CORE}" | cut -d. -f2)
+          PATCH=$(echo "${CORE}" | cut -d. -f3)
+          EXPECTED_CODE=$((MAJOR * 10000 + MINOR * 100 + PATCH))
+
+          echo "CMakeLists.txt 的版本：${CORE}（构建号应为 ${EXPECTED_CODE}）"
+          echo
+
+          failures=0
+
+          check() {
+            local label="$1" actual="$2" expected="$3"
+            if [ "${actual}" != "${expected}" ]; then
+              echo "  [X] ${label}：是 ${actual}，应为 ${expected}"
+              failures=$((failures + 1))
+            else
+              echo "  [v] ${label}：${actual}"
+            fi
+          }
+
+          check "vcpkg.json" \
+            "$(grep -oE '\"version\": *\"[0-9.]+\"' vcpkg.json | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')" \
+            "${CORE}"
+
+          check "macOS Info.plist（短版本）" \
+            "$(grep -A1 CFBundleShortVersionString app-macos/Info.plist | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')" \
+            "${CORE}"
+
+          check "macOS Info.plist（构建号）" \
+            "$(grep -A1 CFBundleVersion app-macos/Info.plist | grep -oE '[0-9]+')" \
+            "${EXPECTED_CODE}"
+
+          check "Android versionName" \
+            "$(grep -oE 'versionName = \"[0-9.]+\"' app-tv/app/build.gradle.kts | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')" \
+            "${CORE}"
+
+          check "Android versionCode" \
+            "$(grep -oE 'versionCode = [0-9]+' app-tv/app/build.gradle.kts | grep -oE '[0-9]+')" \
+            "${EXPECTED_CODE}"
+
+          check "Windows csproj" \
+            "$(grep -oE '<Version>[0-9.]+</Version>' app-windows/ADisplay.Windows.csproj | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')" \
+            "${CORE}"
+
+          echo
+          if [ "${failures}" -gt 0 ]; then
+            echo "有 ${failures} 处版本号与 CMakeLists.txt 不一致。" >&2
+            echo "发版时这几处要一起改。" >&2
+            exit 1
+          fi
+          echo "各处版本号一致。"
+
+  # =========================================================================
+  # Linux：文档把 Linux 桌面端标为 P2「暂缓」，所以这里只构建核心库并跑单元测试，
+  # 用来及早发现跨平台的编译问题（Linux 上用的是 GCC，与 macOS 的 Clang、
+  # Windows 的 MSVC 是三个不同的编译器，能覆盖大部分可移植性问题）。
+  # =========================================================================
+  linux-core:
+    name: Linux 核心库与测试
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装构建工具
+        run: |
+          sudo apt-get update
+          # ninja：构建系统本身。
+          sudo apt-get install -y ninja-build
+          # nasm：FFmpeg 的 x86/x86_64 SIMD 汇编器。vcpkg 的 ffmpeg port 在
+          # x86 目标上会去找它，找不到就直接 BUILD_FAILED —— 而 arm64 目标
+          # 不需要，所以这个依赖只在 x86 上暴露，容易漏掉。
+          sudo apt-get install -y nasm
+
+      - uses: ./.github/actions/setup-vcpkg
+        with:
+          triplet: x64-linux
+
+      - name: 配置
+        run: cmake --preset linux-x64
+
+      - name: 构建
+        run: cmake --build --preset linux-x64
+
+      - name: 单元测试
+        if: ${{ inputs.run-tests }}
+        run: ctest --preset linux-x64
+
+  # =========================================================================
+  # Windows x64：核心库（vcpkg x64-windows）+ WinUI 3 界面（.NET）
+  # =========================================================================
+  windows-x64:
+    name: Windows x64
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-vcpkg
+        with:
+          triplet: x64-windows-static-md
+
+      # Ninja 需要 cl.exe 在 PATH 上，这个 action 负责摆好 MSVC 环境变量。
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: 确认 Ninja 可用
+        shell: pwsh
+        run: |
+          if (-not (Get-Command ninja -ErrorAction SilentlyContinue)) {
+            choco install ninja -y --no-progress
+          }
+          ninja --version
+
+      - name: 配置核心库
+        run: cmake --preset windows-x64
+
+      - name: 构建核心库
+        run: cmake --build --preset windows-x64
+
+      - name: 单元测试
+        if: ${{ inputs.run-tests }}
+        run: ctest --preset windows-x64
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      # WinUI 3 生成 PRI 资源时要用 Visual Studio 的
+      # Microsoft.Build.Packaging.Pri.Tasks.dll，而 dotnet CLI 自带的 MSBuild
+      # 里没有这个程序集，会报 MSB4062。所以这里必须换成 VS 的 MSBuild。
+      - uses: microsoft/setup-msbuild@v2
+
+      - name: 构建 WinUI 3 界面
+        shell: pwsh
+        run: |
+          # SelfContained 必须显式给：.NET 6 起 /t:Publish 带 RuntimeIdentifier 时默认
+          # 是「依赖框架」，也就是不打包运行时本体 —— 那正是这份包一直打不开的原因之一
+          # （机器上没装 .NET 8 就起不来）。计划里说的「免装 runtime」靠的就是这个开关。
+          msbuild app-windows\ADisplay.Windows.csproj `
+            /restore `
+            /t:Publish `
+            /p:Configuration=Release `
+            /p:Platform=x64 `
+            /p:RuntimeIdentifier=win-x64 `
+            /p:SelfContained=true `
+            /p:PublishDir="${{ github.workspace }}\publish\windows-x64\" `
+            /p:AdDisplayCoreDir="${{ github.workspace }}\build\windows-x64\bin"
+
+      - name: 校验并打包
+        shell: pwsh
+        run: |
+          # 核心库必须在包里。少了它程序一启动就报找不到 DLL，
+          # 而这种缺失不会让构建失败，只有装上跑才会发现。
+          if (-not (Test-Path "publish/windows-x64/castcore.dll")) {
+            Write-Error "publish 目录里没有 castcore.dll"
+            Get-ChildItem -Recurse publish/windows-x64 | Select-Object -First 40 FullName
+            exit 1
+          }
+          Get-ChildItem publish/windows-x64/castcore.dll | Format-List Name, Length
+          # VC++ 运行库随包带上。castcore.dll 导入 MSVCP140 / VCRUNTIME140，而它们来自
+          # VC++ Redistributable —— 不带上的话「绿色版免装」就不成立，没装过的机器上
+          # castcore.dll 加载不起来。另一条路是把依赖编成静态 CRT，但那要求我们自己的
+          # 目标也用 /MT，而项目（含单元测试）都是 /MD，两者不能混（LNK2038）。
+          $crtRoot = Join-Path $env:VCToolsRedistDir "x64\Microsoft.VC143.CRT"
+          if (-not (Test-Path $crtRoot)) {
+            $crtRoot = (Get-ChildItem (Join-Path $env:VCToolsRedistDir "x64") -Directory -Filter "Microsoft.VC*.CRT" |
+                        Select-Object -First 1).FullName
+          }
+          if (-not $crtRoot -or -not (Test-Path $crtRoot)) {
+            Write-Error "找不到 VC++ 运行库目录（VCToolsRedistDir=$env:VCToolsRedistDir）"
+            exit 1
+          }
+          foreach ($dll in @("msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll")) {
+            Copy-Item (Join-Path $crtRoot $dll) "publish\windows-x64\" -Force
+          }
+          Get-ChildItem "publish\windows-x64\" | Where-Object { $_.Name -like "vcruntime*" -or $_.Name -like "msvcp*" } | Format-Table Name, Length
+          # WinUI 3 的编译产物（含应用自己的 XAML）都在 resources.pri 里。少了它，运行时
+          # LoadComponent("ms-appx:///MainWindow.xaml") 解析不到，报出来是一句没头没尾的
+          # XamlParseException —— 窗口永远不出现、也没有别的提示。
+          # msbuild /t:Publish 这条路的 PublishDir 没把它带过来（包里只有 Windows App SDK
+          # 自己的那两个 pri），所以这里从构建产物里找出来、按运行时认的名字补上。
+          $pri = Get-ChildItem "${{ github.workspace }}\app-windows\bin\x64\Release" -Recurse -Filter "*.pri" -ErrorAction SilentlyContinue |
+                 Where-Object { $_.Name -notlike "Microsoft.*" } |
+                 Select-Object -First 1
+          if (-not $pri) {
+            Write-Error "构建产物里找不到应用自己的 .pri —— WinUI 的 XAML 将无法加载"
+            Get-ChildItem "${{ github.workspace }}\app-windows\bin" -Recurse -Filter "*.pri" -ErrorAction SilentlyContinue | Select-Object FullName
+            exit 1
+          }
+          Write-Host "应用 PRI：$($pri.FullName)（$($pri.Length) 字节）"
+          Copy-Item $pri.FullName "publish\windows-x64\resources.pri" -Force
+          Compress-Archive -Path publish/windows-x64/* -DestinationPath adisplay-windows-x64.zip -Force
+
+          # 把「包里有应用 PRI」钉成硬性检查。这一条缺失时程序的表现是「点了没反应、
+          # 没窗口、没日志」，从外面完全看不出是它 —— 所以宁可在打包这一步就炸。
+          if (-not (Test-Path "publish/windows-x64/resources.pri")) {
+            Write-Error "打包目录里没有 resources.pri"
+            exit 1
+          }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: adisplay-windows-x64
+          path: adisplay-windows-x64.zip
+          if-no-files-found: error
+
+  # =========================================================================
+  # Windows ARM64：文档 2.5 要求骁龙 X 系列笔记本上原生运行，不依赖 x64 转译。
+  # 在 x64 runner 上用 vcpkg 的 arm64-windows 三元组交叉编译，
+  # 不依赖 GitHub 是否提供 ARM64 的 Windows runner。
+  # =========================================================================
+  windows-arm64:
+    name: Windows ARM64
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-vcpkg
+        with:
+          triplet: arm64-windows-static-md
+
+      # amd64_arm64 = x64 宿主 + ARM64 目标。
+      # 不能写 arm64：那会让 vcvarsall 配出「ARM64 宿主原生」环境，
+      # PATH 里会出现 ARM64 架构的 clang++.exe，而 runner 是 x64，
+      # 执行不了它，CMake 的编译器探测会直接判定编译器损坏。
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64_arm64
+
+      - name: 确认 Ninja 可用
+        shell: pwsh
+        run: |
+          if (-not (Get-Command ninja -ErrorAction SilentlyContinue)) {
+            choco install ninja -y --no-progress
+          }
+          ninja --version
+
+      - name: 配置核心库
+        run: cmake --preset windows-arm64
+
+      - name: 构建核心库
+        run: cmake --build --preset windows-arm64
+
+      # 单元测试不在这里跑：runner 是 x64，跑不了 ARM64 的测试可执行文件。
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - uses: microsoft/setup-msbuild@v2
+
+      - name: 构建 WinUI 3 界面
+        shell: pwsh
+        run: |
+          msbuild app-windows\ADisplay.Windows.csproj `
+            /restore `
+            /t:Publish `
+            /p:Configuration=Release `
+            /p:Platform=ARM64 `
+            /p:RuntimeIdentifier=win-arm64 `
+            /p:SelfContained=true `
+            /p:PublishDir="${{ github.workspace }}\publish\windows-arm64\" `
+            /p:AdDisplayCoreDir="${{ github.workspace }}\build\windows-arm64\bin"
+
+      - name: 校验并打包
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "publish/windows-arm64/castcore.dll")) {
+            Write-Error "publish 目录里没有 castcore.dll"
+            Get-ChildItem -Recurse publish/windows-arm64 | Select-Object -First 40 FullName
+            exit 1
+          }
+          Get-ChildItem publish/windows-arm64/castcore.dll | Format-List Name, Length
+          # VC++ 运行库随包带上。castcore.dll 导入 MSVCP140 / VCRUNTIME140，而它们来自
+          # VC++ Redistributable —— 不带上的话「绿色版免装」就不成立，没装过的机器上
+          # castcore.dll 加载不起来。另一条路是把依赖编成静态 CRT，但那要求我们自己的
+          # 目标也用 /MT，而项目（含单元测试）都是 /MD，两者不能混（LNK2038）。
+          $crtRoot = Join-Path $env:VCToolsRedistDir "arm64\Microsoft.VC143.CRT"
+          if (-not (Test-Path $crtRoot)) {
+            $crtRoot = (Get-ChildItem (Join-Path $env:VCToolsRedistDir "arm64") -Directory -Filter "Microsoft.VC*.CRT" |
+                        Select-Object -First 1).FullName
+          }
+          if (-not $crtRoot -or -not (Test-Path $crtRoot)) {
+            Write-Error "找不到 VC++ 运行库目录（VCToolsRedistDir=$env:VCToolsRedistDir）"
+            exit 1
+          }
+          foreach ($dll in @("msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll")) {
+            Copy-Item (Join-Path $crtRoot $dll) "publish\windows-arm64\" -Force
+          }
+          Get-ChildItem "publish\windows-arm64\" | Where-Object { $_.Name -like "vcruntime*" -or $_.Name -like "msvcp*" } | Format-Table Name, Length
+          # WinUI 3 的编译产物（含应用自己的 XAML）都在 resources.pri 里。少了它，运行时
+          # LoadComponent("ms-appx:///MainWindow.xaml") 解析不到，报出来是一句没头没尾的
+          # XamlParseException —— 窗口永远不出现、也没有别的提示。
+          # msbuild /t:Publish 这条路的 PublishDir 没把它带过来（包里只有 Windows App SDK
+          # 自己的那两个 pri），所以这里从构建产物里找出来、按运行时认的名字补上。
+          $pri = Get-ChildItem "${{ github.workspace }}\app-windows\bin\ARM64\Release" -Recurse -Filter "*.pri" -ErrorAction SilentlyContinue |
+                 Where-Object { $_.Name -notlike "Microsoft.*" } |
+                 Select-Object -First 1
+          if (-not $pri) {
+            Write-Error "构建产物里找不到应用自己的 .pri —— WinUI 的 XAML 将无法加载"
+            Get-ChildItem "${{ github.workspace }}\app-windows\bin" -Recurse -Filter "*.pri" -ErrorAction SilentlyContinue | Select-Object FullName
+            exit 1
+          }
+          Write-Host "应用 PRI：$($pri.FullName)（$($pri.Length) 字节）"
+          Copy-Item $pri.FullName "publish\windows-arm64\resources.pri" -Force
+          Compress-Archive -Path publish/windows-arm64/* -DestinationPath adisplay-windows-arm64.zip -Force
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: adisplay-windows-arm64
+          path: adisplay-windows-arm64.zip
+          if-no-files-found: error
+
+  # =========================================================================
+  # macOS Universal：文档 2.5 要求一个包同时覆盖 Apple Silicon 与 Intel。
+  #
+  # 不靠「一次编出胖库」的自定义三元组：FFmpeg 的 configure 只认单个 --arch，
+  # 一次配置编不出通用二进制。改成用 arm64-osx-static / x64-osx-static 两个静态
+  # 三元组各编一遍，最后把两份 libcastcore.dylib 用 lipo 合成一份。
+  #
+  # 静态链接是这套做法的前提：动态链接下 FFmpeg 会散成一组 .dylib，那就得逐个
+  # lipo 再逐个改 install_name，漏掉任何一个都是启动即崩的包。
+  # =========================================================================
+  macos-universal:
+    name: macOS Universal
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装构建工具
+        run: |
+          # ninja：构建系统本身。
+          if ! command -v ninja >/dev/null 2>&1; then
+            brew install ninja
+          fi
+          ninja --version
+
+          # nasm：FFmpeg 的 x86/x86_64 SIMD 汇编器。本项目 macOS 端要编
+          # arm64 与 x86_64 两份，x86_64 那份需要它（arm64 不需要，所以这个
+          # 依赖只在 x86 上暴露，容易漏掉）。
+          if ! command -v nasm >/dev/null 2>&1; then
+            brew install nasm
+          fi
+          nasm -v
+
+      # 两个架构共用这一次缓存调用：vcpkg 的二进制缓存是把整个目录一起恢复、
+      # 一起保存的（两个三元组的 VCPKG_BINARY_SOURCES 指向同一个 vcpkg-cache），
+      # x64 的产物也在同一个条目里，再调一次只会多出一份内容重复的缓存。
+      # 这里传的三元组只用来区分缓存键，真正用哪个三元组由 CMakePresets 指定。
+      - uses: ./.github/actions/setup-vcpkg
+        with:
+          triplet: arm64-osx-static
+          host-triplet: arm64-osx
+          overlay-triplets: ${{ github.workspace }}/triplets
+
+      - name: 配置核心库（arm64）
+        run: cmake --preset macos-arm64
+
+      - name: 构建核心库（arm64）
+        run: cmake --build --preset macos-arm64
+
+      - name: 配置核心库（x86_64）
+        run: cmake --preset macos-x64
+
+      - name: 构建核心库（x86_64）
+        run: cmake --build --preset macos-x64
+
+      - name: 合并成通用二进制
+        run: |
+          set -euo pipefail
+          # 静态链接下只需要合这一个文件 —— 依赖都已经进到 libcastcore.dylib 里了。
+          # 落在 build/universal 而不是某个预设的构建目录，免得被之后的 configure 覆盖。
+          mkdir -p build/universal/lib
+          lipo -create \
+            build/macos-arm64/lib/libcastcore.dylib \
+            build/macos-x64/lib/libcastcore.dylib \
+            -output build/universal/lib/libcastcore.dylib
+
+      # 只跑 arm64 这一份：runner 本身是 Apple Silicon，x86_64 的可执行文件要靠
+      # Rosetta 才跑得起来，而 Rosetta 不在 runner 镜像的保障范围内。
+      - name: 单元测试
+        if: ${{ inputs.run-tests }}
+        run: ctest --preset macos-arm64
+
+      - name: 确认核心库确实是通用二进制
+        run: |
+          lipo -info build/universal/lib/libcastcore.dylib
+          lipo -info build/universal/lib/libcastcore.dylib | grep -q "arm64" || exit 1
+          lipo -info build/universal/lib/libcastcore.dylib | grep -q "x86_64" || exit 1
+
+      - name: 构建 SwiftUI 界面
+        run: |
+          set -euo pipefail
+          # 让链接器能找到刚编出来的通用版核心库。
+          export LIBRARY_PATH="${PWD}/build/universal/lib:${LIBRARY_PATH:-}"
+          cd app-macos
+          swift build -c release --arch arm64 --arch x86_64
+
+      - name: 组装 .app 并打 dmg
+        run: |
+          set -euo pipefail
+
+          # universal 构建的产物落在 .build/apple/Products/Release 下，
+          # 单架构在 .build/release，两种都兜住。
+          EXECUTABLE="$(find app-macos/.build -type f -name ADisplay -perm -u+x | head -n 1)"
+          if [ -z "${EXECUTABLE}" ]; then
+            echo "找不到 Swift 构建产物" >&2
+            find app-macos/.build -maxdepth 4 -type d >&2 || true
+            exit 1
+          fi
+          echo "可执行文件：${EXECUTABLE}"
+          lipo -info "${EXECUTABLE}" || true
+
+          ./app-macos/build-app.sh \
+            "${EXECUTABLE}" \
+            "${PWD}/build/universal/lib/libcastcore.dylib" \
+            "${PWD}/dist"
+
+          # 验证包内每个 Mach-O 都是通用二进制，避免发出只能跑一半机器的包。
+          lipo -info dist/ADisplay.app/Contents/MacOS/ADisplay
+          lipo -info dist/ADisplay.app/Contents/Frameworks/libcastcore.dylib
+
+          # dmg 里同时放 .app 和一个指向 /Applications 的符号链接。
+          #
+          # 少了这个链接，用户打开 dmg 只会看到一个孤零零的 App，
+          # 没有任何拖拽目标 —— 得自己另开一个 Finder 窗口把 App 拖过去。
+          # 这是 macOS 上的分发惯例，Finder 会把它显示成一个「应用程序」
+          # 文件夹快捷方式。
+          ln -sfn /Applications dist/Applications
+
+          # hdiutil 会偶发 "Resource busy"：runner 上可能残留一个 diskimages-helper
+          # 进程占着镜像，而重跑往往落在同一台 runner 上，于是照样撞 —— 已经因此
+          # 卡掉过一次发布。这是环境问题，不该让整个发布失败：换个输出名重试几次
+          # 即可（残留进程盯的是原来那个文件名）。
+          dmg_ok=0
+          for i in 1 2 3; do
+            if hdiutil create -volname "ADisplay" \
+                 -srcfolder dist \
+                 -ov -format UDZO \
+                 "adisplay-macos-universal-${i}.dmg"; then
+              mv "adisplay-macos-universal-${i}.dmg" adisplay-macos-universal.dmg
+              dmg_ok=1
+              break
+            fi
+            echo "hdiutil 第 ${i} 次失败，等 5 秒重试" >&2
+            sleep 5
+          done
+          if [ "${dmg_ok}" != "1" ]; then
+            echo "打包 DMG 连续失败三次" >&2
+            exit 1
+          fi
+
+          # 校验 dmg 里确实有这两样，避免又发出一个装不进去的包。
+          MOUNT_POINT="$(hdiutil attach adisplay-macos-universal.dmg -nobrowse -readonly \
+            | grep -o '/Volumes/.*' | head -n 1)"
+          if [ -z "${MOUNT_POINT}" ]; then
+            echo "dmg 挂载失败，无法校验内容" >&2
+            exit 1
+          fi
+          echo "挂载点：${MOUNT_POINT}"
+          ls -la "${MOUNT_POINT}"
+          if [ ! -d "${MOUNT_POINT}/ADisplay.app" ]; then
+            echo "dmg 里缺少 ADisplay.app" >&2
+            hdiutil detach "${MOUNT_POINT}" || true
+            exit 1
+          fi
+          if [ ! -L "${MOUNT_POINT}/Applications" ]; then
+            echo "dmg 里缺少 Applications 快捷方式" >&2
+            hdiutil detach "${MOUNT_POINT}" || true
+            exit 1
+          fi
+          hdiutil detach "${MOUNT_POINT}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: adisplay-macos-universal
+          path: adisplay-macos-universal.dmg
+          if-no-files-found: error
+
+  # =========================================================================
+  # Android TV：文档 2.3 与 4.5 的电视端要求。
+  #
+  # 分成两个任务：
+  #   android-core  只编核心库，验证 castcore 能被 NDK 交叉编译出来。
+  #                 报错干净，编不过时一眼看得出是 C++ 那边的事。
+  #   android-tv    先把同一套核心库（含 JNI 薄壳）编出来摆进 jniLibs，
+  #                 再用 Gradle 打 APK，最后拆包断言 .so 真的进去了。
+  #
+  # 两边共用同一份 vcpkg 二进制缓存，所以第二轮基本是解压缓存，不会真的把
+  # OpenSSL / libplist 这些依赖编两遍（Android 上不编 FFmpeg —— 见 core/pipeline
+  # 的说明，那一路换封装只服务 macOS）。
+  #
+  # 两个 ABI 都在同一个任务里编，而不是拆成矩阵。原因在缓存：vcpkg 的二进制
+  # 缓存是**整目录**恢复、整目录保存的，而缓存键只带一个三元组。合成一个任务
+  # （键就用 arm64-android）之后两份依赖躺在同一个条目里，接下来无论是谁都能
+  # 一次拿到；拆成两个任务则各存各的键，一个任务存的包另一个读不到，等于每轮
+  # 都要把 32 位那份 OpenSSL 从源码重编一遍。macOS 那个任务也是这么合的。
+  # =========================================================================
+  # 电视端要的核心库。APK 由 Gradle 那边构建，这里只验证 castcore 能被
+  # NDK 交叉编译出来 —— 这一环不通，后面接 JNI、接播放器都无从谈起。
+  android-core:
+    name: Android 核心库（arm64-v8a + armeabi-v7a）
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # 两个 ABI 共用这一次调用：缓存键只带一个三元组，而缓存目录装的是所有
+      # 三元组的产物。这里传的 arm64-android 只用来决定缓存键，真正用哪个三元组
+      # 由 CMakePresets 指定（macOS 那个任务、以及下面的 android-tv 都是同一套）。
+      - uses: ./.github/actions/setup-vcpkg
+        with:
+          triplet: arm64-android
+
+      # vcpkg 的 android 三元组要知道 NDK 在哪。runner 上可能装了不止一个
+      # 版本，取版本号最大的那个（android-tv 任务用的是同一套 NDK）。
+      - name: 定位 NDK
+        run: |
+          set -euo pipefail
+          NDK_DIR="$(ls -d "${ANDROID_HOME}"/ndk/* 2>/dev/null | sort -V | tail -1 || true)"
+          if [ -z "${NDK_DIR}" ]; then
+            echo "runner 上没有 NDK" >&2
+            exit 1
+          fi
+          echo "用 NDK：${NDK_DIR}"
+          echo "ANDROID_NDK_HOME=${NDK_DIR}" >> "$GITHUB_ENV"
+
+      - name: 配置（两个 ABI）
+        run: |
+          set -euo pipefail
+          for PRESET in android-arm64 android-armv7a; do
+            echo "== ${PRESET} =="
+            cmake --preset "${PRESET}"
+          done
+
+      - name: 构建（两个 ABI）
+        run: |
+          set -euo pipefail
+          for PRESET in android-arm64 android-armv7a; do
+            echo "== ${PRESET} =="
+            cmake --build --preset "${PRESET}"
+          done
+
+      # 产物路径由顶层 CMakeLists 决定，不写死 —— 写死了以后调整输出目录
+      # 就会变成一个看不懂的失败。
+      #
+      # 除了「文件在不在」，还要看 file 报出来的机器架构对不对：只查存在的话，
+      # 一个「配置时把 ABI 串了」（两份产物都是 arm64）的错误会一路绿过去，
+      # 直到用户装上才发现。armv7a 那份要额外反着查一次 aarch64 —— file 对
+      # 两者的输出都带 "ARM"，光匹配 ARM 区分不开。
+      - name: 校验产物
+        run: |
+          set -euo pipefail
+          check() {
+            local dir="$1" want="$2" reject="$3"
+            local so
+            so="$(find "build/${dir}" -name 'libcastcore.so' | head -1)"
+            if [ -z "${so}" ]; then
+              echo "build/${dir} 里没找到 libcastcore.so" >&2
+              exit 1
+            fi
+            ls -la "${so}"
+            file "${so}"
+            if ! file "${so}" | grep -q "${want}"; then
+              echo "${so} 不是 ${want}" >&2
+              exit 1
+            fi
+            if [ -n "${reject}" ] && file "${so}" | grep -q "${reject}"; then
+              echo "${so} 里出现了不该有的 ${reject}" >&2
+              exit 1
+            fi
+          }
+          check android-arm64 'ARM aarch64' ''
+          check android-armv7a 'ARM' 'aarch64'
+
+  android-tv:
+    name: Android TV
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # 不引 android-actions/setup-android：ubuntu-22.04 的 runner 镜像已经
+      # 预装了整套 Android SDK（platforms;android-34、build-tools 34.0.0、
+      # NDK 27.3），那个 action 反而多一个失败点。这里只做一次存在性断言，
+      # 缺组件时能一眼看出是镜像变了，而不是让 Gradle 报一堆看不懂的错。
+      - name: 校验 Android SDK
+        run: |
+          set -euo pipefail
+          echo "ANDROID_HOME=${ANDROID_HOME:-（未设置）}"
+          echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT:-（未设置）}"
+
+          SDK_DIR="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          if [ -z "${SDK_DIR}" ] || [ ! -d "${SDK_DIR}" ]; then
+            echo "runner 上没有 Android SDK" >&2
+            exit 1
+          fi
+
+          test -d "${SDK_DIR}/platforms/android-34" \
+            || { echo "缺少 platforms;android-34" >&2; exit 1; }
+
+          echo "build-tools："
+          ls "${SDK_DIR}/build-tools" || true
+
+      # ---- 先把 .so 编出来 ----------------------------------------------
+      #
+      # APK 里的 libcastcore.so 与 libadisplay_jni.so 只能由 NDK 交叉编译
+      # 出来，Gradle 那边刻意不碰 vcpkg（理由写在 app/build.gradle.kts 里，
+      # 简单说就是不想把同一套 C++ 构建维护两遍）。所以这里重复一遍
+      # android-core 的做法：起 vcpkg、定位 NDK、cmake 构建。
+      #
+      # 这份重复是刻意的（android-core 的任务说明里写了原因），代价由缓存兜着：
+      # 依赖都是命中二进制缓存解压出来的，真正重做的只有 castcore 与本仓的源码。
+      # 两个 ABI 各编一遍，所以这里比 arm64 那时候多一倍 —— 除非改成把 .so 当
+      # 产物在任务之间传，否则这份代价换的是「每个任务自洽、不依赖上游产物」。
+      - uses: ./.github/actions/setup-vcpkg
+        with:
+          triplet: arm64-android
+
+      # vcpkg 的 android 三元组要知道 NDK 在哪，runner 上可能装了不止一个
+      # 版本，取版本号最大的那个（与 android-core 任务同一套取法）。
+      - name: 定位 NDK
+        run: |
+          set -euo pipefail
+          NDK_DIR="$(ls -d "${ANDROID_HOME}"/ndk/* 2>/dev/null | sort -V | tail -1 || true)"
+          if [ -z "${NDK_DIR}" ]; then
+            echo "runner 上没有 NDK" >&2
+            exit 1
+          fi
+          echo "用 NDK：${NDK_DIR}"
+          echo "ANDROID_NDK_HOME=${NDK_DIR}" >> "$GITHUB_ENV"
+
+      - name: 构建核心库与 JNI 薄壳（两个 ABI）
+        run: |
+          set -euo pipefail
+          for PRESET in android-arm64 android-armv7a; do
+            echo "== ${PRESET} =="
+            cmake --preset "${PRESET}"
+            cmake --build --preset "${PRESET}"
+          done
+
+      # jniLibs 是 Gradle 的约定目录：src/main/jniLibs/<ABI>/ 下的 .so 会被
+      # 自动打进 APK 的 lib/<ABI>/，build.gradle.kts 里一行配置都不用写。
+      # 目录名必须和 ABI 名逐字对上 —— 写成 arm64 而不是 arm64-v8a 的话，
+      # Gradle 只会安静地忽略掉它们，产出一个没有 .so 的 APK。
+      # 剥掉调试符号。
+      #
+      # NDK 的 toolchain 默认给编译加 -g（与构建类型无关），而我们没走 AGP 的
+      # externalNativeBuild，所以 AGP 那套剥离任务不会碰这两个 .so。实测不剥的话
+      # libcastcore.so 有 120 MB、整个 APK 128 MB —— FFmpeg 的静态库再大也不该是
+      # 这个量级，多出来的全是调试信息与符号表。
+      #
+      # --strip-unneeded 只去调试信息与局部符号，.dynsym 保留，所以 JNI 那边靠
+      # dlsym 找 Java_xxx 不受影响。
+      - name: 剥离调试符号
+        run: |
+          set -euo pipefail
+          STRIP="$(ls "${ANDROID_NDK_HOME}"/toolchains/llvm/prebuilt/*/bin/llvm-strip | head -1)"
+          if [ -z "${STRIP}" ]; then
+            echo "在 NDK 里找不到 llvm-strip" >&2
+            exit 1
+          fi
+          # 两个 ABI 各剥一遍。llvm-strip 是 LLVM 的那套，32 位与 64 位
+          # ELF 都认，不需要按 ABI 换工具。
+          for DIR in build/android-arm64 build/android-armv7a; do
+            for NAME in libcastcore.so libadisplay_jni.so; do
+              TARGET="$(find "${DIR}" -name "${NAME}" | head -1)"
+              if [ -z "${TARGET}" ]; then
+                echo "${DIR} 里找不到 ${NAME}" >&2
+                exit 1
+              fi
+              BEFORE="$(stat -c%s "${TARGET}")"
+              "${STRIP}" --strip-unneeded "${TARGET}"
+              AFTER="$(stat -c%s "${TARGET}")"
+              echo "${NAME}（${DIR}）：${BEFORE} → ${AFTER} 字节"
+            done
+          done
+
+      - name: 摆好 jniLibs
+        run: |
+          set -euo pipefail
+          # 「构建目录 ABI 名」与「jniLibs 目录名」一一对应地写出来，不从预设名
+          # 推 —— 目录名必须是 Android 认的那两个字符串（armeabi-v7a 里连字符
+          # 都不能少，写成 armv7a 的话 Gradle 会安静地忽略掉这些 .so）。
+          for PAIR in "build/android-arm64:arm64-v8a" "build/android-armv7a:armeabi-v7a"; do
+            DIR="${PAIR%%:*}"
+            ABI="${PAIR##*:}"
+            DEST="app-tv/app/src/main/jniLibs/${ABI}"
+            mkdir -p "${DEST}"
+            for NAME in libcastcore.so libadisplay_jni.so; do
+              SRC="$(find "${DIR}" -name "${NAME}" | head -1)"
+              if [ -z "${SRC}" ]; then
+                echo "${DIR} 里没有 ${NAME}" >&2
+                find "${DIR}" -name '*.so' >&2 || true
+                exit 1
+              fi
+              cp "${SRC}" "${DEST}/${NAME}"
+              echo "${NAME}  <-  ${SRC}"
+            done
+            ls -la "${DEST}"
+          done
+
+      # setup-gradle 只做缓存，Gradle 本体要显式指定版本装。
+      # AGP 8.5 要求 Gradle 8.7 以上。
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      # 签名不需要在这里做什么准备：密钥库 app-tv/fallback-signing.p12 就在仓库里，
+      # gradle 直接用它（见 app-tv/app/build.gradle.kts 的签名段）。
+
+      - name: 构建 APK
+        working-directory: app-tv
+        run: gradle assembleRelease --no-daemon --stacktrace
+
+      - name: 重命名产物
+        run: |
+          set -euo pipefail
+          APK="$(find app-tv/app/build/outputs/apk/release -name '*.apk' | head -n 1)"
+          if [ -z "${APK}" ]; then
+            echo "没有产出 APK" >&2
+            exit 1
+          fi
+          cp "${APK}" adisplay-android-tv.apk
+          ls -lh adisplay-android-tv.apk
+
+      # 签名配错时 gradle 不会报错，它会静默退回 debug 签名 —— 而 debug 密钥库是
+      # 每个 runner 现生成的，那种包用户装新版必须先卸载。装包失败只有用户能发现，
+      # 所以在这里当面把证书读出来看。
+      - name: 校验 APK 签名
+        run: python3 app-tv/verify_apk_signing.py adisplay-android-tv.apk
+
+      # Gradle 不会因为 .so 缺失而失败：它只是少打一个文件，产出的 APK
+      # 装上跑起来才在 System.loadLibrary 处抛 UnsatisfiedLinkError。
+      # 那种包发出去只能靠用户反馈发现，所以在这里当面把包拆开看。
+      - name: 校验 APK 里的 .so
+        run: |
+          set -euo pipefail
+
+          # 先整份列出来（只列一次，后面都在字符串上判断）：这样的写法不会
+          # 因为 grep 提前退出而让 unzip 吃到 SIGPIPE，配着 set -o pipefail
+          # 变成一个看不懂的失败。
+          LISTING="$(unzip -l adisplay-android-tv.apk)"
+          echo "${LISTING}" | grep -E 'lib/' || true
+
+          # 两个 ABI 各两个 .so，缺一不可 —— 缺了不会在构建期报错，只会在
+          # 对应架构的盒子上 System.loadLibrary 时抛 UnsatisfiedLinkError。
+          for ABI in arm64-v8a armeabi-v7a; do
+            for NAME in libcastcore.so libadisplay_jni.so; do
+              if ! echo "${LISTING}" | grep -E "lib/${ABI}/${NAME}" > /dev/null; then
+                echo "APK 里没有 lib/${ABI}/${NAME}" >&2
+                exit 1
+              fi
+            done
+          done
+
+          # 反着也要断言：abiFilters 只留了这两个 ABI，包里多出 x86 之类
+          # 说明那段配置被改回去了，而那几个 ABI 没有对应的 .so。
+          if echo "${LISTING}" | grep -E 'lib/(x86|x86_64)/' > /dev/null; then
+            echo "APK 里出现了没有 .so 的 ABI" >&2
+            echo "${LISTING}" | grep -E 'lib/' >&2
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: adisplay-android-tv
+          path: adisplay-android-tv.apk
+          if-no-files-found: error

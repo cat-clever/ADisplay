@@ -1,0 +1,9 @@
+// 把 castcore 的 C 接口暴露给 Swift。
+//
+// header 路径相对本文件所在目录解析 —— 仓库里真正的头文件只有一份，
+// 放在 include/adisplay/adisplay.h，不在这里复制，免得两边走样。
+module CAdDisplay [system] {
+    header "../../../include/adisplay/adisplay.h"
+    link "castcore"
+    export *
+}
