@@ -443,6 +443,36 @@ internal sealed class AdEngine : IDisposable
         }
     }
 
+    /// <summary>
+    /// 广播网卡：虚拟网卡（VPN / ZeroTier / Tailscale / 虚拟机网桥）要不要一起广播。
+    /// true＝也包含，false＝只在实际的局域网上（默认）。
+    /// 核心负责持久化，并且立刻生效（只重启 SSDP，不影响正在进行的 AirPlay 镜像）。
+    /// </summary>
+    public void SetIncludeVirtualInterfaces(bool include)
+    {
+        EnsureCreated();
+        ThrowIfFailed(
+            AdNative.ad_engine_set_include_virtual_interfaces(_handle, include ? 1 : 0),
+            "切换广播网卡");
+    }
+
+    /// <summary>
+    /// 当前设置。界面启动时用它把下拉框拨到已保存的那一项 ——
+    /// 不读的话每次启动都显示成默认值，而实际用的是上次选的那个（同 QualityPreset）。
+    /// </summary>
+    public bool IncludeVirtualInterfaces
+    {
+        get
+        {
+            EnsureCreated();
+            int include = 0;
+            ThrowIfFailed(
+                AdNative.ad_engine_get_include_virtual_interfaces(_handle, out include),
+                "读取广播网卡设置");
+            return include != 0;
+        }
+    }
+
     public void SaveConfig()
     {
         if (_handle == IntPtr.Zero)

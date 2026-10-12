@@ -64,6 +64,7 @@ constexpr const char* kKeyAirplayPort    = "network.airplay_port";
 constexpr const char* kKeyDlnaPort       = "network.dlna_port";
 constexpr const char* kKeyCastpcPort     = "network.castpc_port";
 constexpr const char* kKeyEnableAirplay  = "service.airplay";
+constexpr const char* kKeyIncludeVirtualInterfaces = "discovery.include_virtual_interfaces";
 constexpr const char* kKeyEnableDlna     = "service.dlna";
 constexpr const char* kKeyEnableCastpc   = "service.castpc";
 constexpr const char* kKeyQualityPreset  = "video.quality_preset";
@@ -242,6 +243,11 @@ struct AdEngine {
     std::atomic<int> state{AD_STATE_STOPPED};
 
     std::string device_name;
+
+    // 虚拟网卡（VPN / ZeroTier / Tailscale / 虚拟机网桥）要不要一起广播。
+    // 默认 false＝只在实际的局域网上广播（文档 6.3）。界面上那行「广播网卡」。
+    bool include_virtual_interfaces = false;
+
     std::string config_path;
     std::string log_file_path;
 
@@ -593,6 +599,7 @@ struct AdEngine {
             persisted.set_bool(kKeyEnableAirplay, enable_airplay);
             persisted.set_bool(kKeyEnableDlna, enable_dlna);
             persisted.set_bool(kKeyEnableCastpc, enable_castpc);
+            persisted.set_bool(kKeyIncludeVirtualInterfaces, include_virtual_interfaces);
             persisted.set_int(kKeyQualityPreset, quality_preset);
             persisted.set_bool(kKeyRequireConfirm, require_confirmation);
             persisted.set_int(kKeyLogLevel, static_cast<int>(log_level));
@@ -1374,6 +1381,10 @@ AdResult AD_CALL ad_engine_create(const AdConfig* config, AdEngine** out_engine)
             engine->device_name = validation.normalized;
         }
     }
+    // 广播网卡：默认「只在实际的局域网上」，与文档 6.3 一致。
+    engine->include_virtual_interfaces =
+        engine->persisted.get_bool(kKeyIncludeVirtualInterfaces, false);
+
     if (engine->device_name.empty()) {
         // 没有可用配置时，用调用方指定的名字，再退回平台默认名。
         const std::string requested = to_std_string(effective.device_name);
@@ -1709,6 +1720,7 @@ AdResult AD_CALL ad_engine_start(AdEngine* engine) {
         discovery_config.airplay_port = airplay_port;
         discovery_config.dlna_port = dlna_port;
         discovery_config.castpc_port = castpc_port;
+        discovery_config.include_virtual_interfaces = engine->include_virtual_interfaces;
         // 配对公钥：缺了它 iPhone 能看见我们却配不上对。
         discovery_config.airplay_pk = airplay_public_key;
         // 型号与版本同样取自协议层 —— /info 应答里的 model 与 sourceVersion
@@ -2044,6 +2056,45 @@ AdResult AD_CALL ad_engine_get_quality_preset(AdEngine* engine, int* out_preset)
     }
     std::lock_guard<std::mutex> lock(engine->mutex);
     *out_preset = engine->quality_preset;
+    return AD_OK;
+}
+
+AdResult AD_CALL ad_engine_set_include_virtual_interfaces(AdEngine* engine, int enabled) {
+    if (engine == nullptr) {
+        return AD_ERR_NOT_INITIALIZED;
+    }
+
+    const bool include = (enabled != 0);
+    {
+        std::lock_guard<std::mutex> lock(engine->mutex);
+        if (engine->include_virtual_interfaces == include) {
+            return AD_OK;   // 没变，省掉一次 SSDP 重启（那会让手机列表闪一下）
+        }
+        engine->include_virtual_interfaces = include;
+    }
+
+    // 即时生效，与改名同一条思路：只重启 SSDP，mDNS 不动，所以正在进行的
+    // AirPlay 镜像不受影响。失败不回滚内存里的值 —— 下次启停服务时会带着
+    // 新设置重新注册（与改名失败的处理一致）。
+    if (engine->discovery) {
+        std::string discovery_error;
+        if (!engine->discovery->set_include_virtual_interfaces(include, &discovery_error)) {
+            AD_LOG_WARN("广播网卡设置生效失败：{}", discovery_error);
+        }
+    }
+
+    return engine->persist();
+}
+
+AdResult AD_CALL ad_engine_get_include_virtual_interfaces(AdEngine* engine, int* out_enabled) {
+    if (engine == nullptr) {
+        return AD_ERR_NOT_INITIALIZED;
+    }
+    if (out_enabled == nullptr) {
+        return AD_ERR_INVALID_ARG;
+    }
+    std::lock_guard<std::mutex> lock(engine->mutex);
+    *out_enabled = engine->include_virtual_interfaces ? 1 : 0;
     return AD_OK;
 }
 

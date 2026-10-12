@@ -326,6 +326,12 @@ internal static class AdNative
     internal static extern AdResult ad_engine_get_quality_preset(IntPtr engine, out int preset);
 
     [DllImport(Library, CallingConvention = Convention)]
+    internal static extern AdResult ad_engine_set_include_virtual_interfaces(IntPtr engine, int enabled);
+
+    [DllImport(Library, CallingConvention = Convention)]
+    internal static extern AdResult ad_engine_get_include_virtual_interfaces(IntPtr engine, out int enabled);
+
+    [DllImport(Library, CallingConvention = Convention)]
     internal static extern AdResult ad_engine_save_config(IntPtr engine);
 
     // ---------------------------------------------------------------------

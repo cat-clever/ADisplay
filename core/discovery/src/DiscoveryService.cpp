@@ -194,6 +194,7 @@ struct DiscoveryService::Impl {
         }
 
         SsdpAdvertisement advertisement;
+        advertisement.include_virtual_interfaces = config.include_virtual_interfaces;
         advertisement.udn = "uuid:" + config.uuid;
         advertisement.device_type = kMediaRendererType;
         advertisement.location = build_location(address, config.dlna_port);
@@ -344,6 +345,40 @@ bool DiscoveryService::start(const DiscoveryConfig& config, std::string* out_err
     impl_->network_monitor = std::thread([this]() { impl_->monitor_loop(); });
 
     AD_LOG_INFO("服务发现已启动，地址 {}", address);
+    return true;
+}
+
+bool DiscoveryService::set_include_virtual_interfaces(bool include, std::string* out_error) {
+    {
+        std::lock_guard<std::mutex> lock(impl_->mutex);
+        if (impl_->config.include_virtual_interfaces == include) {
+            return true;   // 没变就不折腾：重启 SSDP 会让手机列表闪一下
+        }
+        impl_->config.include_virtual_interfaces = include;
+    }
+
+    if (!impl_->running.load()) {
+        return true;       // 服务没开：记住设置即可，下次 start 时生效
+    }
+
+    // 只重启 SSDP —— 理由见头文件里的说明（mDNS 不受这个筛选影响，
+    // 所以不必像 set_device_name 那样把它也注销重发）。
+    impl_->ssdp.stop();
+
+    std::string error;
+    if (!impl_->start_ssdp(impl_->current_address, &error)) {
+        impl_->set_error(error);
+        if (out_error != nullptr) {
+            *out_error = error;
+        }
+        return false;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(impl_->mutex);
+        impl_->last_error.clear();
+    }
+    AD_LOG_INFO("广播网卡设置已生效：{}", include ? "也包含虚拟网卡" : "只在实际的局域网上");
     return true;
 }
 

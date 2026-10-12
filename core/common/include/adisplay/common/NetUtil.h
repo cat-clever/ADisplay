@@ -52,6 +52,21 @@ std::vector<NetworkAddress> enumerate_network_addresses();
 // 时一个地址都没有（SSDP 干脆起不来），以及覆盖网上的设备永远搜不到这台机器。
 std::vector<NetworkAddress> broadcastable_addresses();
 
+// 按界面上的「广播网卡」设置，筛出真正要广播的地址。
+//
+// 规则三条，与那行设置的两个选项一一对应：
+//   * include_virtual = false（「自动」）：只留真实网卡；
+//   * include_virtual = true（「也包含 VPN / 虚拟网卡」）：真实与虚拟都留；
+//   * **例外（两种模式下都生效）**：按上面筛完一个都不剩时（典型：整机只挂着
+//     一条 VPN），退回「全部可用地址」—— 否则 SSDP 连启动都做不到，用户看到的
+//     是「服务开着、桌上搜不到设备」。
+// 回环与 IPv6 始终排除（没有意义；UPnP 的组播本来就是 IPv4 的）。
+//
+// 做成纯函数是为了能被单元测试覆盖：把「哪几块网卡会被广播」从「跑测试那台
+// 机器碰巧装了什么网卡」里解耦出来。
+std::vector<NetworkAddress> filter_broadcast_addresses(
+    const std::vector<NetworkAddress>& entries, bool include_virtual);
+
 // 从一份网卡列表里挑「本机地址」（电视端待机页与日志里显示的那个）。
 //
 // 规则是**优先真实网卡，都没有才退回虚拟网卡**：这个地址是给人看、给用户照着

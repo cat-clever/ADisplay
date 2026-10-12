@@ -53,6 +53,13 @@ struct SsdpAdvertisement {
     // SERVER 头的内容，形如 "Windows/10.0 UPnP/1.0 ADisplay/0.1.0"。
     // 部分手机端会检查 UPnP/1.0 这个标记，缺了可能不认。
     std::string server_header;
+
+    // 虚拟网卡（VPN / ZeroTier / Tailscale / 虚拟机网桥）要不要一起广播。
+    // 由界面那行「广播网卡」的设置决定，默认不广播（文档 6.3）。
+    // 注意例外：一块真实网卡都没有时（整机只有 VPN），即便这里是 false 也仍然
+    // 会在虚拟网卡上广播 —— 否则连组播组都加不上，设备发现直接不工作。
+    // 见 common::filter_broadcast_addresses。
+    bool include_virtual_interfaces = false;
 };
 
 class SsdpServer {

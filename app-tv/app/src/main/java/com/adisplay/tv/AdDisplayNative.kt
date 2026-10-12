@@ -151,6 +151,19 @@ object AdDisplayNative {
     external fun nativeSetQualityPreset(handle: Long, preset: Int): Int
 
     /**
+     * 广播网卡：虚拟网卡（VPN / ZeroTier / Tailscale）要不要一起广播。
+     * 1＝也包含，0＝只在实际的局域网上（默认）。
+     * 界面启动时用它把选择器拨到已保存的那一项。
+     */
+    external fun nativeGetIncludeVirtualInterfaces(handle: Long): Int
+
+    /**
+     * 切换广播网卡。核心负责持久化并立刻生效（只重启 SSDP，不影响正在进行的
+     * AirPlay 镜像），界面不需要另外保存、也不需要重启服务。
+     */
+    external fun nativeSetIncludeVirtualInterfaces(handle: Long, include: Int): Int
+
+    /**
      * AirPlay 广播所需的一切（若干行 key=value，见 AirplayAdvert.h）。
      *
      * Android 上发布 mDNS 只能用 Java 层的 NsdManager，核心够不着，所以广播

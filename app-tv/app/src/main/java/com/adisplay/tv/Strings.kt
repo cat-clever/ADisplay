@@ -79,6 +79,12 @@ abstract class Strings {
     abstract val hotspotNotFound: String
     abstract val uiLanguage: String
 
+    /** 设备发现用哪几块网卡广播。按钮上只放短词，完整说明在 broadcastHint 里。 */
+    abstract val broadcastLabel: String
+    abstract val broadcastAuto: String
+    abstract val broadcastIncludeVirtual: String
+    abstract val broadcastHint: String
+
     // ---- 结束投屏后的横幅 ----
     abstract val castingEndedBanner: String
     abstract val resumeCasting: String
@@ -202,6 +208,14 @@ object ChineseStrings : Strings() {
             "再用手机连上它。"
     override val uiLanguage = "界面语言"
 
+    override val broadcastLabel = "广播网卡"
+    override val broadcastAuto = "自动"
+    override val broadcastIncludeVirtual = "含虚拟网卡"
+    override val broadcastHint =
+        "「自动」只在实际的局域网上做设备发现。「含虚拟网卡」把 VPN / ZeroTier 这类网卡也算上；" +
+            "注意 tun 模式的 OpenVPN 不转发组播，在它上面仍然发现不了设备。整机只有 VPN 时，" +
+            "「自动」也会用虚拟网卡。"
+
     override val castingEndedBanner = "投屏已结束，但手机仍在推流。"
     override val resumeCasting = "继续观看"
     override val disconnectCasting = "断开投屏"
@@ -287,6 +301,15 @@ object EnglishStrings : Strings() {
         "This TV has no hotspot settings page. Turn the hotspot on from the system's " +
             "\"Network & Internet\" settings, then connect your phone to it."
     override val uiLanguage = "Language"
+
+    override val broadcastLabel = "Broadcast interfaces"
+    override val broadcastAuto = "Automatic"
+    override val broadcastIncludeVirtual = "Include virtual"
+    override val broadcastHint =
+        "\"Automatic\" does device discovery on the real LAN only. \"Include virtual\" also uses " +
+            "VPN / ZeroTier adapters; note that OpenVPN in tun mode does not forward multicast, so " +
+            "discovery still will not work over it. If the machine has no real adapter at all, " +
+            "\"Automatic\" falls back to the virtual ones."
 
     override val castingEndedBanner = "Casting ended, but the phone is still streaming."
     override val resumeCasting = "Resume"

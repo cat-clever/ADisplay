@@ -65,6 +65,12 @@ struct DiscoveryConfig {
     // 优先使用的网卡地址。留空表示自动选择（跳过回环；虚拟网卡只在没有
     // 真实网卡可用时才拿来当「本机地址」，见 common::pick_primary_ipv4）。
     std::string preferred_address;
+
+    // 虚拟网卡（VPN / ZeroTier / Tailscale / 虚拟机网桥）要不要一起广播。
+    // 对应界面上那行「广播网卡」，默认 false＝只在实际的局域网上广播（文档 6.3）。
+    // 例外见 common::filter_broadcast_addresses：一块真实网卡都没有时仍然用
+    // 虚拟网卡，否则设备发现会彻底不工作。
+    bool include_virtual_interfaces = false;
 };
 
 class DiscoveryService {
@@ -87,6 +93,16 @@ public:
     // 不重启服务，deviceid / uuid / 已配对记录都不变。
     // 名称不合规返回 false，此时服务保持原状。
     bool set_device_name(const std::string& name, std::string* out_error);
+
+    // 改「虚拟网卡要不要一起广播」并即时生效（界面上那行「广播网卡」）。
+    //
+    // 只重启 SSDP 那一半：mDNS 是系统发布的、不受这个筛选影响，所以正在进行的
+    // AirPlay 会话连同它的广播都不受打扰（不需要像 set_device_name 那样把 mDNS
+    // 也注销重发一遍）。DLNA 那边会先 byebye 再 alive，控制器列表里会闪一下；
+    // 已经建立的投屏走的是 HTTP/TCP，不受影响。
+    //
+    // 服务没在跑时只记住设置，下次 start 时生效。
+    bool set_include_virtual_interfaces(bool include, std::string* out_error);
 
     // 网络变化时调这个。会重新探测本机地址，地址变了才真正重注册 ——
     // 否则每次网卡抖动都重注册一遍，手机端列表会闪。

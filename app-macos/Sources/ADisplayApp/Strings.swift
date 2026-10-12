@@ -91,6 +91,11 @@ protocol Strings {
     // ---- 界面语言 ----
     var uiLanguage: String { get }
 
+    var broadcastLabel: String { get }
+    var broadcastAuto: String { get }
+    var broadcastIncludeVirtual: String { get }
+    var broadcastHint: String { get }
+
     // ---- 播放 / 镜像页 ----
     var mirroringScreen: String { get }
     var receivingCast: String { get }
@@ -176,6 +181,13 @@ struct ChineseStrings: Strings {
 
     let uiLanguage = "界面语言"
 
+    let broadcastLabel = "广播网卡"
+    let broadcastAuto = "自动（只在实际的局域网上）"
+    let broadcastIncludeVirtual = "也包含 VPN / 虚拟网卡"
+    let broadcastHint = "决定在哪几块网卡上做设备发现。「自动」在整机没有真实网卡时"
+        + "（例如只连着 VPN）也会用虚拟网卡。注意 tun 模式的 OpenVPN 不转发组播，"
+        + "在它上面仍然发现不了设备。"
+
     let mirroringScreen = "正在镜像屏幕"
     let receivingCast = "正在接收投屏"
     let playbackHintMouse = "鼠标移动可再显示控件"
@@ -236,6 +248,14 @@ struct EnglishStrings: Strings {
     let clearLog = "Clear log"
 
     let uiLanguage = "Language"
+
+    let broadcastLabel = "Broadcast interfaces"
+    let broadcastAuto = "Automatic (LAN only)"
+    let broadcastIncludeVirtual = "Include VPN / virtual adapters"
+    let broadcastHint = "Which adapters device discovery uses. \"Automatic\" also falls back "
+        + "to virtual adapters when the machine has no real one (for example only a VPN). "
+        + "Note that OpenVPN in tun mode does not forward multicast, so discovery still "
+        + "will not work over it."
 
     let mirroringScreen = "Mirroring screen"
     let receivingCast = "Receiving cast"

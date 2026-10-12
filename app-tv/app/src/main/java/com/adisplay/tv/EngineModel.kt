@@ -448,6 +448,12 @@ class EngineModel(context: Context) {
 
     /** 画质档位。改动只影响手机下次连接 —— 尺寸是在应答 /info 时给出去的。 */
     var qualityPreset by mutableStateOf(QualityPreset.BALANCED)
+
+    /**
+     * 广播网卡：虚拟网卡（VPN / ZeroTier / Tailscale）要不要一起广播。
+     * false＝只在实际的局域网上（默认）。核心负责持久化，这里只是界面镜像。
+     */
+    var includeVirtualInterfaces by mutableStateOf(false)
         private set
 
     var version by mutableStateOf("")
@@ -691,6 +697,8 @@ class EngineModel(context: Context) {
         // 档位是存在配置文件里的，启动时读回来把选择器拨到已保存的那一档 ——
         // 否则界面会显示默认档，而核心按存下来的那一档给尺寸建议。
         qualityPreset = QualityPreset.of(AdDisplayNative.nativeGetQualityPreset(handle))
+        includeVirtualInterfaces =
+            AdDisplayNative.nativeGetIncludeVirtualInterfaces(handle) != 0
 
         // 日志落盘：接上之后这一行本身也会写进文件（它是文件里的第一行）。
         LogFile.attach(appContext)
@@ -767,6 +775,34 @@ class EngineModel(context: Context) {
      * JVM 上的 `setQualityPreset(QualityPreset)`，同名函数会撞签名（编译报
      * Platform declaration clash）。改名那条路同样叫 applyRename，跟着它走。
      */
+    /**
+     * 切换「广播网卡」。
+     *
+     * 名字是 apply 而不是 set：`includeVirtualInterfaces` 那个属性在 JVM 上已经
+     * 占掉了 `setIncludeVirtualInterfaces(Boolean)`，同名函数会撞签名 —— 与
+     * [applyQualityPreset] 当初踩的是同一个坑。
+     */
+    fun applyIncludeVirtualInterfaces(include: Boolean) {
+        val handle = engine
+        if (handle == 0L || include == includeVirtualInterfaces) {
+            return   // 没变就不折腾：重启 SSDP 会让手机列表闪一下
+        }
+        val result = AdDisplayNative.nativeSetIncludeVirtualInterfaces(handle, if (include) 1 else 0)
+        if (result != AdResult.OK.code) {
+            appendLog(LogLevel.ERROR, "切换广播网卡失败：" + AdResult.describe(result))
+            return
+        }
+        includeVirtualInterfaces = include
+        appendLog(
+            LogLevel.INFO,
+            if (include) {
+                "广播网卡：虚拟网卡也一起广播（VPN / ZeroTier 这类覆盖网上的设备可能发现本机）"
+            } else {
+                "广播网卡：只在实际的局域网上广播"
+            }
+        )
+    }
+
     fun applyQualityPreset(preset: QualityPreset) {
         val handle = engine
         if (handle == 0L) {

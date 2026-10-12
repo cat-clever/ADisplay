@@ -460,6 +460,26 @@ std::vector<NetworkAddress> broadcastable_addresses() {
     return result;
 }
 
+std::vector<NetworkAddress> filter_broadcast_addresses(
+    const std::vector<NetworkAddress>& entries, bool include_virtual) {
+    std::vector<NetworkAddress> usable;
+    std::vector<NetworkAddress> real;
+    for (const NetworkAddress& entry : entries) {
+        if (entry.is_loopback || entry.is_ipv6) {
+            continue;
+        }
+        usable.push_back(entry);
+        if (!entry.is_virtual) {
+            real.push_back(entry);
+        }
+    }
+    if (include_virtual) {
+        return usable;
+    }
+    // 「自动」模式下没有真实网卡可广播时退回全部 —— 见头文件里的「例外」。
+    return real.empty() ? usable : real;
+}
+
 std::string pick_primary_ipv4(const std::vector<NetworkAddress>& entries) {
     // 第一轮只认真实网卡；都没有才看虚拟网卡。分两轮而不是「排个序取第一个」，
     // 是因为枚举顺序由系统决定，不能让它决定结果。

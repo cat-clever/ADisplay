@@ -76,6 +76,7 @@ struct ContentView: View {
             deviceNameSection
             qualitySection
             languageSection
+            broadcastSection
             serviceSection
             infoSection
             logEntry
@@ -172,6 +173,34 @@ struct ContentView: View {
             }
             .pickerStyle(.segmented)
             .labelsHidden()
+        }
+    }
+
+    // MARK: - 广播网卡
+
+    /// 设备发现（SSDP）在哪几块网卡上广播。默认只在实际的局域网上 ——
+    /// 打开后才包含 VPN / ZeroTier 这类虚拟网卡。
+    ///
+    /// 提醒一句预期：tun 模式的 OpenVPN 不转发组播，在它上面即便打开也发现不了
+    /// 设备；这一项真正有用的是二层覆盖网（ZeroTier 等）与「整机只有 VPN」的情况。
+    private var broadcastSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(model.strings.broadcastLabel)
+                .font(.headline)
+
+            Picker(model.strings.broadcastLabel, selection: Binding(
+                get: { model.includeVirtualInterfaces },
+                set: { model.setIncludeVirtualInterfaces($0) }
+            )) {
+                Text(model.strings.broadcastAuto).tag(false)
+                Text(model.strings.broadcastIncludeVirtual).tag(true)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+
+            Text(model.strings.broadcastHint)
+                .font(.caption)
+                .foregroundColor(.secondary)
         }
     }
 

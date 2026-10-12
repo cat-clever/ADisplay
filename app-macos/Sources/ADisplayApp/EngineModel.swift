@@ -125,6 +125,11 @@ final class EngineModel: ObservableObject {
     @Published private(set) var version: String = ""
     /// 画质档位。改动只影响手机下次连接 —— 尺寸是在应答 /info 时给出去的。
     @Published private(set) var qualityPreset: QualityPreset = .balanced
+
+    /// 广播网卡：虚拟网卡（VPN / ZeroTier / Tailscale）要不要一起广播。
+    /// 默认 false＝只在实际的局域网上（文档 6.3）。核心负责持久化，
+    /// 这里只是界面状态的镜像。
+    @Published private(set) var includeVirtualInterfaces = false
     @Published private(set) var deviceName: String = ""
 
     /// 设备名称的编辑值。改这个不会立刻生效，要调 applyDeviceName()。
@@ -217,6 +222,7 @@ final class EngineModel: ObservableObject {
         localAddresses = readLocalAddresses()
         version = readVersion()
         qualityPreset = readQualityPreset()
+        includeVirtualInterfaces = readIncludeVirtualInterfaces()
 
         appendLog(level: .info, text: "ADisplay 已就绪，打开开关即可开始接收投屏。")
     }
@@ -557,6 +563,29 @@ final class EngineModel: ObservableObject {
             return preset
         }
         return .balanced
+    }
+
+    /// 切换「广播网卡」。核心会立刻生效（只重启 SSDP，不影响正在进行的
+    /// AirPlay 镜像），并自己持久化 —— 界面这边不落盘，只镜像状态。
+    func setIncludeVirtualInterfaces(_ include: Bool) {
+        guard let handle = engine else { return }
+        let result = ad_engine_set_include_virtual_interfaces(handle, include ? 1 : 0)
+        if result.rawValue != ResultCode.ok {
+            appendLog(level: .error, text: "切换广播网卡失败：\(describe(result: result))")
+            return
+        }
+        includeVirtualInterfaces = include
+    }
+
+    /// 读回已保存的设置。界面启动时用它把选择器拨到正确的那一项 ——
+    /// 不读的话每次启动都显示成默认值，而实际用的是上次选的那个（同画质那处）。
+    private func readIncludeVirtualInterfaces() -> Bool {
+        guard let handle = engine else { return false }
+        var raw: Int32 = 0
+        if ad_engine_get_include_virtual_interfaces(handle, &raw).rawValue != ResultCode.ok {
+            return false
+        }
+        return raw != 0
     }
 
     // MARK: - 设备名称

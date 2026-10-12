@@ -187,6 +187,23 @@ internal sealed class Strings
 
     // ---- 界面语言 ----
     public string UiLanguage => _en ? "Language" : "界面语言";
+
+    public string BroadcastLabel => _en ? "Broadcast interfaces" : "广播网卡";
+
+    public string BroadcastAuto => _en
+        ? "Automatic (LAN only)"
+        : "自动（只在实际的局域网上）";
+
+    public string BroadcastIncludeVirtual => _en
+        ? "Include VPN / virtual adapters"
+        : "也包含 VPN / 虚拟网卡";
+
+    public string BroadcastHint => _en
+        ? "Which adapters device discovery uses. \"Automatic\" also falls back to virtual "
+          + "adapters when the machine has no real one (for example only a VPN). Note that "
+          + "OpenVPN in tun mode does not forward multicast, so discovery still will not work over it."
+        : "决定在哪几块网卡上做设备发现。「自动」在整机没有真实网卡时（例如只连着 VPN）"
+          + "也会用虚拟网卡。注意 tun 模式的 OpenVPN 不转发组播，在它上面仍然发现不了设备。";
 }
 
 /// <summary>

@@ -603,6 +603,40 @@ Java_com_adisplay_tv_AdDisplayNative_nativeSetQualityPreset(JNIEnv* /*env*/, job
     return ad_engine_set_quality_preset(engine, static_cast<int>(preset));
 }
 
+// ===========================================================================
+// 广播网卡（虚拟网卡要不要一起广播）
+// ===========================================================================
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_adisplay_tv_AdDisplayNative_nativeGetIncludeVirtualInterfaces(JNIEnv* /*env*/,
+                                                                      jobject /*thiz*/,
+                                                                      jlong handle) {
+    AdEngine* engine = reinterpret_cast<AdEngine*>(handle);
+    if (engine == nullptr) {
+        return 0;
+    }
+    int include = 0;
+    if (ad_engine_get_include_virtual_interfaces(engine, &include) != AD_OK) {
+        // 读不到就按默认（只在实际的局域网上）回，别让界面拿到没意义的数。
+        return 0;
+    }
+    return include;
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_adisplay_tv_AdDisplayNative_nativeSetIncludeVirtualInterfaces(JNIEnv* /*env*/,
+                                                                      jobject /*thiz*/,
+                                                                      jlong handle,
+                                                                      jint include) {
+    AdEngine* engine = reinterpret_cast<AdEngine*>(handle);
+    if (engine == nullptr) {
+        return AD_ERR_NOT_INITIALIZED;
+    }
+    // 核心负责持久化与即时生效（只重启 SSDP，不影响正在进行的镜像），
+    // 所以这里不重复判一次 —— 与画质那处同一个约定。
+    return ad_engine_set_include_virtual_interfaces(engine, static_cast<int>(include));
+}
+
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_adisplay_tv_AdDisplayNative_nativeGetAirplayAdvert(JNIEnv* env, jobject /*thiz*/,
                                                             jlong handle) {

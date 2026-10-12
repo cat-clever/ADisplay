@@ -399,6 +399,68 @@ private fun LanguageRow(
     }
 }
 
+/// 广播网卡：设备发现用哪几块网卡。
+///
+/// 按钮上只放短词（「自动」「含虚拟网卡」），完整说明放下面那行提示里 ——
+/// 与「镜像画质」那一行同一个做法：窄屏上等分宽度的两个按钮放不下长句子。
+@Composable
+private fun BroadcastRow(
+    model: EngineModel,
+    layout: StandbyLayout,
+    modifier: Modifier = Modifier,
+) {
+    val strings = LocalStrings.current
+    val autoFocus = remember { FocusRequester() }
+    val includeFocus = remember { FocusRequester() }
+
+    Column(
+        modifier = modifier.fillMaxWidth(),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Text(text = strings.broadcastLabel, style = layout.bodyStyle)
+
+        Spacer(modifier = Modifier.height(layout.spacingTight))
+
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            ActionButton(
+                text = strings.broadcastAuto,
+                textStyle = layout.actionStyle,
+                minWidth = 0.dp,
+                modifier = Modifier.weight(1f),
+                focusRequester = autoFocus,
+                selected = !model.includeVirtualInterfaces,
+                onClick = { model.applyIncludeVirtualInterfaces(false) },
+            )
+            Spacer(modifier = Modifier.width(10.dp))
+            ActionButton(
+                text = strings.broadcastIncludeVirtual,
+                textStyle = layout.actionStyle,
+                minWidth = 0.dp,
+                modifier = Modifier.weight(1f),
+                focusRequester = includeFocus,
+                selected = model.includeVirtualInterfaces,
+                onClick = { model.applyIncludeVirtualInterfaces(true) },
+            )
+        }
+
+        Spacer(modifier = Modifier.height(layout.spacingTight))
+
+        // 样式与画质那行的提示一致（StandbyLayout 里没有单独的 hintStyle）。
+        Text(
+            text = strings.broadcastHint,
+            style = layout.bodyStyle,
+            textAlign = TextAlign.Center,
+            modifier = Modifier
+                .fillMaxWidth()
+                .widthIn(max = 900.dp)
+        )
+    }
+}
+
 @Composable
 private fun StandbyContent(model: EngineModel, onShowLog: () -> Unit) {
 
@@ -502,6 +564,10 @@ private fun StandbyContent(model: EngineModel, onShowLog: () -> Unit) {
                 Spacer(modifier = Modifier.height(layout.spacingLoose))
 
                 LanguageRow(model = model, layout = layout)
+
+                Spacer(modifier = Modifier.height(layout.spacingLoose))
+
+                BroadcastRow(model = model, layout = layout)
 
                 Spacer(modifier = Modifier.height(layout.spacingLoose))
 

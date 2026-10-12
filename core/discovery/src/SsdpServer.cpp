@@ -135,7 +135,7 @@ struct SsdpServer::Impl {
 
     // ---- 组播相关的 socket 设置 -------------------------------------------
 
-    bool open_socket(std::string* out_error) {
+    bool open_socket(bool include_virtual_interfaces, std::string* out_error) {
         socket_handle = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
         if (socket_handle == kInvalidSocket) {
             set_error(out_error, "无法创建 UDP socket");
@@ -181,17 +181,16 @@ struct SsdpServer::Impl {
         // 加入组播组可以对多块网卡分别做；发送时每次切换 IP_MULTICAST_IF
         // 即可。这样不管手机在哪个网段都能收到。
         //
-        // 虚拟网卡（VPN / ZeroTier / Tailscale）同样纳入：覆盖网是二层的话组播
-        // 本来就过得去，对面的设备因此能发现这台机器；过不去的那些（tun 模式的
-        // OpenVPN、Tailscale）多发几个包也无害。**每块网卡发的 LOCATION 用它
-        // 自己的地址**（见 location_for），所以不会出现「另一网段的手机会拿到
-        // 一个跨网段访问不到的 URL」那种广播收到了、设备却不出现的情况 ——
-        // 这也是原来「排除虚拟网卡」那条规则唯一真正要防的东西。
+        // 虚拟网卡（VPN / ZeroTier / Tailscale）要不要一起用，由界面上那行
+        // 「广播网卡」的决定 —— 见 common::filter_broadcast_addresses，规则
+        // （含「一块真实网卡都没有时仍用虚拟网卡」的例外）都在那个纯函数里。
+        //
+        // 每块网卡发出去的 LOCATION 用它自己的地址（见 location_for），所以
+        // 无论选了几块，都不会出现「另一网段的手机会拿到一个跨网段访问不到的
+        // URL」那种「广播收到了、设备却不出现」的情况。
         interfaces_.clear();
-        for (const common::NetworkAddress& candidate : common::broadcastable_addresses()) {
-            if (candidate.is_ipv6) {
-                continue;   // UPnP 的组播地址是 IPv4 的
-            }
+        for (const common::NetworkAddress& candidate : common::filter_broadcast_addresses(
+                 common::enumerate_network_addresses(), include_virtual_interfaces)) {
             InterfaceBinding binding;
             binding.name = candidate.interface_name;
             binding.address = candidate.address;
@@ -623,7 +622,7 @@ bool SsdpServer::start(const SsdpAdvertisement& advertisement, std::string* out_
         impl_->advertisement = advertisement;
     }
 
-    if (!impl_->open_socket(out_error)) {
+    if (!impl_->open_socket(advertisement.include_virtual_interfaces, out_error)) {
         return false;
     }
 

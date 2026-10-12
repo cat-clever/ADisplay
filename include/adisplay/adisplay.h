@@ -219,7 +219,10 @@ typedef struct AdConfig {
     const char*      config_file_path;
 
     /* 只在这些网卡上广播。NULL 表示自动（忽略 VMware / WSL / VPN 等虚拟网卡，
-       见文档 6.3）。数组元素是网卡名 UTF-8 字符串，如 "en0"、"以太网"。 */
+       见文档 6.3）。数组元素是网卡名 UTF-8 字符串，如 "en0"、"以太网"。
+
+       **当前未实现**（只被记录，没有谁读它）。要控制「虚拟网卡要不要一起广播」，
+       请用 ad_engine_set_include_virtual_interfaces。 */
     const char* const* bind_interfaces;
     uint32_t         bind_interface_count;
 } AdConfig;
@@ -495,6 +498,23 @@ AD_API AdResult AD_CALL ad_engine_get_airplay_advert(AdEngine* engine, char* buf
                                                     size_t buffer_size, size_t* out_length);
 /* 读取当前档位（取值见 AdQualityPreset）。界面启动时用它把选择器拨到已保存的那一档。 */
 AD_API AdResult AD_CALL ad_engine_get_quality_preset(AdEngine* engine, int* out_preset);
+
+/* 广播网卡：虚拟网卡（VPN / ZeroTier / Tailscale / VMware / WSL）要不要一起广播。
+ *
+ * enabled 非 0＝「也包含」（覆盖网上的设备因此可能发现本机）；0＝「自动」，
+ * 只在实际的局域网上广播 —— 这是默认值，与文档 6.3 一致。
+ *
+ * 一个例外两种情况都适用：一块真实网卡都没有时（例如整机只挂着一条 VPN），
+ * 仍然会在虚拟网卡上广播，否则设备发现会完全不工作。
+ *
+ * **即时生效**：会重启 SSDP（DLNA 的设备发现）那一半，界面不需要重启应用；
+ * mDNS 是系统发布的、不受这个筛选影响，所以正在进行的 AirPlay 会话不受打扰。
+ * 设置会被持久化，下次启动照旧。 */
+AD_API AdResult AD_CALL ad_engine_set_include_virtual_interfaces(AdEngine* engine, int enabled);
+
+/* 读取当前设置（1＝也包含虚拟网卡，0＝自动）。界面启动时用它把选择器拨到已保存的那一档。 */
+AD_API AdResult AD_CALL ad_engine_get_include_virtual_interfaces(AdEngine* engine,
+                                                                int* out_enabled);
 
 /* 把当前配置写回配置文件（设备名称、端口、白名单等）。 */
 AD_API AdResult AD_CALL ad_engine_save_config(AdEngine* engine);

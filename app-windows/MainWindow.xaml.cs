@@ -133,6 +133,15 @@ public sealed partial class MainWindow : Window
     /// <summary>程序化拨动语言下拉框也会触发 SelectionChanged，用它挡住（同 _suppressQuality）。</summary>
     private bool _suppressLanguage;
 
+    /// <summary>程序化拨动广播网卡下拉框也会触发 SelectionChanged，用它挡住（同 _suppressLanguage）。</summary>
+    private bool _suppressBroadcast;
+
+    /// <summary>
+    /// 广播网卡当前值（true＝也包含虚拟网卡）。核心负责持久化，这里只是界面缓存 ——
+    /// 语言切换时要用它把下拉框拨回去。
+    /// </summary>
+    private bool _includeVirtualInterfaces;
+
     /// <summary>
     /// 最近一次收到的核心状态。语言一变要按新语言重算状态文字，而那一刻不一定
     /// 正好有回调进来 —— 所以记着它（DescribeState 只吃这个值）。
@@ -225,6 +234,12 @@ public sealed partial class MainWindow : Window
             _suppressQuality = true;
             QualityBox.SelectedIndex = ReadQualityIndex();
             _suppressQuality = false;
+            // 广播网卡：从核心读回已保存的值（核心持久化，界面不另存），
+            // 与画质那处同一个约定。
+            _includeVirtualInterfaces = _engine.IncludeVirtualInterfaces;
+            _suppressBroadcast = true;
+            BroadcastBox.SelectedIndex = _includeVirtualInterfaces ? 1 : 0;
+            _suppressBroadcast = false;
             DeviceIdRun.Text = _engine.DeviceId;
             AddressRun.Text = FormatAddresses(_engine.LocalAddresses);
             VersionRun.Text = ReadVersion();
@@ -389,6 +404,8 @@ public sealed partial class MainWindow : Window
         QualityLabelText.Text = s.MirrorQuality;
         QualityHintText.Text = s.QualityHint;
         LanguageLabelText.Text = s.UiLanguage;
+        BroadcastLabelText.Text = s.BroadcastLabel;
+        BroadcastHintText.Text = s.BroadcastHint;
         LocalInfoLabelText.Text = s.LocalInfo;
         AddressLabelRun.Text = s.InfoLocalAddress;
         DeviceIdLabelRun.Text = s.InfoDeviceId;
@@ -411,6 +428,19 @@ public sealed partial class MainWindow : Window
         _suppressLanguage = true;
         LanguageBox.SelectedIndex = _strings.Language == Language.En ? 1 : 0;
         _suppressLanguage = false;
+
+        // 广播网卡下拉：两项文案跟着语言走，并把选中项拨回当前值（同画质那处）。
+        for (int i = 0; i < BroadcastBox.Items.Count; i++)
+        {
+            ComboBoxItem item = BroadcastBox.Items[i] as ComboBoxItem;
+            if (item != null)
+            {
+                item.Content = i == 0 ? s.BroadcastAuto : s.BroadcastIncludeVirtual;
+            }
+        }
+        _suppressBroadcast = true;
+        BroadcastBox.SelectedIndex = _includeVirtualInterfaces ? 1 : 0;
+        _suppressBroadcast = false;
 
         // 投屏页与悬浮控件
         PlaybackHintText.Text = s.PlaybackHintMouse;
@@ -452,6 +482,26 @@ public sealed partial class MainWindow : Window
         ApplyLanguage();
         // 日志一律中文，不跟着界面走。
         AppendLog(AdLogLevel.Info, "界面语言已切换为「" + (target == Language.En ? "en" : "zh") + "」");
+    }
+
+    /// <summary>
+    /// 广播网卡下拉框换了：立刻交给核心（核心负责持久化与生效，界面不另存）。
+    /// </summary>
+    private void OnBroadcastChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressBroadcast || BroadcastBox.SelectedIndex < 0)
+        {
+            return;
+        }
+        try
+        {
+            _includeVirtualInterfaces = BroadcastBox.SelectedIndex == 1;
+            _engine.SetIncludeVirtualInterfaces(_includeVirtualInterfaces);
+        }
+        catch (Exception ex)
+        {
+            AppendLog(AdLogLevel.Error, ex.Message);
+        }
     }
 
     private void OnQualityChanged(object sender, SelectionChangedEventArgs e)
