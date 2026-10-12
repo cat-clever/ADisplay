@@ -6,6 +6,7 @@
 
 set(ADISPLAY_TEST_SOURCES
     test_byte_order.cpp
+    test_net_selection.cpp
     test_device_name.cpp
     test_device_identity.cpp
     test_ssdp_message.cpp

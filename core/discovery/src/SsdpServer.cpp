@@ -127,6 +127,9 @@ struct SsdpServer::Impl {
         // 掩码用于判断某个请求方是否与这块网卡同网段。
         // 为空时按 /24 兜底（Windows 的枚举分支目前不填掩码）。
         std::string netmask;
+        // 虚拟网卡（VPN / ZeroTier / 虚拟机网桥）。照样发广播，只是日志里标出来 ——
+        // 「到底在哪几块网卡上广播」是排查「手机搜不到设备」的第一手信息。
+        bool is_virtual = false;
     };
     std::vector<InterfaceBinding> interfaces_;
 
@@ -177,6 +180,13 @@ struct SsdpServer::Impl {
         //
         // 加入组播组可以对多块网卡分别做；发送时每次切换 IP_MULTICAST_IF
         // 即可。这样不管手机在哪个网段都能收到。
+        //
+        // 虚拟网卡（VPN / ZeroTier / Tailscale）同样纳入：覆盖网是二层的话组播
+        // 本来就过得去，对面的设备因此能发现这台机器；过不去的那些（tun 模式的
+        // OpenVPN、Tailscale）多发几个包也无害。**每块网卡发的 LOCATION 用它
+        // 自己的地址**（见 location_for），所以不会出现「另一网段的手机会拿到
+        // 一个跨网段访问不到的 URL」那种广播收到了、设备却不出现的情况 ——
+        // 这也是原来「排除虚拟网卡」那条规则唯一真正要防的东西。
         interfaces_.clear();
         for (const common::NetworkAddress& candidate : common::broadcastable_addresses()) {
             if (candidate.is_ipv6) {
@@ -186,12 +196,14 @@ struct SsdpServer::Impl {
             binding.name = candidate.interface_name;
             binding.address = candidate.address;
             binding.netmask = candidate.netmask;
+            binding.is_virtual = candidate.is_virtual;
             interfaces_.push_back(binding);
         }
 
         if (interfaces_.empty()) {
             set_error(out_error,
-                      "找不到可用的局域网网卡。请确认已连接 Wi-Fi 或网线。");
+                      "找不到可用的网卡。请确认已连接 Wi-Fi、网线，"
+                      "或已连上 VPN / 覆盖网。");
             close_socket(socket_handle);
             socket_handle = kInvalidSocket;
             return false;
@@ -203,7 +215,8 @@ struct SsdpServer::Impl {
                 if (!joined.empty()) {
                     joined += "，";
                 }
-                joined += binding.name + "（" + binding.address + "）";
+                joined += binding.name + "（" + binding.address +
+                          (binding.is_virtual ? "，虚拟网卡" : "") + "）";
             }
             AD_LOG_INFO("SSDP 将在 {} 块网卡上广播：{}",
                         interfaces_.size(), joined);

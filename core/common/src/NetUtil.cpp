@@ -380,15 +380,6 @@ std::vector<NetworkAddress> enumerate_network_addresses() {
     return result;
 }
 
-std::string primary_local_ipv4() {
-    for (const NetworkAddress& entry : broadcastable_addresses()) {
-        if (!entry.is_ipv6) {
-            return entry.address;
-        }
-    }
-    return std::string();
-}
-
 #else  // POSIX
 
 std::vector<NetworkAddress> enumerate_network_addresses() {
@@ -453,8 +444,31 @@ std::vector<NetworkAddress> enumerate_network_addresses() {
     return result;
 }
 
-std::string primary_local_ipv4() {
-    for (const NetworkAddress& entry : broadcastable_addresses()) {
+#endif
+
+std::vector<NetworkAddress> broadcastable_addresses() {
+    // 只跳过回环。虚拟网卡保留并把身份标出来 —— 为什么不再一律排除，
+    // 见 NetUtil.h 上面的说明（根因是「多网卡发错地址」，而那个已经用
+    // 「逐块网卡生成各自的 LOCATION」解决了）。
+    std::vector<NetworkAddress> result;
+    for (const NetworkAddress& entry : enumerate_network_addresses()) {
+        if (entry.is_loopback) {
+            continue;
+        }
+        result.push_back(entry);
+    }
+    return result;
+}
+
+std::string pick_primary_ipv4(const std::vector<NetworkAddress>& entries) {
+    // 第一轮只认真实网卡；都没有才看虚拟网卡。分两轮而不是「排个序取第一个」，
+    // 是因为枚举顺序由系统决定，不能让它决定结果。
+    for (const NetworkAddress& entry : entries) {
+        if (!entry.is_ipv6 && !entry.is_virtual) {
+            return entry.address;
+        }
+    }
+    for (const NetworkAddress& entry : entries) {
         if (!entry.is_ipv6) {
             return entry.address;
         }
@@ -462,17 +476,8 @@ std::string primary_local_ipv4() {
     return std::string();
 }
 
-#endif
-
-std::vector<NetworkAddress> broadcastable_addresses() {
-    std::vector<NetworkAddress> result;
-    for (const NetworkAddress& entry : enumerate_network_addresses()) {
-        if (entry.is_loopback || entry.is_virtual) {
-            continue;
-        }
-        result.push_back(entry);
-    }
-    return result;
+std::string primary_local_ipv4() {
+    return pick_primary_ipv4(broadcastable_addresses());
 }
 
 }  // namespace adisplay::common

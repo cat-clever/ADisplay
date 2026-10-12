@@ -32,16 +32,35 @@ struct NetworkAddress {
     std::string netmask;
     bool is_ipv6 = false;
     bool is_loopback = false;
-    // 虚拟网卡（VMware / VirtualBox / WSL / VPN / Docker 桥）。文档 6.3 提到
-    // 多网卡会导致广播发错网段，默认要把这些排除掉。
+    // 虚拟网卡（VMware / VirtualBox / WSL / VPN / ZeroTier / Docker 桥）。
+    // 文档 6.3 提到多网卡会导致广播发错网段 —— 那件事现在的处理办法是
+    // **逐块网卡生成各自的地址**（见 SsdpMessage.h 的 location_for），
+    // 所以这里只标出来、不再一律排除：VPN 与覆盖网上的设备也得能被找到，
+    // 而「本机地址」那种给人看的字段仍然优先真实网卡（见 primary_local_ipv4）。
     bool is_virtual = false;
 };
 
 // 枚举本机所有网卡的地址。
 std::vector<NetworkAddress> enumerate_network_addresses();
 
-// 只取适合对外广播的地址（跳过回环与虚拟网卡）。
+// 取本机所有可以对外广播的地址：跳过回环，**虚拟网卡也包含在内**
+// （VPN / ZeroTier / Tailscale / 虚拟机网桥），每条的 is_virtual 标出它的身份。
+//
+// 为什么不再排除虚拟网卡：原来的理由是「多网卡会广播到错误网段」，而
+// 那个问题已经在 SSDP 里解决了 —— 每块网卡发出去的 LOCATION 用它自己的地址
+// （见 SsdpMessage.h 的 location_for）。排除掉的代价则是：整机只接着一条 VPN
+// 时一个地址都没有（SSDP 干脆起不来），以及覆盖网上的设备永远搜不到这台机器。
 std::vector<NetworkAddress> broadcastable_addresses();
+
+// 从一份网卡列表里挑「本机地址」（电视端待机页与日志里显示的那个）。
+//
+// 规则是**优先真实网卡，都没有才退回虚拟网卡**：这个地址是给人看、给用户照着
+// 连的，宁可报出 VPN 的地址（至少说明本机只有 VPN 可用），也不能在两者都在时
+// 报一个局域网里连不上的 VPN 地址把用户带偏。
+//
+// 单独成函数是为了能被单元测试直接覆盖（构造出来的列表，不依赖跑测试的机器
+// 真实装了什么网卡）。
+std::string pick_primary_ipv4(const std::vector<NetworkAddress>& entries);
 
 // 取本机在局域网中的 IPv4 地址，没有则返回空串。
 // 电视端待机页要显示它（文档 2.3）。

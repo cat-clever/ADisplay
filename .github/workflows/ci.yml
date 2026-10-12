@@ -28,6 +28,14 @@ on:
         description: 这次改动的内容（显示在运行标题里）
         required: false
         type: string
+      # workflow_call 那边的默认值不适用于手动触发（手动跑时 inputs.run-tests
+      # 是空值，而空值当假），于是「手动触发也跑测试」这句注释其实不成立。
+      # 显式补一个同名的入参，默认 true，与那句注释对齐。
+      run-tests:
+        description: 是否运行单元测试
+        required: false
+        default: true
+        type: boolean
   workflow_call:
     # 发布那条路会传 false：发布要的是「构建并打包」，不是在发布时再跑一遍测试。
     # 默认 true，所以手动触发与 PR 都照常跑测试。

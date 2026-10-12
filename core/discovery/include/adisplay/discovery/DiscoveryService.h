@@ -62,7 +62,8 @@ struct DiscoveryConfig {
     bool enable_dlna = true;
     bool enable_castpc = true;
 
-    // 优先使用的网卡地址。留空表示自动选择（跳过回环与虚拟网卡，见文档 6.3）。
+    // 优先使用的网卡地址。留空表示自动选择（跳过回环；虚拟网卡只在没有
+    // 真实网卡可用时才拿来当「本机地址」，见 common::pick_primary_ipv4）。
     std::string preferred_address;
 };
 

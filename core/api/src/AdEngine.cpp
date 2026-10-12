@@ -2176,9 +2176,15 @@ AdResult AD_CALL ad_engine_get_local_addresses(AdEngine* engine, char* buf,
         return AD_ERR_NOT_INITIALIZED;
     }
 
-    // 只列出适合广播的地址：回环和虚拟网卡对用户没有意义（文档 6.3）。
+    // 只列真实网卡：这个列表是给用户在界面上挑「用哪块网卡广播」的，
+    // 混进 VPN / 虚拟机网桥的地址只会让人挑错（文档 6.3）。
+    // 注意与 SsdpServer 的区别 —— 那边是**真去广播**，虚拟网卡也要发
+    // （覆盖网上的设备才找得到，见 NetUtil.h）。
     std::string joined;
     for (const common::NetworkAddress& address : common::broadcastable_addresses()) {
+        if (address.is_virtual) {
+            continue;
+        }
         if (!joined.empty()) {
             joined.push_back('\n');
         }
