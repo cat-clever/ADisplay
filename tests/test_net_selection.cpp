@@ -72,3 +72,7 @@ AD_TEST(net_selection_virtual_names, "虚拟网卡按名字识别（含 VPN 与�
     AD_CHECK(!is_virtual_interface("以太网"));
     AD_CHECK(!is_virtual_interface(""));
 }
+
+int main() {
+    return adtest::run_all("网卡与地址选择测试");
+}
