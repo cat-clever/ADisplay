@@ -19,8 +19,12 @@
     <AssemblyName>ADisplay</AssemblyName>
     <!-- 版本号要跟 CMakeLists.txt 一致（那里是唯一权威来源）。
          会出现在 exe 的文件属性与「关于」里。 -->
-    <Version>1.0.10</Version>
+    <Version>1.0.11</Version>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <!-- exe 自身的图标（资源管理器里看到的就是它）。窗口的标题栏与任务栏另外
+         要在运行时装一次，见 MainWindow.ApplyWindowIcon —— WinUI 的窗口不会
+         自动去用 exe 的图标。 -->
+    <ApplicationIcon>adisplay.ico</ApplicationIcon>
     <Platforms>x64;ARM64</Platforms>
     <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
     <UseWinUI>true</UseWinUI>
@@ -31,6 +35,16 @@
     <LangVersion>latest</LangVersion>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
+
+  <!-- 图标文件也要随包发出去一份：exe 里那份只有系统能取，运行时要给窗口
+       设图标得有一个真实文件路径。CopyToPublishDirectory 必须显式写 ——
+       publish 时它不一定会跟着 CopyToOutputDirectory 走。 -->
+  <ItemGroup>
+    <None Update="adisplay.ico">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </None>
+  </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.7.*" />

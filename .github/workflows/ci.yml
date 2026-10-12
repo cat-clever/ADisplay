@@ -76,7 +76,7 @@ jobs:
   # 版本对不上 —— 排查时会怀疑自己装错了包。
   # =========================================================================
   version-check:
-    name: 版本号一致性
+    name: 一致性检查（版本号 / 三端图标）
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -137,6 +137,13 @@ jobs:
             exit 1
           fi
           echo "各处版本号一致。"
+
+      # 三端图标用同一套比例画（Android 两份矢量 + Windows 的 .ico + macOS 的 .icns），
+      # 比例写在两份生成器的 PROPORTIONS 行里。这个检查把两行对表、并按比例反算
+      # 矢量里实际用的数字 —— 挡住「改了一端忘了另外两端」和「手工改产物」。
+      # 它不重新渲染，只读仓库里的文件，几秒钟跑完。
+      - name: 检查三端图标一致性
+        run: python3 tools/icons/check_icon_consistency.py
 
   # =========================================================================
   # Linux：文档把 Linux 桌面端标为 P2「暂缓」，所以这里只构建核心库并跑单元测试，
@@ -245,6 +252,13 @@ jobs:
             exit 1
           }
           Get-ChildItem publish/windows-x64/castcore.dll | Format-List Name, Length
+          # 窗口图标文件也要在包里。exe 里那份只有系统能取，运行时要给窗口设图标
+          # 得有真实文件路径（MainWindow.ApplyWindowIcon）—— 缺了不报错，
+          # 只是窗口退回系统默认图标，那正是这次要修的东西，所以在打包这里钉住。
+          if (-not (Test-Path "publish/windows-x64/adisplay.ico")) {
+            Write-Error "publish 目录里没有 adisplay.ico —— 窗口图标会退回系统默认"
+            exit 1
+          }
           # VC++ 运行库随包带上。castcore.dll 导入 MSVCP140 / VCRUNTIME140，而它们来自
           # VC++ Redistributable —— 不带上的话「绿色版免装」就不成立，没装过的机器上
           # castcore.dll 加载不起来。另一条路是把依赖编成静态 CRT，但那要求我们自己的
@@ -359,6 +373,11 @@ jobs:
             exit 1
           }
           Get-ChildItem publish/windows-arm64/castcore.dll | Format-List Name, Length
+          # 同 x64：图标文件必须在包里，缺了窗口就用系统默认图标。
+          if (-not (Test-Path "publish/windows-arm64/adisplay.ico")) {
+            Write-Error "publish 目录里没有 adisplay.ico —— 窗口图标会退回系统默认"
+            exit 1
+          }
           # VC++ 运行库随包带上。castcore.dll 导入 MSVCP140 / VCRUNTIME140，而它们来自
           # VC++ Redistributable —— 不带上的话「绿色版免装」就不成立，没装过的机器上
           # castcore.dll 加载不起来。另一条路是把依赖编成静态 CRT，但那要求我们自己的
@@ -507,6 +526,16 @@ jobs:
           # 验证包内每个 Mach-O 都是通用二进制，避免发出只能跑一半机器的包。
           lipo -info dist/ADisplay.app/Contents/MacOS/ADisplay
           lipo -info dist/ADisplay.app/Contents/Frameworks/libcastcore.dylib
+
+          # 图标必须在包内。Info.plist 里的 CFBundleIconFile 只是**引用**，
+          # 文件缺失不会让任何一步失败，表现是 Dock 与访达里一个空白文档图标 ——
+          # 所以在打包这里钉成硬性检查。
+          if [ ! -f dist/ADisplay.app/Contents/Resources/adisplay.icns ]; then
+            echo "包内缺少 Contents/Resources/adisplay.icns —— 图标不会显示" >&2
+            ls -R dist/ADisplay.app/Contents >&2
+            exit 1
+          fi
+          echo "图标已在包内：$(ls -l dist/ADisplay.app/Contents/Resources/adisplay.icns)"
 
           # dmg 里同时放 .app 和一个指向 /Applications 的符号链接。
           #

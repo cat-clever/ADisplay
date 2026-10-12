@@ -149,6 +149,10 @@ public sealed partial class MainWindow : Window
         InitializeComponent();
         StartupLog.Leave("MainWindow.InitializeComponent()");
 
+        // 窗口图标：exe 的那份由 csproj 的 <ApplicationIcon> 嵌进去了，但 WinUI
+        // 的窗口不会自动去用它 —— 不给就是系统默认的空白图标。
+        WindowIcon.Apply(this);
+
         // 按存下来的语言（没存过就按系统语言）把界面文字填一遍。
         // 放在这里而不是引擎起来之后：引擎起不来时界面照样应该是用户选的语言。
         ApplyLanguage();

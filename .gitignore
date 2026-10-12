@@ -18,3 +18,4 @@ tmp_apk/
 # 它们不是项目的一部分，曾经因为一句 git add -A 被扫进仓库一次。
 __pycache__/
 *.pyc
+.icons-build

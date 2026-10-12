@@ -1,26 +1,28 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 应用图标：一个投屏到屏幕的简笔示意图。 -->
+<!--
+    应用图标：投屏到屏幕的简笔示意图。
+
+    图形与 Windows / macOS 的图标是同一套比例（底 inset 5.1%、屏幕 62%×42%、
+    底座 16%、蓝点半径 7.5%），改这里就要一起改另外两端 —— 桌面那两份由
+    tools/icons/make_icon.swift 渲染，比例写在那个文件的注释里。
+-->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
 
-    <!-- 屏幕外框 -->
+    <path
+        android:fillColor="#101418"
+        android:pathData="M26.57,5.51 h54.86 a21.06,21.06 0 0 1 21.06,21.06 v54.86 a21.06,21.06 0 0 1 -21.06,21.06 h-54.86 a21.06,21.06 0 0 1 -21.06,-21.06 v-54.86 a21.06,21.06 0 0 1 21.06,-21.06 z" />
+    <path
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="5.18"
+        android:pathData="M25.06,31.10 h57.89 a1.94,1.94 0 0 1 1.94,1.94 v36.29 a1.94,1.94 0 0 1 -1.94,1.94 h-57.89 a1.94,1.94 0 0 1 -1.94,-1.94 v-36.29 a1.94,1.94 0 0 1 1.94,-1.94 z" />
     <path
         android:fillColor="#FFFFFF"
-        android:pathData="M18,28 h72 a4,4 0 0 1 4,4 v40 a4,4 0 0 1 -4,4 h-72 a4,4 0 0 1 -4,-4 v-40 a4,4 0 0 1 4,-4 z M22,36 v32 h64 v-32 z" />
-
-    <!-- 底座 -->
-    <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M44,80 h20 v6 h-20 z" />
-
-    <!-- 投屏信号波纹 -->
+        android:pathData="M45.36,73.87 h17.28 v5.62 h-17.28 z" />
     <path
         android:fillColor="#4FC3F7"
-        android:pathData="M54,52 m-8,0 a8,8 0 1,0 16,0 a8,8 0 1,0 -16,0" />
-    <path
-        android:fillColor="#4FC3F7"
-        android:pathData="M40,52 a14,14 0 0 1 0,-0.1 z" />
+        android:pathData="M54.00,51.19 m-8.10,0 a8.10,8.10 0 1,0 16.20,0 a8.10,8.10 0 1,0 -16.20,0" />
 </vector>

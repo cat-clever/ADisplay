@@ -20,9 +20,10 @@ APP_BUNDLE="${OUTPUT_DIR}/ADisplay.app"
 CONTENTS_DIR="${APP_BUNDLE}/Contents"
 MACOS_DIR="${CONTENTS_DIR}/MacOS"
 FRAMEWORKS_DIR="${CONTENTS_DIR}/Frameworks"
+RESOURCES_DIR="${CONTENTS_DIR}/Resources"
 
 rm -rf "${APP_BUNDLE}"
-mkdir -p "${MACOS_DIR}" "${FRAMEWORKS_DIR}"
+mkdir -p "${MACOS_DIR}" "${FRAMEWORKS_DIR}" "${RESOURCES_DIR}"
 
 # 可执行文件
 cp "${EXECUTABLE_PATH}" "${MACOS_DIR}/ADisplay"
@@ -53,6 +54,16 @@ do
 done
 
 install_name_tool -add_rpath "@executable_path/../Frameworks" "${MACOS_DIR}/ADisplay" 2>/dev/null || true
+
+# 图标。位置固定是 Contents/Resources，名字要与 Info.plist 里的 CFBundleIconFile 一致。
+#
+# 显式检查源文件在不在：少了它 cp 也会失败，但报出来的是一句不好懂的
+# 「No such file or directory」，而这个检查直接说清楚缺的是什么、该在哪。
+if [ ! -f "${SCRIPT_DIR}/adisplay.icns" ]; then
+    echo "找不到图标文件：${SCRIPT_DIR}/adisplay.icns" >&2
+    exit 1
+fi
+cp "${SCRIPT_DIR}/adisplay.icns" "${RESOURCES_DIR}/adisplay.icns"
 
 # Info.plist
 cp "${SCRIPT_DIR}/Info.plist" "${CONTENTS_DIR}/Info.plist"

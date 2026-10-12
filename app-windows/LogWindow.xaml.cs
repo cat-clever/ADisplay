@@ -27,6 +27,9 @@ public sealed partial class LogWindow : Window
     {
         InitializeComponent();
 
+        // 日志窗是独立窗口，图标不会从主窗继承过来，得自己设一次。
+        WindowIcon.Apply(this);
+
         _lines = lines;
         _dispatcher = DispatcherQueue.GetForCurrentThread();
         ApplyLanguage(strings);
