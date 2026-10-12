@@ -186,7 +186,11 @@ jobs:
 
       - name: 单元测试
         if: ${{ inputs.run-tests }}
-        run: ctest --preset linux-x64
+        # --timeout：单个用例的上限。加它是因为踩到过一次 —— 某个用例在 Linux 上
+        # 挂死，整轮 CI 就干等在那里（GitHub 的任务上限是 6 小时），日志里什么都
+        # 看不到；有了它，卡住的用例会被点名报出来，而不是把整轮拖住。
+        # --output-on-failure：失败时把该用例自己的输出打出来。
+        run: ctest --preset linux-x64 --timeout 120 --output-on-failure
 
   # =========================================================================
   # Windows x64：核心库（vcpkg x64-windows）+ WinUI 3 界面（.NET）
@@ -222,7 +226,7 @@ jobs:
 
       - name: 单元测试
         if: ${{ inputs.run-tests }}
-        run: ctest --preset windows-x64
+        run: ctest --preset windows-x64 --timeout 120 --output-on-failure
 
       - uses: actions/setup-dotnet@v4
         with:
@@ -495,7 +499,7 @@ jobs:
       # Rosetta 才跑得起来，而 Rosetta 不在 runner 镜像的保障范围内。
       - name: 单元测试
         if: ${{ inputs.run-tests }}
-        run: ctest --preset macos-arm64
+        run: ctest --preset macos-arm64 --timeout 120 --output-on-failure
 
       - name: 确认核心库确实是通用二进制
         run: |
