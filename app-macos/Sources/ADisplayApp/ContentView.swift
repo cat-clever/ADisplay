@@ -15,19 +15,35 @@ struct ContentView: View {
     @State private var isEditingName = false
 
     var body: some View {
-        Group {
-            // castingDismissed 之后即使会话还在（手机仍在推流），也回设置页 ——
-            // 那时待机页上会出现「还能回去」的横幅。
-            if !model.castingDismissed && (model.activeMedia != nil || model.mirrorSessionId != nil) {
+        // 投屏页**一直留在视图树里**（结束投屏之后缩到看不见），而不是被换成设置页 ——
+        // 与 Android 端同一个做法（那边是把渲染面缩到 1dp，见 MirrorScreen.kt）。
+        //
+        // 为什么不能摘掉：镜像的渲染层是 AVSampleBufferDisplayLayer，它一旦离开窗口
+        // 就会 flush，之后必须**等一个关键帧**才能恢复；而 iOS 在镜像里整场只插一个
+        // 关键帧（实测 1657 帧 1 个）。2026-10-12 用户实测的正是这个：结束投屏 →
+        // 继续观看之后，新渲染面一路「丢弃 N 帧（还没有解码参数（SPS/PPS））」，
+        // 画面永远黑着（日志见 docs/进度与已知问题.md 的已知问题 3）。
+        ZStack {
+            if model.activeMedia != nil || model.mirrorSessionId != nil {
                 // 有投屏就把整个窗口让给画面：这是用户此刻唯一关心的事，
-                // 设置项等停止投屏后再回来。
+                // 设置项等停止投屏后再回来（那时它只是被缩到看不见，没有被摘掉）。
                 //
                 // 镜像会话没有「媒体地址」，所以这里传的是可选的 —— 播放页
                 // 自己按 mirrorSessionId 决定走渲染面还是播放器。
                 PlayerPage(media: model.activeMedia)
                     .environmentObject(model)
-            } else {
+                    // 结束投屏之后缩到千分之一、并让开交互：解码一直在走，
+                    // 「继续观看」因此是即时的。用**缩小**而不是 opacity(0) 或
+                    // hidden —— 后两者会让系统认为这块不必显示，解码就停了，
+                    // 那正好又回到「等关键帧」的死路。
+                    .scaleEffect(model.castingDismissed ? 0.001 : 1)
+                    .allowsHitTesting(!model.castingDismissed)
+            }
+            if model.castingDismissed || (model.activeMedia == nil && model.mirrorSessionId == nil) {
                 settingsPage
+                    // 盖住下面那层缩小的画面。窗口背景色本身不透明，补上它就不必
+                    // 依赖「缩到多小才看不见」这件事。
+                    .background(Color(nsColor: .windowBackgroundColor))
             }
         }
     }

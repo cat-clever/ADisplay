@@ -364,16 +364,23 @@ final class EngineModel: ObservableObject {
         // 伴音要真的停：这一句原来漏了（真正会话结束时走的 endMedia 里有）。
         MirrorAudioPlayer.shared.stop()
         // 标记为「用户不想看了」，但**保留 mirrorSessionId** —— 待机页要靠它显示
-        // 「还有一次投屏在推」，恢复也要靠它重新挂上渲染面。
+        // 「还有一次投屏在推」，恢复也要靠它。
         castingDismissed = true
-        // 镜像那条路停的是「还往渲染面送帧」这件事。
-        MirrorFrameRouter.shared.attach(nil)
-        // 上一个会话暂存的帧绝不能喂给下一个会话的解码器。
-        MirrorFrameRouter.shared.resetPending()
+        // 刻意的：**不**把渲染面摘下来（原来这里是 attach(nil) + resetPending()）。
+        //
+        // 那两个调用正是「继续观看之后永久黑屏」的原因：摘掉渲染面会连渲染层一起
+        // 销毁，回来时新的层没有 SPS/PPS 也就建不出解码格式，而 iOS 在镜像里整场
+        // 只插一个关键帧（实测 1657 帧 1 个）—— 于是每一帧都被丢掉，画面永远黑着。
+        // 2026-10-12 用户的日志就是这样：一路「丢弃 N 帧（还没有解码参数（SPS/PPS））」。
+        //
+        // 现在改成「页面一直在、只是缩到看不见」（见 ContentView.body），渲染层与
+        // 它的解码状态都保留着，所以这里什么都不用做。画面缩小的代价是那 30 fps
+        // 还在解码 —— 与 Android 端（缩到 1dp）付出的代价一样，换来的是即时恢复。
+        log("已结束投屏画面（渲染面保留，继续观看可立即恢复）")
     }
 
-    /// 用户点「继续观看」：回到投屏页。镜像那条路的帧一直在来，重新挂上渲染面即可。
-    /// 点「继续观看」：回到投屏页。会话一直在，不需要重开会话。
+    /// 用户点「继续观看」：回到投屏页。会话一直在，不需要重开会话 ——
+    /// 镜像那条路的渲染面本来就一直挂着（见 stopCasting），所以画面是即时的。
     func resumeCasting() {
         guard castingDismissed else { return }
         MirrorAudioPlayer.shared.resume()
@@ -385,13 +392,15 @@ final class EngineModel: ObservableObject {
             dismissedSessionId = nil
             activeMedia = media
         } else if let id = dismissedSessionId {
-            // 镜像那条：先清掉暂存再让渲染面挂上来。
-            //
-            // 暂存里缓的是「摘下时那一段」的头部若干帧，它们的发送端时间戳是旧的，
-            // 回放会把时间轴基准定在过去、画面反而落后。所以清掉，等实时关键帧。
+            // 镜像那条：渲染面一直挂在上面、解码也一直没停（见 stopCasting），
+            // 所以这里只要让页面重新显示出来 —— 画面是即时的，不需要等关键帧。
             dismissedSessionId = nil
+            // resetPending 只是防御：渲染面没被摘过，暂存本来就是空的；
+            // 万一它真被摘过（整页重建之类），清掉才不至于把上一段时间的帧
+            // 喂给解码器 —— 那些帧的时间戳在很久以前，会让时间轴基准跑偏。
             MirrorFrameRouter.shared.resetPending()
             mirrorSessionId = id
+            log("已恢复投屏画面")
         }
     }
 
