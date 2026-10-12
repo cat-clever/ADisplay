@@ -29,6 +29,7 @@
 #else
 #  include <arpa/inet.h>
 #  include <netinet/in.h>
+#  include <sys/select.h>   // select：退出路径靠它把 accept 叫醒，见 serve()
 #  include <sys/socket.h>
 #  include <unistd.h>
 #endif
@@ -132,13 +133,20 @@ public:
 
     ~RawStubServer() {
         stopped_.store(true);
-        if (listen_fd_ != kInvalidSocket) {
-            // accept 会立刻返回错误，服务线程随即退出。
-            close_socket(listen_fd_);
-            listen_fd_ = kInvalidSocket;
-        }
+        // 顺序要紧：**先等线程退出，再关 fd**。
+        //
+        // 反过来（先 close 再 join）在 Linux 上必然卡死 —— 那个 close 叫不醒
+        // 正阻塞在 accept 上的线程（fd 还被那个阻塞的系统调用引用着），join 于是
+        // 永远等下去，进程不退出、ctest 只能按超时把它杀掉。macOS 与 Windows 上
+        // close 会把它叫醒，所以只有 Linux 挂 —— 这个用例就是这么被发现的。
+        //
+        // 线程那边靠停止标志 + select 超时退出（见 serve），所以这里 join 一定返回。
         if (thread_.joinable()) {
             thread_.join();
+        }
+        if (listen_fd_ != kInvalidSocket) {
+            close_socket(listen_fd_);
+            listen_fd_ = kInvalidSocket;
         }
     }
 
@@ -154,6 +162,27 @@ public:
 private:
     void serve() {
         while (!stopped_.load()) {
+            // 先 select 等一等，再 accept —— 不能直接阻塞在 accept 上。
+            //
+            // 这样停止时最多 100 毫秒就能退出：线程醒来看到停止标志就收摊，
+            // 不依赖「另一个线程 close 掉 fd 把它叫醒」那件事（Linux 上不成立，
+            // 见析构里的说明）。
+            fd_set readable;
+            FD_ZERO(&readable);
+            FD_SET(listen_fd_, &readable);
+            struct timeval timeout;
+            timeout.tv_sec = 0;
+            timeout.tv_usec = 100 * 1000;
+            // Windows 会忽略第一个参数，POSIX 要的是「最大的 fd + 1」。
+            const int ready = ::select(static_cast<int>(listen_fd_) + 1, &readable,
+                                       nullptr, nullptr, &timeout);
+            if (stopped_.load()) {
+                return;
+            }
+            if (ready <= 0) {
+                continue;   // 超时（或被信号打断）：回去看停止标志
+            }
+
             struct sockaddr_in peer;
 #if defined(_WIN32)
             int peer_len = sizeof(peer);
