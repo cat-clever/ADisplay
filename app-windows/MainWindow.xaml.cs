@@ -942,10 +942,32 @@ public sealed partial class MainWindow : Window
         CastingTitleText.Text = _strings.ReceivingCast;
         ShowCastingControls();
 
-        _player.Source = MediaSource.CreateFromUri(uri);
-        EnsurePlayerEvents();
-        _player.Volume = 1.0;
-        _player.Play();
+        try
+        {
+            _player.Source = MediaSource.CreateFromUri(uri);
+            EnsurePlayerEvents();
+            _player.Volume = 1.0;
+            _player.Play();
+        }
+        catch (Exception error)
+        {
+            // 起播这一步跑在 UI 线程上，异常放出去就是整个进程退出 —— 用户看到的
+            // 是「一投屏 App 就没了」，屏幕上没有任何提示。与 Android 端
+            // PlaybackScreen 的处理对齐：记一行日志再退回待机页；会话本身还留着，
+            // 横幅里的「继续观看 / 断开投屏」照常可用。
+            AppendLog(AdLogLevel.Error,
+                "起播失败（" + error.GetType().Name + "：" + error.Message + "）：" + url);
+            try
+            {
+                EndCasting(true);
+            }
+            catch (Exception)
+            {
+                // 播放器坏到这个程度时，收尾本身也可能抛 —— 不能在恢复路径上
+                // 再让异常出去。
+            }
+            return;
+        }
 
         _reportTimer ??= new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
         _reportTimer.Tick -= OnReportTick;
@@ -1258,33 +1280,69 @@ public sealed partial class MainWindow : Window
             return;
         }
 
-        switch ((AdPlaybackCommand)command)
+        // 手机发来的命令是外部输入：位置可能超界、播放器可能正处在打开失败
+        // 的状态。WinRT 的 Position 对非法值会抛，而这整段跑在 UI 线程上 ——
+        // 放出去就是整进程退出。与起播那处一样：记一行，命令作废，不影响
+        // 下一次操作。
+        try
         {
-            case AdPlaybackCommand.Play:
-                player.Play();
-                break;
-            case AdPlaybackCommand.Pause:
-                player.Pause();
-                break;
-            case AdPlaybackCommand.Seek:
-                player.PlaybackSession.Position = TimeSpan.FromMilliseconds(value);
-                break;
-            case AdPlaybackCommand.SetVolume:
-                player.Volume = Math.Clamp(value, 0, 100) / 100.0;
-                break;
-            case AdPlaybackCommand.SetMute:
-                player.IsMuted = value != 0;
-                break;
-            case AdPlaybackCommand.Stop:
-                // DLNA 的 Stop 是「停止播放」而不是「结束投屏」：媒体还挂着，
-                // 手机随后可以再 Play。所以回到起点并暂停，不销毁会话。
-                player.Pause();
-                player.PlaybackSession.Position = TimeSpan.Zero;
-                break;
+            switch ((AdPlaybackCommand)command)
+            {
+                case AdPlaybackCommand.Play:
+                    player.Play();
+                    break;
+                case AdPlaybackCommand.Pause:
+                    player.Pause();
+                    break;
+                case AdPlaybackCommand.Seek:
+                    player.PlaybackSession.Position = ClampSeekPosition(player, value);
+                    break;
+                case AdPlaybackCommand.SetVolume:
+                    player.Volume = Math.Clamp(value, 0, 100) / 100.0;
+                    break;
+                case AdPlaybackCommand.SetMute:
+                    player.IsMuted = value != 0;
+                    break;
+                case AdPlaybackCommand.Stop:
+                    // DLNA 的 Stop 是「停止播放」而不是「结束投屏」：媒体还挂着，
+                    // 手机随后可以再 Play。所以回到起点并暂停，不销毁会话。
+                    player.Pause();
+                    player.PlaybackSession.Position = TimeSpan.Zero;
+                    break;
+            }
+        }
+        catch (Exception error)
+        {
+            AppendLog(AdLogLevel.Error,
+                "执行播放命令失败（command=" + command + "，value=" + value + "）："
+                + error.GetType().Name + "：" + error.Message);
+            return;
         }
 
         // 控制结果立刻回报，不等下一拍。
         ReportPlayback();
+    }
+
+    /// <summary>
+    /// 把手机发来的毫秒位置夹到播放器能接受的范围内。
+    ///
+    /// 负数直接按 0；已知时长时不超过时长（手机在还没拿到时长的时候拖到底，
+    /// 发过来的值可能比片子还长）。时长未知（直播 / 还在打开）时不设上限 ——
+    /// 硬夹会把合法的位置改坏。
+    /// </summary>
+    private static TimeSpan ClampSeekPosition(MediaPlayer player, long value)
+    {
+        long positionMs = value < 0 ? 0 : value;
+        TimeSpan duration = player.PlaybackSession.NaturalDuration;
+        if (duration > TimeSpan.Zero && !double.IsInfinity(duration.TotalMilliseconds))
+        {
+            long durationMs = (long)duration.TotalMilliseconds;
+            if (positionMs > durationMs)
+            {
+                positionMs = durationMs;
+            }
+        }
+        return TimeSpan.FromMilliseconds(positionMs);
     }
 
     private void ReportPlayback()
