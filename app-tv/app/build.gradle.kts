@@ -9,16 +9,24 @@ android {
 
     defaultConfig {
         applicationId = "com.adisplay.tv"
-        // 文档 5.1：最低 Android 8.0（API 26）。
-        minSdk = 26
+        // 最低 Android 7.0（API 24）。
+        //
+        // 原来说的是 8.0（API 26）。降到 24 是因为侧载场景里还有 Android 7 的
+        // 电视盒子：minSdk 高于设备时，安装器只报「解析软件包出现问题」，
+        // 从提示上完全看不出是版本问题（用户 2026-10-20 遇到）。
+        //
+        // 降下来是安全的：核心库的 .so 本来就按 android-24 交叉编译
+        // （CMakePresets.json 的 ANDROID_PLATFORM），代码里 API 26 才有的东西
+        // （通知渠道、startForegroundService）都有 Build.VERSION 判断。
+        minSdk = 24
         targetSdk = 34
         // versionCode 按 主*10000 + 次*100 + 修订 计算：
         //   0.4.0 -> 400，0.4.1 -> 401，1.0.0 -> 10000
         // 规则固定下来，升级时不用每次临时决定该加多少。
         // 它必须随版本递增 —— 不变的话 Android 会认为是同一个包，
         // 覆盖安装时不会更新。
-        versionCode = 10019
-        versionName = "1.0.19"
+        versionCode = 10020
+        versionName = "1.0.20"
 
         // 打两个 ABI：arm64-v8a 与 armeabi-v7a。一个 APK 同时装得了新盒子
         // （Fire TV、Chromecast、主流国产盒子）与 32 位的老板子。
