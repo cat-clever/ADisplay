@@ -251,6 +251,151 @@ internal static class StartupLog
         // 被 GC 判为「无人观察」的 Task 异常。默认不会让进程退出，但常常是
         // 某个后台步骤在悄悄失败的唯一线索，值得留一行。
         TaskScheduler.UnobservedTaskException += OnUnobservedTaskException;
+
+        // 原生崩溃的钩子。装不上不是致命错误 —— 上面两条托管钩子还在。
+        try
+        {
+            _nativeFilter = OnNativeUnhandledException;
+            SetUnhandledExceptionFilter(_nativeFilter);
+        }
+        catch
+        {
+            _nativeFilter = null;
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // 原生异常
+    //
+    // 上面那些钩子只接托管异常。核心是 C++（castcore.dll），播放又经过
+    // Media Foundation —— 访问违例、栈溢出这类崩溃根本不会变成 .NET 异常，
+    // 进程直接被系统结束，日志里一行都不留。用户报「Windows 崩了、没有日志」，
+    // 缺的就是这一段。
+    //
+    // SetUnhandledExceptionFilter 的过滤器在系统终止进程之前运行：在这里
+    // 记下异常码、出错地址和它落在哪个模块（castcore.dll / mfplat.dll /
+    // combase.dll …），再顺手写一个 minidump，事后就能接着查。
+    // ---------------------------------------------------------------------
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr SetUnhandledExceptionFilter(UnhandledExceptionFilter filter);
+
+    private delegate int UnhandledExceptionFilter(IntPtr exceptionPointers);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool GetModuleHandleEx(uint flags, IntPtr moduleName, out IntPtr module);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern uint GetModuleFileName(IntPtr module, StringBuilder filename, uint size);
+
+    [DllImport("dbghelp.dll", SetLastError = true)]
+    private static extern bool MiniDumpWriteDump(
+        IntPtr process, uint processId, IntPtr file, uint dumpType,
+        IntPtr exceptionParam, IntPtr userStreamParam, IntPtr callbackParam);
+
+    private const uint GetModuleHandleExFlagFromAddress = 0x00000004;
+    private const uint GetModuleHandleExFlagUnchangedRefCount = 0x00000002;
+    private const uint MiniDumpNormal = 0x00000000;
+
+    // 必须一直拿着这个委托的引用：只把函数指针交给系统的话，托管侧下一次 GC
+    // 就可能把它回收，崩溃时跳到一片已经释放的内存上 —— 那会比原来的崩溃更难查。
+    private static UnhandledExceptionFilter? _nativeFilter;
+
+    private static int OnNativeUnhandledException(IntPtr exceptionPointers)
+    {
+        try
+        {
+            uint code = 0;
+            IntPtr address = IntPtr.Zero;
+
+            if (exceptionPointers != IntPtr.Zero)
+            {
+                // EXCEPTION_POINTERS { ExceptionRecord; ContextRecord; }
+                // EXCEPTION_RECORD 里 ExceptionCode 在偏移 0、ExceptionAddress
+                // 在偏移 16（x86 与 x64 都是这个布局）。
+                IntPtr record = Marshal.ReadIntPtr(exceptionPointers, 0);
+                if (record != IntPtr.Zero)
+                {
+                    code = unchecked((uint)Marshal.ReadInt32(record, 0));
+                    address = Marshal.ReadIntPtr(record, 16);
+                }
+            }
+
+            Mark($"!! 原生异常：代码 0x{code:X8}，地址 0x{address.ToInt64():X}");
+            Mark($"!! 出错位置：{DescribeAddress(address)}");
+
+            WriteCrashDump(exceptionPointers);
+        }
+        catch
+        {
+            // 过滤器自己出错也必须往下走，不能挡住系统收尸。
+        }
+
+        // EXCEPTION_CONTINUE_SEARCH：证据留下，进程照原样终止（WER 也会跑）。
+        return 0;
+    }
+
+    private static string DescribeAddress(IntPtr address)
+    {
+        if (address == IntPtr.Zero)
+        {
+            return "未知（地址为空）";
+        }
+
+        try
+        {
+            IntPtr module;
+            if (!GetModuleHandleEx(
+                    GetModuleHandleExFlagFromAddress | GetModuleHandleExFlagUnchangedRefCount,
+                    address, out module) || module == IntPtr.Zero)
+            {
+                return "不在任何已加载模块内";
+            }
+
+            StringBuilder buffer = new StringBuilder(1024);
+            uint length = GetModuleFileName(module, buffer, (uint)buffer.Capacity);
+            string name = length > 0 ? buffer.ToString() : "未知模块";
+            long offset = address.ToInt64() - module.ToInt64();
+            return $"{name}+0x{offset:X}";
+        }
+        catch
+        {
+            return "无法解析";
+        }
+    }
+
+    private static void WriteCrashDump(IntPtr exceptionPointers)
+    {
+        string? directory = _logPath != null ? Path.GetDirectoryName(_logPath) : null;
+        if (string.IsNullOrEmpty(directory))
+        {
+            return;
+        }
+
+        // 固定文件名：崩溃可能连着发生，带时间戳的话转储会越攒越多，
+        // 用户也说不清该发哪一份。覆盖上一份、永远只留最新的这次。
+        string path = Path.Combine(directory, "ADisplay-crash.dmp");
+
+        try
+        {
+            using FileStream stream = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None);
+            bool ok = MiniDumpWriteDump(
+                System.Diagnostics.Process.GetCurrentProcess().Handle,
+                (uint)Environment.ProcessId,
+                stream.SafeFileHandle.DangerousGetHandle(),
+                MiniDumpNormal,
+                exceptionPointers,
+                IntPtr.Zero,
+                IntPtr.Zero);
+
+            Mark(ok
+                ? $"崩溃转储已写入：{path}"
+                : $"崩溃转储写入失败（错误码 {Marshal.GetLastWin32Error()}）：{path}");
+        }
+        catch (Exception ex)
+        {
+            Mark($"崩溃转储写入异常：{ex.GetType().Name}：{ex.Message}");
+        }
     }
 
     /// <summary>

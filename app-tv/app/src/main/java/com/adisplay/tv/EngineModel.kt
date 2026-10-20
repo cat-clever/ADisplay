@@ -1177,6 +1177,11 @@ class EngineModel(context: Context) {
         appendLog(LogLevel.INFO, "日志已清除（窗口与文件都清了）")
     }
 
+    /** 界面侧记一行错误日志。播放页起播失败这类界面自己的异常走这里。 */
+    fun logError(message: String) {
+        appendLog(LogLevel.ERROR, message)
+    }
+
     private fun appendLog(level: LogLevel, message: String) {
         val line = "[" + timeFormat.format(Date()) + "] [" + level.label + "] " + message
         logs.add(line)

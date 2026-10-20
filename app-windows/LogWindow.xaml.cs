@@ -118,9 +118,13 @@ public sealed partial class LogWindow : Window
     private void OnClearLogClick(object sender, RoutedEventArgs e)
     {
         // 清的是界面上这一份（主窗口与这里共用同一个集合），清空后
-        // CollectionChanged 会把文本一起刷新掉。核心写的日志文件不动 ——
-        // 那是给事后排查用的。
+        // CollectionChanged 会把文本一起刷新掉。
         _lines.Clear();
+
+        // 界面日志落盘的那份也一起清掉，否则用户以为清干净了，
+        // 下次排查又看到一堆旧行。核心自己的日志文件仍然不动 ——
+        // 那是核心的财产，界面不该越界去删。
+        RuntimeLog.Clear();
     }
 
     private void OnCopyLogClick(object sender, RoutedEventArgs e)

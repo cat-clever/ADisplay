@@ -34,6 +34,7 @@ import com.adisplay.tv.AdTransportState
 import com.adisplay.tv.EngineModel
 import com.adisplay.tv.PlaybackIntent
 import java.util.Locale
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 
@@ -82,11 +83,29 @@ fun PlaybackScreen(
     // 收到 URL 就起播。键取 url 而不是 player：手机可能在同一次会话里接着
     // 推第二段视频，那时播放器还是同一个，得重新 setMediaItem。
     LaunchedEffect(exoPlayer, url) {
-        exoPlayer.setMediaItem(MediaItem.fromUri(url))
-        exoPlayer.prepare()
-        exoPlayer.play()
-        playerState.stopped = false
-        reportPlayback(model, exoPlayer, sessionId, playerState)
+        // 起播这一步跑在界面线程上，异常没接住就是整个进程闪退 —— 电视上表现
+        // 为「一投屏就黑屏重启」，屏幕上没有任何提示。Media3 抛出来的多数是
+        // 可恢复的（媒体源类型不支持、编码器缺失），记一行再退回待机页，
+        // 用户至少能看到日志、能重新投一次。
+        //
+        // v1.0.12 的 .m3u8 闪退（HlsMediaSource$Factory 没打进包里）走的正是
+        // 这条路 —— 根因已在 build.gradle.kts 补上 HLS 模块，这里是不让同类
+        // 问题再把进程带走。
+        try {
+            exoPlayer.setMediaItem(MediaItem.fromUri(url))
+            exoPlayer.prepare()
+            exoPlayer.play()
+            playerState.stopped = false
+            reportPlayback(model, exoPlayer, sessionId, playerState)
+        } catch (error: CancellationException) {
+            // 页面离开导致的取消是正常路径，不能当成起播失败。
+            throw error
+        } catch (error: Exception) {
+            model.logError(
+                "起播失败（" + error.javaClass.simpleName + "：" + error.message + "）：" + url
+            )
+            onExit()
+        }
     }
 
     // 控制意图。协程跟着页面生命周期走：页面一离开组合就自动取消，

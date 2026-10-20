@@ -1366,7 +1366,12 @@ public sealed partial class MainWindow : Window
     private void AppendLog(AdLogLevel level, string message)
     {
         string stamp = DateTime.Now.ToString("HH:mm:ss");
-        _logLines.Add($"[{stamp}] [{level.ToString().ToUpperInvariant()}] {message}");
+        string text = level.ToString().ToUpperInvariant();
+        _logLines.Add($"[{stamp}] [{text}] {message}");
+
+        // 同一行再落一份到磁盘。日志窗口里这份只在内存里，进程一崩就没了 ——
+        // 「崩溃了但没有日志」就是这么来的（见 RuntimeLog）。
+        RuntimeLog.Write(text, message);
 
         while (_logLines.Count > MaxLogLines)
         {
@@ -1592,6 +1597,11 @@ public sealed partial class MainWindow : Window
     {
         Stopwatch clock = Stopwatch.StartNew();
         StartupLog.Mark("关窗：开始收尾");
+
+        // 运行日志里留一条「正常退出」的尾巴。下次拿到一份日志时，最后一行是
+        // 启动分隔线、没有这一行，就说明进程是被硬结束的（崩溃 / 任务管理器），
+        // 而不是用户正常关窗 —— 这是判断「到底崩没崩」最省事的一条线索。
+        RuntimeLog.Write("INFO", "===== 窗口关闭，应用正常退出 =====");
 
         // 先收日志窗：它盯着日志集合，集合一旦停更，留着也是空窗。这一步必须留在
         // 主线程（窗口操作），而且要快 —— 它一关用户立刻看得见反馈。

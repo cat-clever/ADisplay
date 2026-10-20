@@ -17,8 +17,8 @@ android {
         // 规则固定下来，升级时不用每次临时决定该加多少。
         // 它必须随版本递增 —— 不变的话 Android 会认为是同一个包，
         // 覆盖安装时不会更新。
-        versionCode = 10012
-        versionName = "1.0.12"
+        versionCode = 10013
+        versionName = "1.0.13"
 
         // 打两个 ABI：arm64-v8a 与 armeabi-v7a。一个 APK 同时装得了新盒子
         // （Fire TV、Chromecast、主流国产盒子）与 32 位的老板子。
@@ -153,4 +153,14 @@ dependencies {
     // 纯 Java/Kotlin，不带 .so，所以上面 ndk.abiFilters 那条不用动。
     implementation("androidx.media3:media3-exoplayer:1.4.1")
     implementation("androidx.media3:media3-ui:1.4.1")
+
+    // HLS 是独立模块，ExoPlayer 本体里没有。默认的 DefaultMediaSourceFactory
+    // 按 URL 后缀推断内容类型：遇到 .m3u8 就反射加载
+    // androidx.media3.exoplayer.hls.HlsMediaSource$Factory，类不在包里时
+    // setMediaItem 会直接抛 ClassNotFoundException，把进程带崩（v1.0.12 实测：
+    // 手机推来的 resource.m3u8 一播就闪退，见 PlaybackScreen.kt:85）。
+    //
+    // 版本必须与上面两条一致 —— Media3 各模块共用一套内部类，版本错开会在
+    // 运行时出现更难查的 NoSuchMethodError。
+    implementation("androidx.media3:media3-exoplayer-hls:1.4.1")
 }
