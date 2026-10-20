@@ -1,5 +1,6 @@
 package com.adisplay.tv.ui
 
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -21,6 +22,7 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -75,13 +77,25 @@ fun ActionButton(
 ) {
     var focused by remember { mutableStateOf(false) }
 
+    // 焦点态放大一点。电视是三米外看的：只换底色/边框，远看仍然不明显；
+    // 放大是「一眼就能看见焦点在哪」最有效的一招，而 graphicsLayer 的缩放
+    // 不参与布局，不会把旁边的按钮挤动。
+    val scale by animateFloatAsState(
+        targetValue = if (focused) 1.08f else 1f,
+        label = "action-button-focus-scale",
+    )
+
     val accent = MaterialTheme.colorScheme.primary
     val restingBackground = MaterialTheme.colorScheme.surfaceVariant
-    val focusedBackground = accent.copy(alpha = 0.35f)
+    val focusedBackground = accent.copy(alpha = 0.55f)
 
     Box(
         modifier = modifier
             .defaultMinSize(minWidth = minWidth)
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+            }
             // 压暗整块（底色 + 文字），而不是逐个颜色去算 —— 少一处颜色就少
             // 一处「改了深色主题之后看不见」的风险。
             .alpha(if (enabled) 1f else 0.45f)

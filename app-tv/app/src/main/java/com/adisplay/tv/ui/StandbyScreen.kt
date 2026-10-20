@@ -61,7 +61,6 @@ fun StandbyScreen(model: EngineModel) {
     // 抽屉里的字号沿用待机页那套分档参数：两边各写一份，改了一处忘了另一处，
     // 同一块日志在抽屉里和（曾经）页面上的会长得不一样。
     val layout = resolveStandbyLayout(LocalConfiguration.current.screenWidthDp)
-    val inputMode = rememberInputMode()
 
     Box(modifier = Modifier.fillMaxSize()) {
 
@@ -120,7 +119,6 @@ fun StandbyScreen(model: EngineModel) {
             ResumeBanner(
                 model = model,
                 layout = layout,
-                inputMode = inputMode,
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .padding(bottom = layout.spacingLoose * 3),
@@ -178,18 +176,21 @@ fun StandbyScreen(model: EngineModel) {
 private fun ResumeBanner(
     model: EngineModel,
     layout: StandbyLayout,
-    inputMode: InputMode,
     modifier: Modifier = Modifier,
 ) {
     val resumeFocus = remember { FocusRequester() }
     val disconnectFocus = remember { FocusRequester() }
 
-    // 用户刚按过「结束投屏」，下一步最可能按的就是「继续观看」—— 遥控器模式下把
-    // 初始焦点给它，省得还要按方向键去找。触屏不抢焦点（与待机页那三个按钮一致）。
-    LaunchedEffect(inputMode) {
-        if (inputMode == InputMode.Remote) {
-            resumeFocus.requestFocus()
-        }
+    // 用户刚按过「结束投屏」，下一步最可能按的就是「继续观看」—— 把初始焦点给它，
+    // 省得还要按方向键去找。
+    //
+    // ★ 不按设备类型区分（原来只在 LEANBACK / TELEVISION 上报时才抢焦点）。
+    //   有些电视盒子、以及手机接电视的场景根本不上报这些标志，会被误判成触屏，
+    //   于是「谁也不要焦点」：方向键按下去没有任何反应，横幅上的两个按钮永远
+    //   点不到，只能去关服务。抢焦点在触屏上最多多一圈边框，代价远小于遥控器
+    //   完全用不了。
+    LaunchedEffect(Unit) {
+        resumeFocus.requestFocus()
     }
 
     val panel = modifier
@@ -658,13 +659,12 @@ private fun StandbyContent(model: EngineModel, onShowLog: () -> Unit) {
         }
     }
 
-    // 只有遥控器设备才自动抢焦点。
+    // 进来就给第一个按钮焦点，**不按设备类型判断**。
     //
-    // 电视上不这么做的话，用户按方向键没有任何反馈，会以为应用卡死；
-    // 但触屏设备上抢焦点会让焦点框一直挂在按钮上，看起来像没点干净。
-    LaunchedEffect(inputMode) {
-        if (inputMode == InputMode.Remote) {
-            buttonFocus.requestFocus()
-        }
+    // 原来只在遥控器设备上抢焦点，理由是触屏上焦点框挂着不好看。但设备类型
+    // 判断不可靠（电视盒子、手机接电视常常不上报 LEANBACK），一旦误判成触屏，
+    // 就没有任何元素持有焦点 —— 方向键按下去没有任何反应，用户会以为应用卡死。
+    LaunchedEffect(Unit) {
+        buttonFocus.requestFocus()
     }
 }
