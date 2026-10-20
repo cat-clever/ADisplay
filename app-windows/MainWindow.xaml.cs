@@ -45,6 +45,10 @@ public sealed partial class MainWindow : Window
     // 每秒把播放器状态回报给核心。手机每隔一段时间会拉 GetPositionInfo，
     // 位置必须持续更新，否则手机上的进度条一直停在起点。
     private DispatcherTimer? _reportTimer;
+    // 回报播放状态失败只记一次：它每秒跑一次，坏了就会把日志刷满。
+    private bool _reportFailureLogged;
+    // 缓冲监测读播放器状态失败只记一次（同上）。
+    private bool _bufferingFailureLogged;
     // 镜像会话的帧源。null 表示当前不是镜像会话。
     /// <summary>
     /// 镜像这条路的本地流服务：把帧封成 MPEG-TS，从本地 HTTP 发出去，
@@ -540,17 +544,41 @@ public sealed partial class MainWindow : Window
     private void OnMediaUrlReceived(uint sessionId, string url)
     {
         // 回调在核心的工作线程上触发，控件只能在 UI 线程碰。
-        _dispatcher.TryEnqueue(() => BeginCasting(sessionId, url));
+        EnqueueUi(() => BeginCasting(sessionId, url), "处理投屏地址");
     }
 
     private void OnPlaybackCommandReceived(int command, long value)
     {
-        _dispatcher.TryEnqueue(() => ApplyPlaybackCommand(command, value));
+        EnqueueUi(() => ApplyPlaybackCommand(command, value), "执行播放命令");
     }
 
     private void OnCastingEnded(uint sessionId)
     {
-        _dispatcher.TryEnqueue(() => HandleCastingEnded(sessionId));
+        EnqueueUi(() => HandleCastingEnded(sessionId), "处理投屏结束");
+    }
+
+    /// <summary>
+    /// 把一个界面操作排到 UI 线程，并吞掉其中的异常。
+    ///
+    /// 核心的回调在工作线程上触发，真正的界面操作只能在这里做；而 WinUI 的
+    /// DispatcherQueue 回调里一旦抛异常就是整进程 fail-fast（0xC000027B，
+    /// 出错模块 CoreMessagingXP.dll）。投屏协议的消息不该因为某个界面细节
+    /// 出错就把窗口带走 —— 记一行，继续。
+    /// </summary>
+    private void EnqueueUi(Action action, string stage)
+    {
+        _dispatcher.TryEnqueue(() =>
+        {
+            try
+            {
+                action();
+            }
+            catch (Exception error)
+            {
+                SafeAppendLog(AdLogLevel.Error,
+                    stage + "失败（" + error.GetType().Name + "：" + error.Message + "）");
+            }
+        });
     }
 
     /// <summary>
@@ -634,6 +662,8 @@ public sealed partial class MainWindow : Window
         _mirrorRenderLogged = false;
         _renderedFrames = 0;
         _lastRenderDelayMs = 0;
+        _reportFailureLogged = false;
+        _bufferingFailureLogged = false;
         _mirrorAudio.Resume();
 
         _player.RealTimePlayback = true;
@@ -723,11 +753,48 @@ public sealed partial class MainWindow : Window
     /// </summary>
     private void OnPlaybackStateChanged(MediaPlaybackSession sender, object args)
     {
-        _dispatcher.TryEnqueue(() =>
+        // ★ 状态必须在事件线程上**当场**读出来，不能把 sender 留到界面线程再访问。
+        //
+        //   sender 是 WinRT 对象；播放失败 / 会话关闭之后再读它的 PlaybackState，
+        //   会抛 RO_E_CLOSED。这个异常如果发生在 DispatcherQueue 的回调里，WinUI
+        //   会把它转成 stowed exception 直接 fail-fast —— 出错模块是
+        //   CoreMessagingXP.dll、异常码 0xC000027B。1.0.14 在「媒体刚 Opening、
+        //   随后失败」那一刻的闪退就是这种形态，日志上只看到 Opening 一行。
+        string state;
+        string progress;
+        try
         {
-            AppendLog(AdLogLevel.Info, "媒体播放状态：" + sender.PlaybackState
-                + "（缓冲进度 " + (sender.BufferingProgress * 100).ToString("F0") + "%）");
-        });
+            state = sender.PlaybackState.ToString();
+            progress = (sender.BufferingProgress * 100).ToString("F0");
+        }
+        catch (Exception error)
+        {
+            _dispatcher.TryEnqueue(() => SafeAppendLog(
+                AdLogLevel.Warn,
+                "读取播放状态失败（" + error.GetType().Name + "：" + error.Message + "）"));
+            return;
+        }
+
+        _dispatcher.TryEnqueue(() => SafeAppendLog(
+            AdLogLevel.Info, "媒体播放状态：" + state + "（缓冲进度 " + progress + "%）"));
+    }
+
+    /// <summary>
+    /// 在界面线程上写日志，自己吞掉异常。
+    ///
+    /// WinUI 的 DispatcherQueue 回调里抛出异常不是「这一行没写成功」，而是整个
+    /// 进程 fail-fast（0xC000027B）。日志这类诊断代码绝不能有这种后果 —— 它坏了
+    /// 顶多少一行，不该把正在投屏的窗口带走。
+    /// </summary>
+    private void SafeAppendLog(AdLogLevel level, string message)
+    {
+        try
+        {
+            AppendLog(level, message);
+        }
+        catch (Exception)
+        {
+        }
     }
 
     /// <summary>
@@ -741,31 +808,45 @@ public sealed partial class MainWindow : Window
     {
         // 这两个事件在**工作线程**上触发，而日志集合只能在界面线程碰 ——
         // 直接写会抛异常（上一版就因此看不到这行日志，害得我以为管线从没打开过）。
-        _dispatcher.TryEnqueue(() =>
-        {
-            AppendLog(AdLogLevel.Info, "媒体管线已就绪，开始接收画面。");
-        });
+        _dispatcher.TryEnqueue(() => SafeAppendLog(
+            AdLogLevel.Info, "媒体管线已就绪，开始接收画面。"));
     }
 
     private void OnMediaFailed(MediaPlayer sender, MediaPlayerFailedEventArgs args)
     {
-        string detail = args.ErrorMessage;
-        if (detail == null || detail.Length == 0)
+        // args 是 WinRT 事件参数：读它的属性同样要当场读完，不能留到界面线程
+        // （见 OnPlaybackStateChanged 的说明）。
+        string detail;
+        string kind;
+        string extended;
+        try
         {
-            detail = args.Error.ToString();
+            detail = args.ErrorMessage;
+            if (detail == null || detail.Length == 0)
+            {
+                detail = args.Error.ToString();
+            }
+            kind = args.Error.ToString();
+            // 项目约定不用 ?. 空条件运算符，写成显式判断。
+            extended = "无扩展错误码";
+            if (args.ExtendedErrorCode != null)
+            {
+                extended = "0x" + args.ExtendedErrorCode.HResult.ToString("X8");
+            }
         }
-        // 项目约定不用 ?. 空条件运算符，写成显式判断。
-        string extended = "无扩展错误码";
-        if (args.ExtendedErrorCode != null)
+        catch (Exception error)
         {
-            extended = "0x" + args.ExtendedErrorCode.HResult.ToString("X8");
+            _dispatcher.TryEnqueue(() => SafeAppendLog(
+                AdLogLevel.Error,
+                "媒体管线失败，且读取错误详情也失败了（" + error.GetType().Name + "："
+                + error.Message + "）"));
+            return;
         }
-        _dispatcher.TryEnqueue(() =>
-        {
-            AppendLog(AdLogLevel.Error,
-                "媒体管线失败：" + detail + "（" + args.Error + "，" + extended + "）。"
-                + "若是解码器缺失，装一下系统的「HEVC 视频扩展」即可。");
-        });
+
+        _dispatcher.TryEnqueue(() => SafeAppendLog(
+            AdLogLevel.Error,
+            "媒体管线失败：" + detail + "（" + kind + "，" + extended + "）。"
+            + "若是解码器缺失，装一下系统的「HEVC 视频扩展」即可。"));
     }
 
     /// <summary>
@@ -903,7 +984,7 @@ public sealed partial class MainWindow : Window
     private void OnMirrorNotice(string message)
     {
         // 回调在核心的工作线程上触发，日志集合只能在 UI 线程碰。
-        _dispatcher.TryEnqueue(() => AppendLog(AdLogLevel.Info, message));
+        _dispatcher.TryEnqueue(() => SafeAppendLog(AdLogLevel.Info, message));
     }
 
     private void OnMirrorFrameReceived(byte[] data, bool isH265, uint width, uint height, long ptsUs)
@@ -934,6 +1015,8 @@ public sealed partial class MainWindow : Window
         _castingDismissedByUser = false;
         _dismissedSessionId = 0;
         _dismissedIsMirror = false;
+        _reportFailureLogged = false;
+        _bufferingFailureLogged = false;
         UpdateResumeBanner();
         AppendLog(AdLogLevel.Info, $"开始拉流：{url}");
 
@@ -1176,27 +1259,42 @@ public sealed partial class MainWindow : Window
             return;
         }
 
-        MediaPlaybackSession session = player.PlaybackSession;
-        // Opening 也算：那是「连上了但还没开始供数据」，在用户眼里同样是黑屏。
-        bool buffering = session.PlaybackState == MediaPlaybackState.Buffering
-                         || session.PlaybackState == MediaPlaybackState.Opening;
-
-        // 一秒内的进度增量 × 总大小 = 字节/秒。
-        double progress = session.DownloadProgress;
-        double bytesPerSecond = 0;
-        if (_mediaSizeBytes.HasValue && progress > _lastDownloadProgress)
+        // 与 ReportPlayback 同一个理由：定时器回调里抛异常 = 进程 fail-fast。
+        try
         {
-            bytesPerSecond = (progress - _lastDownloadProgress) * _mediaSizeBytes.Value;
-        }
-        _lastDownloadProgress = progress;
+            MediaPlaybackSession session = player.PlaybackSession;
+            // Opening 也算：那是「连上了但还没开始供数据」，在用户眼里同样是黑屏。
+            bool buffering = session.PlaybackState == MediaPlaybackState.Buffering
+                             || session.PlaybackState == MediaPlaybackState.Opening;
 
-        if (buffering)
-        {
-            BufferingText.Text = bytesPerSecond > 0
-                ? _strings.BufferingWithSpeed(FormatSpeed(bytesPerSecond))
-                : _strings.Buffering;
+            // 一秒内的进度增量 × 总大小 = 字节/秒。
+            double progress = session.DownloadProgress;
+            double bytesPerSecond = 0;
+            if (_mediaSizeBytes.HasValue && progress > _lastDownloadProgress)
+            {
+                bytesPerSecond = (progress - _lastDownloadProgress) * _mediaSizeBytes.Value;
+            }
+            _lastDownloadProgress = progress;
+
+            if (buffering)
+            {
+                BufferingText.Text = bytesPerSecond > 0
+                    ? _strings.BufferingWithSpeed(FormatSpeed(bytesPerSecond))
+                    : _strings.Buffering;
+            }
+            BufferingBadge.Visibility = buffering ? Visibility.Visible : Visibility.Collapsed;
         }
-        BufferingBadge.Visibility = buffering ? Visibility.Visible : Visibility.Collapsed;
+        catch (Exception error)
+        {
+            if (!_bufferingFailureLogged)
+            {
+                _bufferingFailureLogged = true;
+                SafeAppendLog(AdLogLevel.Warn,
+                    "读取缓冲状态失败（" + error.GetType().Name + "：" + error.Message
+                    + "），后续同样的失败不再重复记录。");
+            }
+            BufferingBadge.Visibility = Visibility.Collapsed;
+        }
     }
 
     /// <summary>
@@ -1353,43 +1451,59 @@ public sealed partial class MainWindow : Window
             return;
         }
 
-        MediaPlaybackSession session = player.PlaybackSession;
-
-        int transport = session.PlaybackState switch
+        // 会话关闭 / 播放器出错之后，PlaybackSession 的属性会抛 RO_E_CLOSED。
+        // 这个方法是每秒一次的定时器回调，异常同样会变成 DispatcherQueue 里的
+        // 未处理异常（0xC000027B），所以整段兜住，而且只记第一次。
+        try
         {
-            MediaPlaybackState.Playing => (int)AdTransportState.Playing,
-            MediaPlaybackState.Paused => (int)AdTransportState.Paused,
-            MediaPlaybackState.Opening => (int)AdTransportState.Transitioning,
-            MediaPlaybackState.Buffering => (int)AdTransportState.Transitioning,
-            _ => (int)AdTransportState.Stopped,
-        };
+            MediaPlaybackSession session = player.PlaybackSession;
 
-        // 直播流的 NaturalDuration 是 0 或者无穷，这种按「未知」(-1) 上报，
-        // 否则手机上会出现一条荒谬的进度条。
-        long durationMs = -1;
-        if (session.NaturalDuration > TimeSpan.Zero &&
-            !double.IsInfinity(session.NaturalDuration.TotalMilliseconds))
-        {
-            durationMs = (long)session.NaturalDuration.TotalMilliseconds;
+            int transport = session.PlaybackState switch
+            {
+                MediaPlaybackState.Playing => (int)AdTransportState.Playing,
+                MediaPlaybackState.Paused => (int)AdTransportState.Paused,
+                MediaPlaybackState.Opening => (int)AdTransportState.Transitioning,
+                MediaPlaybackState.Buffering => (int)AdTransportState.Transitioning,
+                _ => (int)AdTransportState.Stopped,
+            };
+
+            // 直播流的 NaturalDuration 是 0 或者无穷，这种按「未知」(-1) 上报，
+            // 否则手机上会出现一条荒谬的进度条。
+            long durationMs = -1;
+            if (session.NaturalDuration > TimeSpan.Zero &&
+                !double.IsInfinity(session.NaturalDuration.TotalMilliseconds))
+            {
+                durationMs = (long)session.NaturalDuration.TotalMilliseconds;
+            }
+
+            _engine.ReportPlayback(
+                _castSessionId,
+                transport,
+                (long)session.Position.TotalMilliseconds,
+                durationMs,
+                (int)Math.Round(player.Volume * 100),
+                player.IsMuted ? 1 : 0);
         }
-
-        _engine.ReportPlayback(
-            _castSessionId,
-            transport,
-            (long)session.Position.TotalMilliseconds,
-            durationMs,
-            (int)Math.Round(player.Volume * 100),
-            player.IsMuted ? 1 : 0);
+        catch (Exception error)
+        {
+            if (!_reportFailureLogged)
+            {
+                _reportFailureLogged = true;
+                AppendLog(AdLogLevel.Warn,
+                    "回报播放状态失败（" + error.GetType().Name + "：" + error.Message
+                    + "），后续同样的失败不再重复记录。");
+            }
+        }
     }
 
     private void OnEngineStateChanged(AdServiceState state)
     {
-        _dispatcher.TryEnqueue(() => ApplyState(state));
+        EnqueueUi(() => ApplyState(state), "更新服务状态");
     }
 
     private void OnEngineLogEmitted(AdLogLevel level, string message)
     {
-        _dispatcher.TryEnqueue(() => AppendLog(level, message));
+        _dispatcher.TryEnqueue(() => SafeAppendLog(level, message));
     }
 
     private void ApplyState(AdServiceState state)
