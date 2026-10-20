@@ -273,6 +273,17 @@ void MediaRelay::Impl::handle_local_playlist(const httplib::Request& request,
 
     if (!needs_local_remux(format)) {
         // 判为 fMP4 或者认不出来：302 回远端，等于没经过我们（零开销）。
+        //
+        // ★ 这里必须留一行：否则日志里只有「已改走中转」，却看不到最后到底
+        //   有没有中转 —— 排查「有声音没画面」时，直连和换封装是两条完全不同
+        //   的路（直连时视频编码由发送端决定，换封装时由我们的 FFmpeg 决定）。
+        const char* format_name = "未知";
+        if (format == SegmentFormat::FragmentedMp4) {
+            format_name = "fMP4";
+        } else if (format == SegmentFormat::MasterPlaylist) {
+            format_name = "主列表";
+        }
+        AD_LOG_INFO("本地中转：播放列表判为 {}，直连远端地址", format_name);
         response.set_redirect(remote);
         return;
     }

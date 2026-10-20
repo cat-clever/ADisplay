@@ -764,8 +764,11 @@ public sealed partial class MainWindow : Window
         string progress;
         try
         {
-            state = sender.PlaybackState.ToString();
-            progress = (sender.BufferingProgress * 100).ToString("F0");
+            // 读 _player 而不是事件参数 sender：后者在部分机器上读属性会抛
+            // InvalidCastException（CsWinRT 的投影问题，同 MirrorAudioPlayer 里
+            // 那处），而 _player 是我们自己持有的投影对象，稳定得多。
+            state = _player.PlaybackState.ToString();
+            progress = (_player.PlaybackSession.BufferingProgress * 100).ToString("F0");
         }
         catch (Exception error)
         {
@@ -1024,6 +1027,13 @@ public sealed partial class MainWindow : Window
         CastingPanel.Visibility = Visibility.Visible;
         CastingTitleText.Text = _strings.ReceivingCast;
         ShowCastingControls();
+
+        // ★ 上一次可能是 AirPlay 镜像：自解码那条路画上第一帧之后会把播放器控件
+        //   收起来（见 RenderMirrorFrame），画面改由 MirrorImage 显示。
+        //   这里不换回来，DLNA 投屏就只有声音没有画面 —— 音频是 MediaPlayer
+        //   自己出的，视频要靠 MediaPlayerElement 的渲染面。
+        MirrorImage.Visibility = Visibility.Collapsed;
+        PlayerElement.Visibility = Visibility.Visible;
 
         try
         {
