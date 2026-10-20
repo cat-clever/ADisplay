@@ -30,9 +30,19 @@
     <uses-feature
         android:name="android.hardware.touchscreen"
         android:required="false" />
+    <!--
+      leanback 也设为非必需。
+
+      原来这里是 required="true"（「这是个电视应用」的声明），副作用是：
+      一些手机、以及不上报 leanback 的电视盒子在**侧载**时会按「与设备不兼容」
+      拦掉安装（用户 2026-10-20 在一台安卓 9 设备上遇到「解析失败」）。
+      这个标志本来只影响应用商店的过滤，而本项目不上架商店；启动器那边靠的是
+      LEANBACK_LAUNCHER intent-filter，跟这个标志无关 —— 改成 false 之后，
+      电视的启动器仍然能列出它。
+    -->
     <uses-feature
         android:name="android.software.leanback"
-        android:required="true" />
+        android:required="false" />
     <uses-feature
         android:name="android.hardware.wifi"
         android:required="false" />
