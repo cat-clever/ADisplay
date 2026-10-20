@@ -49,6 +49,69 @@ void send_binary(httplib::Response& response, const std::vector<uint8_t>& data) 
     response.set_content(reinterpret_cast<const char*>(data.data()), data.size(), "video/mp4");
 }
 
+// 从播放列表正文里取第一条分片地址。与 parse_media_playlist 不同，这里不要求
+// 前面有 #EXTINF —— 嗅探只需要一个能下载的地址。
+std::string first_segment_url(const std::string& body, const std::string& playlist_url) {
+    const std::vector<HlsSegment> parsed = parse_media_playlist(body, playlist_url);
+    if (!parsed.empty() && !parsed.front().url.empty()) {
+        return parsed.front().url;
+    }
+
+    std::size_t pos = 0;
+    while (pos <= body.size()) {
+        std::size_t end = body.find('\n', pos);
+        if (end == std::string::npos) {
+            end = body.size();
+        }
+        std::string line = body.substr(pos, end - pos);
+        while (!line.empty() &&
+               (line.back() == '\r' || line.back() == ' ' || line.back() == '\t')) {
+            line.pop_back();
+        }
+        std::size_t begin = 0;
+        while (begin < line.size() && (line[begin] == ' ' || line[begin] == '\t')) {
+            ++begin;
+        }
+        if (begin < line.size() && line[begin] != '#') {
+            return resolve_relative_url(playlist_url, line.substr(begin));
+        }
+        if (end == body.size()) {
+            break;
+        }
+        pos = end + 1;
+    }
+    return std::string();
+}
+
+// 扩展名认不出来时，拉第一片看内容，决定要不要换封装。
+//
+// 手机上的投屏 App 会刻意把分片名里的 .ts 去掉（小包子影视第四十四轮就是为了
+// 让接收端别插手），于是只看后缀会判成 Unknown、直接放行。而 Media Foundation
+// 对 HEVC-in-TS 的支持并不可靠 —— 表现正是「有声音、没画面」。所以这里按内容
+// 再判一次：TS 有固定的 0x47 同步字节，fMP4 开头是 ftyp/styp/moof 这类 box。
+SegmentFormat sniff_segment_format(const std::string& playlist_body,
+                                   const std::string& playlist_url) {
+    const std::string url = first_segment_url(playlist_body, playlist_url);
+    if (url.empty()) {
+        return SegmentFormat::Unknown;
+    }
+
+    const FetchResult first = fetch_url(url, kPlaylistTimeoutSeconds);
+    if (!first.ok || first.body.size() < 8) {
+        return SegmentFormat::Unknown;
+    }
+
+    const auto* bytes = reinterpret_cast<const unsigned char*>(first.body.data());
+    if (bytes[0] == 0x47 && (first.body.size() < 189 || bytes[188] == 0x47)) {
+        return SegmentFormat::MpegTs;
+    }
+    const std::string box(reinterpret_cast<const char*>(bytes + 4), 4);
+    if (box == "ftyp" || box == "styp" || box == "moof" || box == "moov" || box == "sidx") {
+        return SegmentFormat::FragmentedMp4;
+    }
+    return SegmentFormat::Unknown;
+}
+
 }  // namespace
 
 struct MediaRelay::Impl {
@@ -269,6 +332,17 @@ void MediaRelay::Impl::handle_local_playlist(const httplib::Request& request,
         playlist_url = variant;
         playlist.body = std::move(variant_body.body);
         format = classify_playlist(playlist.body);
+    }
+
+    if (format == SegmentFormat::Unknown) {
+        // 扩展名认不出来时按内容再判一次：手机上的投屏 App 可能把 .ts 去掉，
+        // 而 Media Foundation 对 HEVC-in-TS 的支持不可靠（有声音没画面）。
+        const SegmentFormat sniffed = sniff_segment_format(playlist.body, playlist_url);
+        if (sniffed != SegmentFormat::Unknown) {
+            AD_LOG_INFO("本地中转：扩展名认不出，按内容判为 {}",
+                        sniffed == SegmentFormat::MpegTs ? "MPEG-TS" : "fMP4");
+            format = sniffed;
+        }
     }
 
     if (!needs_local_remux(format)) {

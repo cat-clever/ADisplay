@@ -49,6 +49,8 @@ public sealed partial class MainWindow : Window
     private bool _reportFailureLogged;
     // 缓冲监测读播放器状态失败只记一次（同上）。
     private bool _bufferingFailureLogged;
+    // 播放状态回调读 PlaybackSession 失败只记一次（带完整堆栈）。
+    private bool _stateReadFailureLogged;
     // 镜像会话的帧源。null 表示当前不是镜像会话。
     /// <summary>
     /// 镜像这条路的本地流服务：把帧封成 MPEG-TS，从本地 HTTP 发出去，
@@ -664,6 +666,7 @@ public sealed partial class MainWindow : Window
         _lastRenderDelayMs = 0;
         _reportFailureLogged = false;
         _bufferingFailureLogged = false;
+        _stateReadFailureLogged = false;
         _mirrorAudio.Resume();
 
         _player.RealTimePlayback = true;
@@ -775,9 +778,14 @@ public sealed partial class MainWindow : Window
         }
         catch (Exception error)
         {
-            _dispatcher.TryEnqueue(() => SafeAppendLog(
-                AdLogLevel.Warn,
-                "读取播放状态失败（" + error.GetType().Name + "：" + error.Message + "）"));
+            if (!_stateReadFailureLogged)
+            {
+                _stateReadFailureLogged = true;
+                _dispatcher.TryEnqueue(() => SafeAppendLog(
+                    AdLogLevel.Warn,
+                    "读取播放状态失败（" + error.GetType().Name + "：" + error.Message
+                    + "）；完整异常如下，后续同样的失败不再重复记录：\n" + error));
+            }
             return;
         }
 
@@ -1023,6 +1031,7 @@ public sealed partial class MainWindow : Window
         _dismissedIsMirror = false;
         _reportFailureLogged = false;
         _bufferingFailureLogged = false;
+        _stateReadFailureLogged = false;
         UpdateResumeBanner();
         AppendLog(AdLogLevel.Info, $"开始拉流：{url}");
 
