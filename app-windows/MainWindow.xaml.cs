@@ -767,8 +767,11 @@ public sealed partial class MainWindow : Window
             // 读 _player 而不是事件参数 sender：后者在部分机器上读属性会抛
             // InvalidCastException（CsWinRT 的投影问题，同 MirrorAudioPlayer 里
             // 那处），而 _player 是我们自己持有的投影对象，稳定得多。
-            state = _player.PlaybackState.ToString();
-            progress = (_player.PlaybackSession.BufferingProgress * 100).ToString("F0");
+            // 注意 PlaybackState / BufferingProgress 都挂在 PlaybackSession 上，
+            // MediaPlayer 本身没有这两个属性。
+            MediaPlaybackSession session = _player.PlaybackSession;
+            state = session.PlaybackState.ToString();
+            progress = (session.BufferingProgress * 100).ToString("F0");
         }
         catch (Exception error)
         {
