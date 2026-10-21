@@ -224,6 +224,40 @@ fun PlaybackScreen(
                     keepScreenOn = true
                     player = exoPlayer
 
+                    // 播放与暂停使用同一个按钮。不要依赖 Media3 同时维护 exo_play /
+                    // exo_pause 两个视图：自定义控制栏和电视遥控器焦点导航下，两个视图
+                    // 的显隐切换很容易让点击落到已经隐藏的控件上。
+                    findViewById<android.widget.Button>(com.adisplay.tv.R.id.tv_play_toggle)?.apply {
+                        fun syncPlaybackLabel() {
+                            val playing = exoPlayer.isPlaying || exoPlayer.playWhenReady
+                            text = if (playing) strings.pause else strings.play
+                            contentDescription = if (playing) strings.pause else strings.play
+                        }
+
+                        setOnClickListener {
+                            if (exoPlayer.isPlaying || exoPlayer.playWhenReady) {
+                                exoPlayer.pause()
+                            } else {
+                                exoPlayer.play()
+                            }
+                            syncPlaybackLabel()
+                        }
+                        syncPlaybackLabel()
+
+                        exoPlayer.addListener(object : Player.Listener {
+                            override fun onIsPlayingChanged(isPlaying: Boolean) {
+                                syncPlaybackLabel()
+                            }
+
+                            override fun onPlayWhenReadyChanged(
+                                playWhenReady: Boolean,
+                                reason: Int,
+                            ) {
+                                syncPlaybackLabel()
+                            }
+                        })
+                    }
+
                     // Media3 的默认快退/快进步长通常是 15 秒，这里统一成电视端文案
                     // 对应的 10 秒。按钮仍属于 PlayerControlView，因此焦点导航与
                     // 播放器控制栏保持一致。

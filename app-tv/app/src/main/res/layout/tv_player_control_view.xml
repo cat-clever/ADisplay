@@ -28,23 +28,16 @@
         android:src="@drawable/exo_icon_rewind"
         android:focusable="true" />
 
-    <ImageButton
-        android:id="@id/exo_play"
-        android:layout_width="60dp"
-        android:layout_height="60dp"
-        android:background="?android:attr/selectableItemBackground"
+    <Button
+        android:id="@+id/tv_play_toggle"
+        android:layout_width="wrap_content"
+        android:layout_height="52dp"
+        android:layout_marginHorizontal="8dp"
         android:contentDescription="@string/player_play"
-        android:src="@drawable/exo_icon_play"
-        android:focusable="true" />
-
-    <ImageButton
-        android:id="@id/exo_pause"
-        android:layout_width="60dp"
-        android:layout_height="60dp"
-        android:background="?android:attr/selectableItemBackground"
-        android:contentDescription="@string/player_pause"
-        android:src="@drawable/exo_icon_pause"
-        android:focusable="true" />
+        android:focusable="true"
+        android:minWidth="96dp"
+        android:text="@string/player_play"
+        android:textAllCaps="false" />
 
     <ImageButton
         android:id="@id/exo_ffwd"

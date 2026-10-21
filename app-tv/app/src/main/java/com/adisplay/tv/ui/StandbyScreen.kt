@@ -567,9 +567,8 @@ private fun StandbyContent(model: EngineModel, onShowLog: () -> Unit) {
                 // 按钮紧跟状态文字、排在说明之前 —— 矮屏上它必须在首屏可见区内。
                 Spacer(modifier = Modifier.height(layout.spacingMedium))
 
-                // 按钮并排而不是上下叠：叠起来会多占一行高度，而矮屏上这个位置
-                // 是算着放的。三个按钮用 weight 等分整行宽度 —— 之前用固定宽度，
-                // 三个加起来超过了屏宽，第三个（修改名称）被挤出可视区。
+                // 主操作单独占一行，日志和改名作为次操作并排放置。电视端最重要的
+                // 动作必须有明确层级，不能把三个按钮做成同样重量的一排。
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -577,52 +576,47 @@ private fun StandbyContent(model: EngineModel, onShowLog: () -> Unit) {
                         .clip(RoundedCornerShape(20.dp))
                         .background(Color.White.copy(alpha = 0.055f)),
                 ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.Center,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 10.dp),
-                ) {
-                    ActionButton(
-                        text = if (model.serviceEnabled) LocalStrings.current.stopReceiving
-                               else LocalStrings.current.startReceiving,
-                        textStyle = layout.actionStyle,
-                        minWidth = 0.dp,
-                        modifier = Modifier.weight(1f),
-                        focusRequester = buttonFocus,
-                        // 核心库没加载起来时按钮压暗且不可聚焦：让用户看出是这一块
-                        // 坏了，而不是对着一个按了没反应的按钮猜网络。
-                        enabled = model.isNativeAvailable,
-                        onClick = { model.toggleService() },
-                    )
+                    Column {
+                        ActionButton(
+                            text = if (model.serviceEnabled) LocalStrings.current.stopReceiving
+                                   else LocalStrings.current.startReceiving,
+                            textStyle = layout.actionStyle,
+                            minWidth = 0.dp,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                            focusRequester = buttonFocus,
+                            // 核心库没加载起来时按钮压暗且不可聚焦：让用户看出是这一块
+                            // 坏了，而不是对着一个按了没反应的按钮猜网络。
+                            enabled = model.isNativeAvailable,
+                            onClick = { model.toggleService() },
+                        )
 
-                    Spacer(modifier = Modifier.width(16.dp))
-
-                    // 日志收进抽屉（横屏从侧边抽、竖屏从下面抽），「清除日志」
-                    // 也跟着挪进抽屉里 —— 看不见的日志不需要一个常驻的清除按钮。
-                    ActionButton(
-                        text = LocalStrings.current.viewLog,
-                        textStyle = layout.actionStyle,
-                        minWidth = 0.dp,
-                        modifier = Modifier.weight(1f),
-                        focusRequester = logFocus,
-                        onClick = onShowLog,
-                    )
-
-                    Spacer(modifier = Modifier.width(16.dp))
-
-                    // 电视上没有键盘，改名的入口必须显式给出来。名字是手机端
-                    // 投屏列表里看到的东西，改不了就只能认设备型号那一个默认名。
-                    ActionButton(
-                        text = LocalStrings.current.rename,
-                        textStyle = layout.actionStyle,
-                        minWidth = 0.dp,
-                        modifier = Modifier.weight(1f),
-                        focusRequester = renameFocus,
-                        onClick = { model.beginRename() },
-                    )
-                }
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 0.dp),
+                        ) {
+                            ActionButton(
+                                text = strings.viewLog,
+                                textStyle = layout.actionStyle,
+                                minWidth = 0.dp,
+                                modifier = Modifier.weight(1f),
+                                focusRequester = logFocus,
+                                onClick = onShowLog,
+                            )
+                            ActionButton(
+                                text = strings.rename,
+                                textStyle = layout.actionStyle,
+                                minWidth = 0.dp,
+                                modifier = Modifier.weight(1f),
+                                focusRequester = renameFocus,
+                                onClick = { model.beginRename() },
+                            )
+                        }
+                    }
                 }
 
                 Spacer(modifier = Modifier.height(layout.spacingMedium))
