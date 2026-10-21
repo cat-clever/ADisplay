@@ -1,6 +1,7 @@
 package com.adisplay.tv.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -14,6 +15,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.weight
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -31,6 +33,7 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -489,38 +492,78 @@ private fun StandbyContent(model: EngineModel, onShowLog: () -> Unit) {
     val settingsFocus = remember { FocusRequester() }
     var advancedOpen by remember { mutableStateOf(false) }
 
-    Surface(modifier = Modifier.fillMaxSize()) {
+    Surface(
+        modifier = Modifier.fillMaxSize(),
+        color = Color(0xFF080D14),
+    ) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
+                .background(
+                    Brush.verticalGradient(
+                        colors = listOf(Color(0xFF102335), Color(0xFF080D14)),
+                    )
+                )
                 .padding(
                     horizontal = layout.horizontalPadding,
                     vertical = layout.verticalPadding
                 ),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
+            // 顶部保留品牌与运行状态，给主页面一个清晰的电视端层级：品牌、设备卡、
+            // 主要动作、低频设置。内容仍然全部由 Compose 绘制，遥控器焦点顺序不变。
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Text(
+                    text = "ADisplay",
+                    style = layout.statusStyle,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+                Text(
+                    text = model.statusText,
+                    style = layout.bodyStyle,
+                    color = if (model.serviceEnabled) Color(0xFF79E2A3) else Color(0xFFFFB4AB),
+                )
+            }
+
             // 内容整体居中，并且可以滚动 —— 矮屏上放不下时裁掉的是最下面那行
             // 提示，而按钮在块的顶部，一定看得见。
             Column(
                 modifier = Modifier
-                    .fillMaxSize()
+                    .weight(1f)
                     .verticalScroll(rememberScrollState()),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.Center
             ) {
-                Text(
-                    text = model.deviceName,
-                    style = layout.titleStyle,
-                    textAlign = TextAlign.Center
-                )
-
-                Spacer(modifier = Modifier.height(layout.spacingTight))
-
-                Text(
-                    text = model.statusText,
-                    style = layout.statusStyle,
-                    textAlign = TextAlign.Center
-                )
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .widthIn(max = 1100.dp),
+                    shape = RoundedCornerShape(24.dp),
+                    color = Color(0xFF142536),
+                    border = BorderStroke(1.dp, Color.White.copy(alpha = 0.08f)),
+                ) {
+                    Column(
+                        modifier = Modifier.padding(horizontal = 28.dp, vertical = 24.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                    ) {
+                        Text(
+                            text = model.deviceName,
+                            style = layout.titleStyle,
+                            textAlign = TextAlign.Center,
+                        )
+                        Spacer(modifier = Modifier.height(layout.spacingTight))
+                        Text(
+                            text = model.statusText,
+                            style = layout.statusStyle,
+                            textAlign = TextAlign.Center,
+                            color = Color.White.copy(alpha = 0.72f),
+                        )
+                    }
+                }
 
                 // 按钮紧跟状态文字、排在说明之前 —— 矮屏上它必须在首屏可见区内。
                 Spacer(modifier = Modifier.height(layout.spacingMedium))
@@ -528,10 +571,19 @@ private fun StandbyContent(model: EngineModel, onShowLog: () -> Unit) {
                 // 按钮并排而不是上下叠：叠起来会多占一行高度，而矮屏上这个位置
                 // 是算着放的。三个按钮用 weight 等分整行宽度 —— 之前用固定宽度，
                 // 三个加起来超过了屏宽，第三个（修改名称）被挤出可视区。
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .widthIn(max = 1100.dp),
+                    shape = RoundedCornerShape(20.dp),
+                    color = Color.White.copy(alpha = 0.055f),
+                ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.Center,
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
                 ) {
                     ActionButton(
                         text = if (model.serviceEnabled) LocalStrings.current.stopReceiving
@@ -572,6 +624,7 @@ private fun StandbyContent(model: EngineModel, onShowLog: () -> Unit) {
                         onClick = { model.beginRename() },
                     )
                 }
+                }
 
                 Spacer(modifier = Modifier.height(layout.spacingMedium))
 
@@ -582,7 +635,7 @@ private fun StandbyContent(model: EngineModel, onShowLog: () -> Unit) {
                     text = if (advancedOpen) strings.lessSettings else strings.moreSettings,
                     textStyle = layout.actionStyle,
                     minWidth = 0.dp,
-                    modifier = Modifier.widthIn(min = 220.dp),
+                    modifier = Modifier.widthIn(min = 260.dp),
                     focusRequester = settingsFocus,
                     selected = advancedOpen,
                     onClick = { advancedOpen = !advancedOpen },
