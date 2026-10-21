@@ -18,6 +18,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import android.view.View
+import android.view.LayoutInflater
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.C
@@ -66,6 +67,7 @@ fun PlaybackScreen(
     onShowLog: () -> Unit,
 ) {
     val context = LocalContext.current
+    val strings = LocalStrings.current
     // 播放器只在进入本页时建一次。remember 把它钉在本次组合里，重组（日志展开、
     // 焦点变化、每秒回报引起的状态变化）都直接复用同一个实例 —— 每次重组都
     // 新建的话画面会一直黑、音频还会叠着响。
@@ -194,12 +196,13 @@ fun PlaybackScreen(
     ) {
         AndroidView(
             factory = { ctx ->
-                PlayerView(ctx).apply {
+                (LayoutInflater.from(ctx).inflate(
+                    com.adisplay.tv.R.layout.tv_player_view,
+                    null,
+                ) as PlayerView).apply {
                     // 画面按屏幕适应：整幅可见，多出来的边留黑。
                     // 用 ZOOM 会把画面裁掉一块，投屏看的就是完整画面。
                     resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
-                    // 使用自定义控制栏：应用按钮与 Media3 播放控制共用一个播放器栏。
-                    setControllerLayoutId(com.adisplay.tv.R.layout.tv_player_control_view)
                     useController = true
                     controllerAutoShow = true
                     // 它一亮，我们那列按钮（传输控制 / 日志 / 结束投屏）跟着亮 ——
@@ -224,10 +227,10 @@ fun PlaybackScreen(
                     // Media3 的默认快退/快进步长通常是 15 秒，这里统一成电视端文案
                     // 对应的 10 秒。按钮仍属于 PlayerControlView，因此焦点导航与
                     // 播放器控制栏保持一致。
-                    findViewById<View>(com.adisplay.tv.R.id.exo_rew)?.setOnClickListener {
+                    findViewById<View>(androidx.media3.ui.R.id.exo_rew)?.setOnClickListener {
                         exoPlayer.seekTo((exoPlayer.currentPosition - 10_000L).coerceAtLeast(0L))
                     }
-                    findViewById<View>(com.adisplay.tv.R.id.exo_ffwd)?.setOnClickListener {
+                    findViewById<View>(androidx.media3.ui.R.id.exo_ffwd)?.setOnClickListener {
                         val duration = exoPlayer.duration
                         val target = exoPlayer.currentPosition + 10_000L
                         exoPlayer.seekTo(
@@ -236,13 +239,13 @@ fun PlaybackScreen(
                         )
                     }
                     findViewById<View>(com.adisplay.tv.R.id.tv_log_button)?.apply {
-                        (this as? android.widget.Button)?.text = LocalStrings.current.logLabel
-                        contentDescription = LocalStrings.current.logLabel
+                        (this as? android.widget.Button)?.text = strings.logLabel
+                        contentDescription = strings.logLabel
                         setOnClickListener { onShowLog() }
                     }
                     findViewById<View>(com.adisplay.tv.R.id.tv_end_button)?.apply {
-                        (this as? android.widget.Button)?.text = LocalStrings.current.endCasting
-                        contentDescription = LocalStrings.current.endCasting
+                        (this as? android.widget.Button)?.text = strings.endCasting
+                        contentDescription = strings.endCasting
                         setOnClickListener { onExit() }
                     }
                 }

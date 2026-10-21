@@ -196,9 +196,8 @@ private fun ResumeBanner(
         // 并短暂重试，避免部分电视盒子上 requestFocus() 静默返回 false。
         repeat(3) {
             withFrameNanos { }
-            if (resumeFocus.requestFocus()) {
-                return@LaunchedEffect
-            }
+            resumeFocus.requestFocus()
+            return@LaunchedEffect
         }
     }
 
