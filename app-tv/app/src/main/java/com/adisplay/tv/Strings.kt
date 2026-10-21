@@ -59,6 +59,8 @@ abstract class Strings {
     // ---- 待机页 ----
     abstract val startReceiving: String
     abstract val stopReceiving: String
+    abstract val welcomeTitle: String
+    abstract val welcomeSubtitle: String
     abstract val viewLog: String
     abstract val rename: String
     abstract val moreSettings: String
@@ -182,6 +184,8 @@ object ChineseStrings : Strings() {
 
     override val startReceiving = "开启接收服务"
     override val stopReceiving = "关闭接收服务"
+    override val welcomeTitle = "准备开始投屏"
+    override val welcomeSubtitle = "让手机和电视连接同一个 Wi‑Fi，即可把视频或屏幕投到这里"
     override val viewLog = "查看日志"
     override val rename = "修改名称"
     override val moreSettings = "更多设置"
@@ -277,6 +281,8 @@ object EnglishStrings : Strings() {
 
     override val startReceiving = "Start receiving"
     override val stopReceiving = "Stop receiving"
+    override val welcomeTitle = "Ready to cast"
+    override val welcomeSubtitle = "Connect your phone and TV to the same Wi‑Fi to start casting"
     override val viewLog = "View log"
     override val rename = "Rename"
     override val moreSettings = "More settings"

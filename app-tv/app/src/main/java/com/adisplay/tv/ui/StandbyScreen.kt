@@ -509,25 +509,6 @@ private fun StandbyContent(model: EngineModel, onShowLog: () -> Unit) {
                 ),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            // 顶部保留品牌与运行状态，给主页面一个清晰的电视端层级：品牌、设备卡、
-            // 主要动作、低频设置。内容仍然全部由 Compose 绘制，遥控器焦点顺序不变。
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween,
-            ) {
-                Text(
-                    text = "ADisplay",
-                    style = layout.statusStyle,
-                    color = MaterialTheme.colorScheme.primary,
-                )
-                Text(
-                    text = model.statusText,
-                    style = layout.bodyStyle,
-                    color = if (model.serviceEnabled) Color(0xFF79E2A3) else Color(0xFFFFB4AB),
-                )
-            }
-
             // 内容整体居中，并且可以滚动 —— 矮屏上放不下时裁掉的是最下面那行
             // 提示，而按钮在块的顶部，一定看得见。
             Column(
@@ -550,16 +531,31 @@ private fun StandbyContent(model: EngineModel, onShowLog: () -> Unit) {
                         horizontalAlignment = Alignment.CenterHorizontally,
                     ) {
                         Text(
-                            text = model.deviceName,
+                            text = strings.welcomeTitle,
                             style = layout.titleStyle,
                             textAlign = TextAlign.Center,
                         )
                         Spacer(modifier = Modifier.height(layout.spacingTight))
                         Text(
-                            text = model.statusText,
+                            text = strings.welcomeSubtitle,
+                            style = layout.bodyStyle,
+                            textAlign = TextAlign.Center,
+                            color = Color.White.copy(alpha = 0.78f),
+                            modifier = Modifier.widthIn(max = 700.dp),
+                        )
+                        Spacer(modifier = Modifier.height(layout.spacingMedium))
+                        Text(
+                            text = model.deviceName,
                             style = layout.statusStyle,
                             textAlign = TextAlign.Center,
-                            color = Color.White.copy(alpha = 0.90f),
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                        Spacer(modifier = Modifier.height(layout.spacingTight))
+                        Text(
+                            text = model.statusText,
+                            style = layout.bodyStyle,
+                            textAlign = TextAlign.Center,
+                            color = if (model.serviceEnabled) Color(0xFF9BE7B5) else Color.White.copy(alpha = 0.68f),
                         )
                     }
                 }
