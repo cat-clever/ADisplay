@@ -24,7 +24,7 @@
         android:layout_height="52dp"
         android:background="?android:attr/selectableItemBackground"
         android:contentDescription="@string/player_rewind"
-        android:src="@drawable/exo_icon_rew"
+        android:src="@drawable/exo_icon_rewind"
         android:focusable="true" />
 
     <ImageButton
@@ -51,7 +51,7 @@
         android:layout_height="52dp"
         android:background="?android:attr/selectableItemBackground"
         android:contentDescription="@string/player_forward"
-        android:src="@drawable/exo_icon_ffwd"
+        android:src="@drawable/exo_icon_fastforward"
         android:focusable="true" />
 
     <TextView
