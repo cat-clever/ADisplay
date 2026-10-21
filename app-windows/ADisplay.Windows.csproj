@@ -19,7 +19,7 @@
     <AssemblyName>ADisplay</AssemblyName>
     <!-- 版本号要跟 CMakeLists.txt 一致（那里是唯一权威来源）。
          会出现在 exe 的文件属性与「关于」里。 -->
-    <Version>1.0.25</Version>
+    <Version>1.0.26</Version>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <!-- exe 自身的图标（资源管理器里看到的就是它）。窗口的标题栏与任务栏另外
          要在运行时装一次，见 MainWindow.ApplyWindowIcon —— WinUI 的窗口不会
