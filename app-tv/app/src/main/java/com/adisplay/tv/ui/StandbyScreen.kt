@@ -15,7 +15,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.layout.weight
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -38,7 +37,6 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.tv.material3.MaterialTheme
-import androidx.tv.material3.Surface
 import androidx.tv.material3.Text
 import com.adisplay.tv.EngineModel
 import com.adisplay.tv.Language
@@ -492,9 +490,10 @@ private fun StandbyContent(model: EngineModel, onShowLog: () -> Unit) {
     val settingsFocus = remember { FocusRequester() }
     var advancedOpen by remember { mutableStateOf(false) }
 
-    Surface(
-        modifier = Modifier.fillMaxSize(),
-        color = Color(0xFF080D14),
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xFF080D14)),
     ) {
         Column(
             modifier = Modifier
@@ -538,13 +537,13 @@ private fun StandbyContent(model: EngineModel, onShowLog: () -> Unit) {
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.Center
             ) {
-                Surface(
+                Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .widthIn(max = 1100.dp),
-                    shape = RoundedCornerShape(24.dp),
-                    color = Color(0xFF142536),
-                    border = BorderStroke(1.dp, Color.White.copy(alpha = 0.08f)),
+                        .widthIn(max = 1100.dp)
+                        .clip(RoundedCornerShape(24.dp))
+                        .background(Color(0xFF142536))
+                        .border(BorderStroke(1.dp, Color.White.copy(alpha = 0.08f)), RoundedCornerShape(24.dp)),
                 ) {
                     Column(
                         modifier = Modifier.padding(horizontal = 28.dp, vertical = 24.dp),
@@ -571,12 +570,12 @@ private fun StandbyContent(model: EngineModel, onShowLog: () -> Unit) {
                 // 按钮并排而不是上下叠：叠起来会多占一行高度，而矮屏上这个位置
                 // 是算着放的。三个按钮用 weight 等分整行宽度 —— 之前用固定宽度，
                 // 三个加起来超过了屏宽，第三个（修改名称）被挤出可视区。
-                Surface(
+                Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .widthIn(max = 1100.dp),
-                    shape = RoundedCornerShape(20.dp),
-                    color = Color.White.copy(alpha = 0.055f),
+                        .widthIn(max = 1100.dp)
+                        .clip(RoundedCornerShape(20.dp))
+                        .background(Color.White.copy(alpha = 0.055f)),
                 ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
