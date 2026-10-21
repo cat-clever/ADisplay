@@ -519,7 +519,7 @@ private fun StandbyContent(model: EngineModel, onShowLog: () -> Unit) {
                         .widthIn(max = 1100.dp)
                         .clip(RoundedCornerShape(24.dp))
                         .background(MaterialTheme.colorScheme.surfaceVariant)
-                        .border(BorderStroke(1.dp, MaterialTheme.colorScheme.outline), RoundedCornerShape(24.dp)),
+                        .border(BorderStroke(1.dp, Color.White.copy(alpha = 0.18f)), RoundedCornerShape(24.dp)),
                 ) {
                     Column(
                         modifier = Modifier.padding(horizontal = 28.dp, vertical = 24.dp),
