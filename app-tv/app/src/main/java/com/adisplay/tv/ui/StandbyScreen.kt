@@ -33,7 +33,6 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -498,11 +497,7 @@ private fun StandbyContent(model: EngineModel, onShowLog: () -> Unit) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .background(
-                    Brush.verticalGradient(
-                        colors = listOf(Color(0xFF102335), Color(0xFF080D14)),
-                    )
-                )
+                .background(MaterialTheme.colorScheme.background)
                 .padding(
                     horizontal = layout.horizontalPadding,
                     vertical = layout.verticalPadding
@@ -523,8 +518,8 @@ private fun StandbyContent(model: EngineModel, onShowLog: () -> Unit) {
                         .fillMaxWidth()
                         .widthIn(max = 1100.dp)
                         .clip(RoundedCornerShape(24.dp))
-                        .background(Color(0xFF142536))
-                        .border(BorderStroke(1.dp, Color.White.copy(alpha = 0.08f)), RoundedCornerShape(24.dp)),
+                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                        .border(BorderStroke(1.dp, MaterialTheme.colorScheme.outline), RoundedCornerShape(24.dp)),
                 ) {
                     Column(
                         modifier = Modifier.padding(horizontal = 28.dp, vertical = 24.dp),
@@ -582,6 +577,7 @@ private fun StandbyContent(model: EngineModel, onShowLog: () -> Unit) {
                                 .fillMaxWidth()
                                 .padding(horizontal = 12.dp, vertical = 10.dp),
                             focusRequester = buttonFocus,
+                            primary = true,
                             // 核心库没加载起来时按钮压暗且不可聚焦：让用户看出是这一块
                             // 坏了，而不是对着一个按了没反应的按钮猜网络。
                             enabled = model.isNativeAvailable,
@@ -659,18 +655,26 @@ private fun StandbyContent(model: EngineModel, onShowLog: () -> Unit) {
                     strings.hintTouchLead
                 }
 
-                Text(
-                    text = hintLead + strings.hintHowToCast,
-                    style = layout.bodyStyle,
-                    textAlign = TextAlign.Center,
+                Box(
                     modifier = Modifier
                         .fillMaxWidth()
                         .widthIn(max = 900.dp)
-                )
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                        .padding(horizontal = 24.dp, vertical = 18.dp),
+                ) {
+                    Text(
+                        text = hintLead + strings.hintHowToCast,
+                        style = layout.bodyStyle,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
 
                 // 本机地址：手机搜不到设备时，DLNA 类 App 可以直接手填这个地址，
                 // 也是判断「电视到底在哪张网卡上」最快的办法（文档 2.3 要求显示）。
-                if (model.localAddresses.isNotEmpty()) {
+                if (advancedOpen && model.localAddresses.isNotEmpty()) {
                     Spacer(modifier = Modifier.height(layout.spacingTight))
 
                     Text(

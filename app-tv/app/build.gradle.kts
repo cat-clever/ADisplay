@@ -25,8 +25,8 @@ android {
         // 规则固定下来，升级时不用每次临时决定该加多少。
         // 它必须随版本递增 —— 不变的话 Android 会认为是同一个包，
         // 覆盖安装时不会更新。
-        versionCode = 10029
-        versionName = "1.0.29"
+        versionCode = 10030
+        versionName = "1.0.30"
 
         // 打两个 ABI：arm64-v8a 与 armeabi-v7a。一个 APK 同时装得了新盒子
         // （Fire TV、Chromecast、主流国产盒子）与 32 位的老板子。

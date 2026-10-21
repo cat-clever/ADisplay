@@ -68,6 +68,8 @@ fun ActionButton(
      * 所以底色与边框各用一套颜色。
      */
     selected: Boolean = false,
+    /** 主操作按钮：使用品牌色突出页面唯一的核心动作。 */
+    primary: Boolean = false,
     /**
      * 紧凑尺寸。用在盖在画面上的悬浮条里 —— 那里是「临时露一下」，按遥控器
      * 能点中的最小范围给就够了，撑成大按钮反而挡画面。
@@ -86,8 +88,8 @@ fun ActionButton(
     )
 
     val accent = MaterialTheme.colorScheme.primary
-    val restingBackground = MaterialTheme.colorScheme.surfaceVariant
-    val focusedBackground = accent.copy(alpha = 0.55f)
+    val restingBackground = if (primary) accent else MaterialTheme.colorScheme.surfaceVariant
+    val focusedBackground = if (primary) accent else accent.copy(alpha = 0.55f)
 
     Box(
         modifier = modifier
@@ -136,6 +138,10 @@ fun ActionButton(
             ),
         contentAlignment = Alignment.Center,
     ) {
-        Text(text = text, style = textStyle)
+        Text(
+            text = text,
+            style = textStyle,
+            color = if (textStyle.color == Color.Unspecified) Color.White else textStyle.color,
+        )
     }
 }
