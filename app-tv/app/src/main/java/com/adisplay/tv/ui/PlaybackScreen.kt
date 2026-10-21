@@ -148,13 +148,6 @@ fun PlaybackScreen(
     // 计时器会出现「进度条还在、日志按钮没了」这种错位。
     var playerControlsVisible by remember { mutableStateOf(false) }
 
-    // 在不在播。悬浮条上那个按钮的文字靠它切换。
-    var playing by remember { mutableStateOf(false) }
-
-    // 遥控器那条路：传输控制由悬浮条提供（见 PlaybackTransport 的说明）。
-    // 触屏那条路不给 —— 点击直接落到播放器上，它自带的那套更顺手。
-    val inputMode = rememberInputMode()
-
     var buffering by remember { mutableStateOf(false) }
     var speedBytesPerSecond by remember { mutableStateOf(0L) }
 
@@ -162,10 +155,6 @@ fun PlaybackScreen(
         val stateListener = object : Player.Listener {
             override fun onPlaybackStateChanged(playbackState: Int) {
                 buffering = playbackState == Player.STATE_BUFFERING
-            }
-
-            override fun onIsPlayingChanged(isPlayingNow: Boolean) {
-                playing = isPlayingNow
             }
         }
 
@@ -197,24 +186,11 @@ fun PlaybackScreen(
         title = LocalStrings.current.playingTitle(model.deviceName),
         onExit = onExit,
         onShowLog = onShowLog,
-        // 触摸归播放器：点画面出它的进度条与快进快退，拖进度条也落在它身上。
-        // 我们只跟着它的控制条一起亮相（见 showToken）。
+        // 触摸与遥控器都归播放器：进度、播放、快进快退、日志和结束投屏全部在
+        // 同一条控制栏里，不再额外叠一列 Compose 按钮。
         captureTouches = false,
         playerControlsVisible = playerControlsVisible,
-        transport = if (inputMode == InputMode.Remote) {
-            PlaybackTransport(
-                isPlaying = playing,
-                onTogglePlay = {
-                    if (exoPlayer.isPlaying) exoPlayer.pause() else exoPlayer.play()
-                },
-                onSeekBy = { delta ->
-                    val target = exoPlayer.currentPosition + delta
-                    exoPlayer.seekTo(if (target < 0L) 0L else target)
-                },
-            )
-        } else {
-            null
-        },
+        transport = null,
     ) {
         AndroidView(
             factory = { ctx ->
@@ -222,8 +198,8 @@ fun PlaybackScreen(
                     // 画面按屏幕适应：整幅可见，多出来的边留黑。
                     // 用 ZOOM 会把画面裁掉一块，投屏看的就是完整画面。
                     resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
-                    // 控制条交给播放器自己：进度条、快进快退、播放/暂停都在
-                    // 这里。点画面出它、拖进度条也拖它。
+                    // 使用自定义控制栏：应用按钮与 Media3 播放控制共用一个播放器栏。
+                    setControllerLayoutId(com.adisplay.tv.R.layout.tv_player_control_view)
                     useController = true
                     controllerAutoShow = true
                     // 它一亮，我们那列按钮（传输控制 / 日志 / 结束投屏）跟着亮 ——
@@ -244,6 +220,31 @@ fun PlaybackScreen(
                     // 放视频时别让系统息屏。
                     keepScreenOn = true
                     player = exoPlayer
+
+                    // Media3 的默认快退/快进步长通常是 15 秒，这里统一成电视端文案
+                    // 对应的 10 秒。按钮仍属于 PlayerControlView，因此焦点导航与
+                    // 播放器控制栏保持一致。
+                    findViewById<View>(com.adisplay.tv.R.id.exo_rew)?.setOnClickListener {
+                        exoPlayer.seekTo((exoPlayer.currentPosition - 10_000L).coerceAtLeast(0L))
+                    }
+                    findViewById<View>(com.adisplay.tv.R.id.exo_ffwd)?.setOnClickListener {
+                        val duration = exoPlayer.duration
+                        val target = exoPlayer.currentPosition + 10_000L
+                        exoPlayer.seekTo(
+                            if (duration == C.TIME_UNSET || duration < 0L) target
+                            else target.coerceAtMost(duration)
+                        )
+                    }
+                    findViewById<View>(com.adisplay.tv.R.id.tv_log_button)?.apply {
+                        (this as? android.widget.Button)?.text = LocalStrings.current.logLabel
+                        contentDescription = LocalStrings.current.logLabel
+                        setOnClickListener { onShowLog() }
+                    }
+                    findViewById<View>(com.adisplay.tv.R.id.tv_end_button)?.apply {
+                        (this as? android.widget.Button)?.text = LocalStrings.current.endCasting
+                        contentDescription = LocalStrings.current.endCasting
+                        setOnClickListener { onExit() }
+                    }
                 }
             },
             modifier = Modifier.fillMaxSize(),

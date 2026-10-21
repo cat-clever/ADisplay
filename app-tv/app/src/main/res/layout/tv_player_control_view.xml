@@ -1,0 +1,99 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Android TV 播放器控制栏。
+
+    播放相关按钮交给 Media3 的 PlayerControlView 接管；日志与结束投屏是本应用
+    自己的动作，由 PlaybackScreen 在 PlayerView 创建后绑定。这样它们属于播放器
+    的同一条控制栏，不再另起一列 Compose 悬浮按钮。
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:background="#CC101418"
+    android:gravity="center_vertical"
+    android:orientation="horizontal"
+    android:paddingStart="20dp"
+    android:paddingTop="10dp"
+    android:paddingEnd="20dp"
+    android:paddingBottom="10dp">
+
+    <ImageButton
+        android:id="@id/exo_rew"
+        android:layout_width="52dp"
+        android:layout_height="52dp"
+        android:background="?android:attr/selectableItemBackground"
+        android:contentDescription="@string/player_rewind"
+        android:src="@drawable/exo_icon_rew"
+        android:focusable="true" />
+
+    <ImageButton
+        android:id="@id/exo_play"
+        android:layout_width="60dp"
+        android:layout_height="60dp"
+        android:background="?android:attr/selectableItemBackground"
+        android:contentDescription="@string/player_play"
+        android:src="@drawable/exo_icon_play"
+        android:focusable="true" />
+
+    <ImageButton
+        android:id="@id/exo_pause"
+        android:layout_width="60dp"
+        android:layout_height="60dp"
+        android:background="?android:attr/selectableItemBackground"
+        android:contentDescription="@string/player_pause"
+        android:src="@drawable/exo_icon_pause"
+        android:focusable="true" />
+
+    <ImageButton
+        android:id="@id/exo_ffwd"
+        android:layout_width="52dp"
+        android:layout_height="52dp"
+        android:background="?android:attr/selectableItemBackground"
+        android:contentDescription="@string/player_forward"
+        android:src="@drawable/exo_icon_ffwd"
+        android:focusable="true" />
+
+    <TextView
+        android:id="@id/exo_position"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="12dp"
+        android:textColor="#FFFFFFFF"
+        android:textSize="14sp" />
+
+    <androidx.media3.ui.DefaultTimeBar
+        android:id="@id/exo_progress"
+        android:layout_width="0dp"
+        android:layout_height="36dp"
+        android:layout_weight="1"
+        app:bar_height="4dp"
+        app:touch_target_height="36dp" />
+
+    <TextView
+        android:id="@id/exo_duration"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginEnd="12dp"
+        android:textColor="#FFFFFFFF"
+        android:textSize="14sp" />
+
+    <Button
+        android:id="@+id/tv_log_button"
+        android:layout_width="wrap_content"
+        android:layout_height="52dp"
+        android:layout_marginStart="8dp"
+        android:focusable="true"
+        android:text="日志"
+        android:textAllCaps="false" />
+
+    <Button
+        android:id="@+id/tv_end_button"
+        android:layout_width="wrap_content"
+        android:layout_height="52dp"
+        android:layout_marginStart="8dp"
+        android:focusable="true"
+        android:text="结束投屏"
+        android:textAllCaps="false" />
+
+</LinearLayout>

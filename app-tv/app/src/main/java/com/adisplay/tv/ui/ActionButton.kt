@@ -124,9 +124,11 @@ fun ActionButton(
             // clickable 在前、focusable 在后：触摸点击走前者，
             // 遥控器的方向键走后者，两边都能触发 onClick。
             .clickable(enabled = enabled, onClick = onClick)
+            // focusRequester 必须包在 focusable 外面，才能稳定地找到这个焦点目标。
+            // 某些 Android TV / Compose 版本在顺序反过来时 requestFocus() 会失败。
+            .focusRequester(focusRequester)
             // 禁用时连焦点都不要给：能聚焦却按不动，用户会先怀疑遥控器坏了。
             .focusable(enabled = enabled)
-            .focusRequester(focusRequester)
             .onFocusChanged { focused = it.isFocused }
             .padding(
                 horizontal = if (compact) 16.dp else 28.dp,

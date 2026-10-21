@@ -23,11 +23,13 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.style.TextAlign
@@ -190,7 +192,14 @@ private fun ResumeBanner(
     //   点不到，只能去关服务。抢焦点在触屏上最多多一圈边框，代价远小于遥控器
     //   完全用不了。
     LaunchedEffect(Unit) {
-        resumeFocus.requestFocus()
+        // 横幅是覆盖层，首次组合时按钮可能还没有完成测量；等一帧后再请求，
+        // 并短暂重试，避免部分电视盒子上 requestFocus() 静默返回 false。
+        repeat(3) {
+            withFrameNanos { }
+            if (resumeFocus.requestFocus()) {
+                return@LaunchedEffect
+            }
+        }
     }
 
     val panel = modifier
@@ -254,7 +263,9 @@ private fun RowScope.BannerButtons(
         text = strings.resumeCasting,
         textStyle = layout.actionStyle,
         minWidth = 0.dp,
-        modifier = buttonModifier,
+        modifier = buttonModifier.focusProperties {
+            right = disconnectFocus
+        },
         focusRequester = resumeFocus,
         onClick = { model.resumeCasting() },
     )
@@ -263,7 +274,9 @@ private fun RowScope.BannerButtons(
         text = strings.disconnectCasting,
         textStyle = layout.actionStyle,
         minWidth = 0.dp,
-        modifier = buttonModifier,
+        modifier = buttonModifier.focusProperties {
+            left = resumeFocus
+        },
         focusRequester = disconnectFocus,
         onClick = { model.disconnectCasting() },
     )
@@ -468,11 +481,14 @@ private fun StandbyContent(model: EngineModel, onShowLog: () -> Unit) {
     val configuration = LocalConfiguration.current
     val layout = resolveStandbyLayout(configuration.screenWidthDp)
     val inputMode = rememberInputMode()
+    val strings = LocalStrings.current
 
     val buttonFocus = remember { FocusRequester() }
     val logFocus = remember { FocusRequester() }
     val renameFocus = remember { FocusRequester() }
     val hotspotFocus = remember { FocusRequester() }
+    val settingsFocus = remember { FocusRequester() }
+    var advancedOpen by remember { mutableStateOf(false) }
 
     Surface(modifier = Modifier.fillMaxSize()) {
         Column(
@@ -560,15 +576,32 @@ private fun StandbyContent(model: EngineModel, onShowLog: () -> Unit) {
 
                 Spacer(modifier = Modifier.height(layout.spacingMedium))
 
-                QualityRow(model = model, layout = layout)
+                // 主页面默认只保留“开始接收”和常用入口，画质、语言、网卡等低频
+                // 选项收进可展开区域。电视上不用每次进来都穿过一整页设置，焦点
+                // 导航也更短；展开后仍按原顺序保留全部功能。
+                ActionButton(
+                    text = if (advancedOpen) strings.lessSettings else strings.moreSettings,
+                    textStyle = layout.actionStyle,
+                    minWidth = 0.dp,
+                    modifier = Modifier.widthIn(min = 220.dp),
+                    focusRequester = settingsFocus,
+                    selected = advancedOpen,
+                    onClick = { advancedOpen = !advancedOpen },
+                )
 
-                Spacer(modifier = Modifier.height(layout.spacingLoose))
+                if (advancedOpen) {
+                    Spacer(modifier = Modifier.height(layout.spacingLoose))
 
-                LanguageRow(model = model, layout = layout)
+                    QualityRow(model = model, layout = layout)
 
-                Spacer(modifier = Modifier.height(layout.spacingLoose))
+                    Spacer(modifier = Modifier.height(layout.spacingLoose))
 
-                BroadcastRow(model = model, layout = layout)
+                    LanguageRow(model = model, layout = layout)
+
+                    Spacer(modifier = Modifier.height(layout.spacingLoose))
+
+                    BroadcastRow(model = model, layout = layout)
+                }
 
                 Spacer(modifier = Modifier.height(layout.spacingLoose))
 
@@ -579,7 +612,6 @@ private fun StandbyContent(model: EngineModel, onShowLog: () -> Unit) {
                 // 每行会太长而不便阅读。
                 // 提示文案按输入方式区分：用户拿遥控器时提醒他按确定键，
                 // 拿手机时提醒他点击。写反了会让人对着屏幕按半天。
-                val strings = LocalStrings.current
                 val hintLead = if (inputMode == InputMode.Remote) {
                     strings.hintRemoteLead
                 } else {
@@ -619,41 +651,43 @@ private fun StandbyContent(model: EngineModel, onShowLog: () -> Unit) {
                 // 只能跳设置页让用户自己按：真热点是系统签名级权限，应用开不了（见
                 // EngineModel.openHotspotSettings）。所以这一块的重点是把「接下来该
                 // 干什么」说清楚，而不是指望点了就自动开。
-                Spacer(modifier = Modifier.height(layout.spacingLoose))
-
-                Text(
-                    text = LocalStrings.current.hotspotLead,
-                    style = layout.bodyStyle,
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .widthIn(max = 900.dp)
-                )
-
-                Spacer(modifier = Modifier.height(layout.spacingTight))
-
-                ActionButton(
-                    text = LocalStrings.current.openHotspotSettings,
-                    textStyle = layout.actionStyle,
-                    minWidth = 0.dp,
-                    focusRequester = hotspotFocus,
-                    onClick = { model.openHotspotSettings() },
-                )
-
-                // 三个候选页面都跳不到时的那句话。@Composable 里不留这个状态：它要
-                // 同时进日志，所以放在模型里（与其它失败提示一个去处）。
-                if (model.hotspotNote.isNotEmpty()) {
-                    Spacer(modifier = Modifier.height(layout.spacingTight))
+                if (advancedOpen) {
+                    Spacer(modifier = Modifier.height(layout.spacingLoose))
 
                     Text(
-                        text = model.hotspotNote,
+                        text = LocalStrings.current.hotspotLead,
                         style = layout.bodyStyle,
-                        color = Color(0xFFFF8A80),
                         textAlign = TextAlign.Center,
                         modifier = Modifier
                             .fillMaxWidth()
                             .widthIn(max = 900.dp)
                     )
+
+                    Spacer(modifier = Modifier.height(layout.spacingTight))
+
+                    ActionButton(
+                        text = LocalStrings.current.openHotspotSettings,
+                        textStyle = layout.actionStyle,
+                        minWidth = 0.dp,
+                        focusRequester = hotspotFocus,
+                        onClick = { model.openHotspotSettings() },
+                    )
+
+                    // 三个候选页面都跳不到时的那句话。@Composable 里不留这个状态：它要
+                    // 同时进日志，所以放在模型里（与其它失败提示一个去处）。
+                    if (model.hotspotNote.isNotEmpty()) {
+                        Spacer(modifier = Modifier.height(layout.spacingTight))
+
+                        Text(
+                            text = model.hotspotNote,
+                            style = layout.bodyStyle,
+                            color = Color(0xFFFF8A80),
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .widthIn(max = 900.dp)
+                        )
+                    }
                 }
             }
         }

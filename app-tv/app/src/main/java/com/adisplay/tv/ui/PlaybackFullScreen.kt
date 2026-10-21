@@ -181,10 +181,10 @@ fun PlaybackFullScreen(
 
     // 收起时把焦点交给「接键层」，遥控器按任意键都能把控件叫回来；
     // 显示时交给「结束投屏」，用户按确定就能退出。
-    LaunchedEffect(controlsVisible) {
-        if (controlsVisible) {
+    LaunchedEffect(controlsVisible, transport != null) {
+        if (controlsVisible && transport != null) {
             stopFocus.requestFocus()
-        } else {
+        } else if (!controlsVisible) {
             catchFocus.requestFocus()
         }
     }
@@ -292,7 +292,9 @@ fun PlaybackFullScreen(
         // 不排底部：播放器自己的进度条与快进快退就在屏幕最下面，两条挤在一起
         // 既看不清也点不准。竖排还有个好处 —— 拇指 / 遥控器上下走一遍就能全过。
         AnimatedVisibility(
-            visible = active && controlsVisible,
+            // 视频播放页把按钮放进 PlayerView 的原生控制栏；只有镜像页没有
+            // PlayerView，才显示这组 Compose 悬浮按钮。
+            visible = active && controlsVisible && transport != null,
             enter = fadeIn(),
             exit = fadeOut(),
             modifier = Modifier.align(Alignment.CenterEnd),

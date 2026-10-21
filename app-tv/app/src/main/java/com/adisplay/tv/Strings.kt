@@ -61,6 +61,8 @@ abstract class Strings {
     abstract val stopReceiving: String
     abstract val viewLog: String
     abstract val rename: String
+    abstract val moreSettings: String
+    abstract val lessSettings: String
     abstract val mirrorQuality: String
     abstract val qualitySmooth: String
     abstract val qualityBalanced: String
@@ -182,6 +184,8 @@ object ChineseStrings : Strings() {
     override val stopReceiving = "关闭接收服务"
     override val viewLog = "查看日志"
     override val rename = "修改名称"
+    override val moreSettings = "更多设置"
+    override val lessSettings = "收起设置"
     override val mirrorQuality = "镜像画质"
     override val qualitySmooth = "流畅"
     override val qualityBalanced = "均衡"
@@ -275,6 +279,8 @@ object EnglishStrings : Strings() {
     override val stopReceiving = "Stop receiving"
     override val viewLog = "View log"
     override val rename = "Rename"
+    override val moreSettings = "More settings"
+    override val lessSettings = "Hide settings"
     override val mirrorQuality = "Mirror quality"
     override val qualitySmooth = "Smooth"
     override val qualityBalanced = "Balanced"
