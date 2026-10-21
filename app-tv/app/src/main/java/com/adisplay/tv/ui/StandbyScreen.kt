@@ -38,6 +38,7 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.tv.material3.MaterialTheme
+import androidx.tv.material3.Surface
 import androidx.tv.material3.Text
 import com.adisplay.tv.EngineModel
 import com.adisplay.tv.Language
@@ -491,10 +492,8 @@ private fun StandbyContent(model: EngineModel, onShowLog: () -> Unit) {
     val settingsFocus = remember { FocusRequester() }
     var advancedOpen by remember { mutableStateOf(false) }
 
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Color(0xFF080D14)),
+    Surface(
+        modifier = Modifier.fillMaxSize(),
     ) {
         Column(
             modifier = Modifier
@@ -560,7 +559,7 @@ private fun StandbyContent(model: EngineModel, onShowLog: () -> Unit) {
                             text = model.statusText,
                             style = layout.statusStyle,
                             textAlign = TextAlign.Center,
-                            color = Color.White.copy(alpha = 0.72f),
+                            color = Color.White.copy(alpha = 0.90f),
                         )
                     }
                 }
