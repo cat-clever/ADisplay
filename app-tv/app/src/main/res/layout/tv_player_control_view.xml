@@ -56,11 +56,25 @@
         android:textColor="#FFFFFFFF"
         android:textSize="14sp" />
 
+    <!--
+        进度条必须**不可聚焦**。
+
+        DefaultTimeBar 在自己的构造函数里 setFocusable(true)，并且在 onKeyDown 里
+        吃掉方向键的左右（用来拖动进度）。而这条控制栏是单行横排 —— 焦点一旦落到
+        它身上，左右键就变成「拖进度」，再也走不到它右边的「日志 / 结束投屏」，
+        遥控器用户等于按不到那两个按钮（2026-10-22 用户报的现象）。
+
+        设成不可聚焦之后：方向键在 rew → 播放 → ffwd → 日志 → 结束投屏 之间正常
+        移动；触摸拖动进度条不受影响（focusable 只管焦点，不管触摸）。遥控器要
+        快进快退仍可以用两侧的 ±10 秒按钮，手机上的进度条也一直在。
+    -->
     <androidx.media3.ui.DefaultTimeBar
         android:id="@id/exo_progress"
         android:layout_width="0dp"
         android:layout_height="36dp"
         android:layout_weight="1"
+        android:focusable="false"
+        android:focusableInTouchMode="false"
         app:bar_height="4dp"
         app:touch_target_height="36dp" />
 

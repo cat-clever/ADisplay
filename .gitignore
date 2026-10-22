@@ -19,3 +19,7 @@ tmp_apk/
 __pycache__/
 *.pyc
 .icons-build
+
+# 本机的 agent 技能包与本地配置，不属于产品代码。
+.agents/
+.claude/
